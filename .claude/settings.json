@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit:*)",
+            "command": "cmd=$(jq -r '.tool_input.command'); printf '%s' \"$cmd\" | grep -qE '(^|[[:space:]&|;])git[[:space:]]+commit([[:space:]]|$)' || exit 0; printf '%s' \"$cmd\" | grep -qiE 'co-authored-by.*anthropic\\.com' && printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"This commit message contains a Co-Authored-By trailer referencing anthropic.com. This repository forbids the Claude/Anthropic co-author trailer (see CLAUDE.md). Remove the trailer line from the commit message and retry.\"}}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

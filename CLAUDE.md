@@ -133,6 +133,8 @@ It also offers `ensure!` macros, which are like `assert!` but return an error in
 
 You can assume that the `gh` CLI is available to you to interact with Github. You can use the `git` CLI as needed, however you are strictly prohibited from staging, unstaging, committing, or revering any files under source control unless you have been explicitly asked to do so.
 
+**Never** add a `Co-Authored-By: Claude ...` or any `Co-Authored-By: ... @anthropic.com` trailer to commit messages or PR descriptions in this repository. This applies to commits you author directly, squash-merge commit bodies, and PR descriptions. Do not include the trailer even if a default workflow or template suggests it. The repo's contributors graph is polluted by these trailers, so they are forbidden here. A `PreToolUse` hook in `.claude/settings.json` will block any `git commit` invocation that includes the trailer; the hook is a backstop, not a license to attempt the commit.
+
 ## Instructions
 
 ### Build & Run Commands
