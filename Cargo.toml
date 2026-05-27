@@ -28,7 +28,7 @@ ctrlc              = "3.5"
 etcetera           = "0.10.0"
 figment            = { version = "0.10.19", features = ["toml", "env"] }
 flate2             = "1.1.9"
-gix                = { version = "0.83", features = ["blocking-http-transport-curl-openssl", "max-performance-safe", "worktree-mutation"] }
+gix                = { version = "0.84", features = ["blocking-http-transport-curl-openssl", "max-performance-safe", "worktree-mutation"] }
 home               = "0.5.11"
 httpmock           = "0.8.2"
 humantime          = "2.1"
