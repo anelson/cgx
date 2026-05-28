@@ -6,8 +6,16 @@ changelog_config = "cliff.toml"
 # enable changelog updates
 changelog_update = true
 
-# update dependencies with `cargo update`
-dependencies_update = true
+# Do NOT run a free-form `cargo update` when generating the release PR.
+# With this on, release-plz re-resolves the entire lockfile and picks the
+# latest compatible version for every transitive dep, which can pull in
+# crates whose MSRV exceeds our pinned toolchain (see rust-toolchain.toml
+# and the `toolchain: 1.85.1` pins in ci.yml). This is the exact opposite
+# of what we want.  The assumption if we're making a release is that the
+# current `master` is healthy, passing tests, and should be released verbatim.
+# That means with all of the dependencies locked to the version they had when
+# the last `master` build with all of its checked passed successfully.
+dependencies_update = false
 
 # Disable tags globally - only the main package will create a tag
 git_tag_enable = false

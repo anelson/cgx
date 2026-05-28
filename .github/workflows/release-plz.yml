@@ -54,5 +54,10 @@ jobs:
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the PAT, not GITHUB_TOKEN, so the PR-open and PR-update events
+          # actually fire workflow runs. GitHub's recursive-loop safeguard
+          # suppresses `pull_request` events caused by the default GITHUB_TOKEN,
+          # which would leave the release PR with no CI checks and therefore
+          # unmergeable under the required-status branch protection.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

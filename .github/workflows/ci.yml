@@ -20,21 +20,39 @@ jobs:
   #   which automatically triggers the full CI path instead of the minimal one
   # - Therefore, the minimal CI checks ONLY apply to 100% pure dependabot-originated commits
   # - Workflows run from the base branch, so malicious PRs cannot modify this detection logic
+  #
+  # Security model for release-plz PRs:
+  # - We detect by head-branch prefix `release-plz-*` rather than actor, because release-plz now
+  #   opens PRs under the PAT identity (RELEASE_PLZ_TOKEN, owned by a human account), which is not
+  #   in the [bot] namespace and would collide with the owner's own dev PRs if used for detection.
+  # - Branch names are spoofable, but the loosening is bounded: a spoofed `release-plz-evil` PR
+  #   routes to the lightweight `cargo check` path instead of the full matrix, but cannot land
+  #   without a human approving review (required by branch protection). So unreviewed code cannot
+  #   be merged regardless of which CI path it took.
+  # - As with dependabot, the workflow definition itself is read from the base branch, so a PR
+  #   cannot rewrite the detection logic.
   detect-pr-type:
     name: Detect PR Type
     runs-on: ubuntu-24.04
     outputs:
       is-dependabot: ${{ steps.check.outputs.is-dependabot }}
+      is-release-plz: ${{ steps.check.outputs.is-release-plz }}
     steps:
-      - name: Check if PR is from dependabot
+      - name: Check PR origin
         id: check
         run: |
-          if [ "${{ github.actor }}" == "dependabot[bot]" ]; then
+          if [[ "${{ github.head_ref }}" == release-plz-* ]]; then
+            echo "is-release-plz=true" >> $GITHUB_OUTPUT
+            echo "is-dependabot=false" >> $GITHUB_OUTPUT
+            echo "Detected release-plz PR - will use cargo check only"
+          elif [ "${{ github.actor }}" == "dependabot[bot]" ]; then
+            echo "is-release-plz=false" >> $GITHUB_OUTPUT
             echo "is-dependabot=true" >> $GITHUB_OUTPUT
             echo "Detected dependabot PR - will use minimal CI checks"
           else
+            echo "is-release-plz=false" >> $GITHUB_OUTPUT
             echo "is-dependabot=false" >> $GITHUB_OUTPUT
-            echo "Not a dependabot PR - will use full CI checks"
+            echo "Not a dependabot or release-plz PR - will use full CI checks"
           fi
 
   # Stage 1a: Minimal dependency checks for dependabot PRs (Linux amd64 only)
@@ -131,11 +149,38 @@ jobs:
       - name: Check compilation
         run: cargo check --workspace
 
+  # Stage 1c: Minimal check for release-plz PRs (Linux amd64 only)
+  # Release-plz PRs only edit Cargo.toml version numbers, Cargo.lock entries for
+  # those bumps, and CHANGELOG.md. They cannot change source code. A
+  # single `cargo check` is sufficient to catch the one real failure
+  # mode: a lockfile resolution that pulls in some dependency version
+  # that breaks the build, most likely because the new version's MSRV exceeds
+  # our pinned toolchain.  No other checks are needed, as the `master` branch
+  # upon which the release-plz branch is based is assumed to be green.
+  release-plz-check:
+    name: Release-plz Check (Linux amd64)
+    needs: detect-pr-type
+    if: needs.detect-pr-type.outputs.is-release-plz == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - *install-rust
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-unknown-linux-gnu
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Check compilation
+        run: cargo check --workspace --all-targets
+
   # Stage 1: Lint and Format Check on Linux amd64, which is the cheapest and quickest build for us
   lint:
     name: Lint and Format Check
     needs: detect-pr-type
-    if: needs.detect-pr-type.outputs.is-dependabot == 'false'
+    if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -191,7 +236,7 @@ jobs:
   test-linux-amd64:
     name: Test (Linux amd64)
     needs: [detect-pr-type, lint]
-    if: needs.detect-pr-type.outputs.is-dependabot == 'false'
+    if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -235,7 +280,7 @@ jobs:
   test-platforms:
     name: Test (${{ matrix.name }})
     needs: [detect-pr-type, test-linux-amd64]
-    if: needs.detect-pr-type.outputs.is-dependabot == 'false'
+    if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +328,7 @@ jobs:
   test-musl:
     name: Test (Linux musl)
     needs: [detect-pr-type, test-linux-amd64]
-    if: needs.detect-pr-type.outputs.is-dependabot == 'false'
+    if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     container:
       image: rust:1.85.1-alpine
@@ -325,7 +370,7 @@ jobs:
   test-platforms-extended:
     name: Test (${{ matrix.name }})
     needs: [detect-pr-type, test-linux-amd64, test-platforms]
-    if: needs.detect-pr-type.outputs.is-dependabot == 'false'
+    if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     strategy:
       fail-fast: false
       matrix:
@@ -370,6 +415,7 @@ jobs:
         detect-pr-type,
         dependabot-quick-check,
         dependabot-platform-check,
+        release-plz-check,
         test-linux-amd64,
         test-platforms,
         test-musl,
@@ -381,8 +427,16 @@ jobs:
       - name: Check appropriate tests passed
         run: |
           IS_DEPENDABOT="${{ needs.detect-pr-type.outputs.is-dependabot }}"
+          IS_RELEASE_PLZ="${{ needs.detect-pr-type.outputs.is-release-plz }}"
 
-          if [ "$IS_DEPENDABOT" == "true" ]; then
+          if [ "$IS_RELEASE_PLZ" == "true" ]; then
+            echo "Checking release-plz fast-path..."
+            if [ "${{ needs.release-plz-check.result }}" != "success" ]; then
+              echo "Release-plz check failed"
+              exit 1
+            fi
+            echo "Release-plz check passed"
+          elif [ "$IS_DEPENDABOT" == "true" ]; then
             echo "Checking minimal CI for dependabot PR..."
             # For dependabot PRs, only check the minimal jobs
             if [ "${{ needs.dependabot-quick-check.result }}" != "success" ] || \
