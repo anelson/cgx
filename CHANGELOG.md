@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.0.10] - 2026-05-28
+
+### 💼 Other
+
+- *(deps)* Bump sha2 from 0.10.9 to 0.11.0 ([#150](https://github.com/anelson-labs/cgx/pull/150))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.toml dependencies
+
+### 🛡️ Security
+
+- *(deps)* Bump gix from 0.80.0 to 0.83.0 ([#148](https://github.com/anelson-labs/cgx/pull/148))
 ## [0.0.9] - 2026-03-14
 
 ### 🚀 Features

@@ -20,8 +20,8 @@ build-context      = "0.1.4"
 bytes              = "1"
 bzip2              = "0.6.1"
 cargo_metadata     = "0.20.0"
-cgx                = { version = "0.0.9", path = "cgx" }
-cgx-core           = { version = "0.0.9", path = "cgx-core" }
+cgx                = { version = "0.0.10", path = "cgx" }
+cgx-core           = { version = "0.0.10", path = "cgx-core" }
 chrono             = { version = "0.4.44", features = ["serde"] }
 clap               = { version = "4.6.1", features = ["derive", "env", "string", "unicode"] }
 ctrlc              = "3.5"
