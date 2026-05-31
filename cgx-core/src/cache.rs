@@ -1,7 +1,7 @@
 use crate::{
     Result,
     bin_resolver::ResolvedBinary,
-    builder::BuildOptions,
+    builder::{BuildOptions, BuildTarget},
     config::{Config, UsePrebuiltBinaries},
     crate_resolver::{ResolvedCrate, ResolvedSource},
     cratespec::{CrateSpec, Forge, RegistrySource},
@@ -835,9 +835,7 @@ impl Cache {
     ///
     /// The binary name is deterministic based on the crate name and build target,
     /// with platform-specific extensions added automatically.
-    fn expected_binary_name(crate_name: &str, build_target: &crate::builder::BuildTarget) -> String {
-        use crate::builder::BuildTarget;
-
+    fn expected_binary_name(crate_name: &str, build_target: &BuildTarget) -> String {
         let base_name = match build_target {
             BuildTarget::DefaultBin => crate_name,
             BuildTarget::Bin(name) | BuildTarget::Example(name) => name.as_str(),

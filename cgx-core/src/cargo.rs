@@ -185,8 +185,6 @@ struct RealCargoRunner {
 
 impl CargoRunner for RealCargoRunner {
     fn metadata(&self, source_dir: &Path, options: &CargoMetadataOptions) -> Result<Metadata> {
-        use snafu::ResultExt;
-
         let mut cmd = cargo_metadata::MetadataCommand::new();
         cmd.cargo_path(&self.cargo_path).current_dir(source_dir);
 

@@ -626,6 +626,8 @@ mod tests {
     mod registry {
         use super::*;
         use crate::error::Error;
+        use rand::seq::SliceRandom;
+        use std::thread;
 
         #[test]
         fn serde_latest() {
@@ -932,9 +934,6 @@ mod tests {
         /// This reproduces: <https://github.com/EmbarkStudios/tame-index/issues/94>
         #[test]
         fn lock_contention_stress_test() {
-            use rand::seq::SliceRandom;
-            use std::thread;
-
             let crates = vec![
                 "serde",
                 "tokio",

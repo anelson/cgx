@@ -3,6 +3,7 @@ use serde_cyclonedx::cyclonedx::v_1_4::{
     Component, ComponentBuilder, CycloneDxBuilder, Dependency, DependencyBuilder, Metadata, MetadataBuilder,
     PropertyBuilder, ToolBuilder,
 };
+use std::collections::{HashMap, HashSet};
 
 // Re-export the CycloneDx type so callers don't depend on third-party crate
 pub(crate) use serde_cyclonedx::cyclonedx::v_1_4::CycloneDx;
@@ -84,9 +85,7 @@ impl DepKind {
 /// be included in the SBOM. Dev-only dependencies are excluded.
 fn analyze_dependencies(
     metadata: &cargo_metadata::Metadata,
-) -> std::collections::HashMap<cargo_metadata::PackageId, (usize, DepKind)> {
-    use std::collections::{HashMap, HashSet};
-
+) -> HashMap<cargo_metadata::PackageId, (usize, DepKind)> {
     let resolve = match &metadata.resolve {
         Some(r) => r,
         None => return HashMap::new(),
@@ -293,17 +292,11 @@ fn build_main_component(resolved: &ResolvedCrate, options: &BuildOptions) -> Res
 /// Build components for all dependencies from cargo metadata.
 fn build_dependency_components(
     metadata: &cargo_metadata::Metadata,
-) -> Result<(
-    Vec<Component>,
-    std::collections::HashMap<cargo_metadata::PackageId, DepKind>,
-)> {
-    use std::collections::HashMap;
-
+) -> Result<(Vec<Component>, HashMap<cargo_metadata::PackageId, DepKind>)> {
     let dep_analysis = analyze_dependencies(metadata);
 
     // Get workspace members to exclude them from dependencies
-    let workspace_member_ids: std::collections::HashSet<_> =
-        metadata.workspace_packages().iter().map(|p| &p.id).collect();
+    let workspace_member_ids: HashSet<_> = metadata.workspace_packages().iter().map(|p| &p.id).collect();
 
     // Collect packages that should be in SBOM
     let mut packages: Vec<(&cargo_metadata::Package, DepKind)> = metadata
@@ -380,7 +373,7 @@ fn build_dependency_graph(metadata: &cargo_metadata::Metadata) -> Result<Vec<Dep
     let mut dependencies = Vec::new();
 
     // Create a map of package ID to bom-ref
-    let package_id_to_ref: std::collections::HashMap<_, _> = metadata
+    let package_id_to_ref: HashMap<_, _> = metadata
         .packages
         .iter()
         .map(|p| {

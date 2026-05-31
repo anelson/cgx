@@ -5,7 +5,8 @@ use crate::{
     builder::{BuildOptions, BuildTarget},
     cache::Cache,
     config::{BinaryProvider, Config, UsePrebuiltBinaries},
-    crate_resolver::ResolvedCrate,
+    crate_resolver::{ResolvedCrate, ResolvedSource},
+    cratespec::RegistrySource,
     downloader::DownloadedCrate,
     error,
     http::HttpClient,
@@ -13,7 +14,10 @@ use crate::{
 };
 use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use snafu::ResultExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// A resolved binary means we found, downloaded, and validated a pre-built binary for a crate, so
 /// that we don't have to build it from source.
@@ -157,7 +161,6 @@ impl DefaultBinaryResolver {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&target_path)
                 .with_context(|_| error::IoSnafu {
                     path: target_path.clone(),
@@ -174,10 +177,7 @@ impl DefaultBinaryResolver {
     }
 
     /// Compute a hash of the source for use in the `bin_dir` structure.
-    fn compute_source_hash(source: &crate::crate_resolver::ResolvedSource) -> String {
-        use crate::{crate_resolver::ResolvedSource, cratespec::RegistrySource};
-        use sha2::{Digest, Sha256};
-
+    fn compute_source_hash(source: &ResolvedSource) -> String {
         let mut hasher = Sha256::new();
 
         match source {

@@ -12,6 +12,8 @@ use crate::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{collections::HashMap, path::PathBuf};
 
 pub(in crate::bin_resolver) struct BinstallProvider {
@@ -328,7 +330,6 @@ impl Provider for BinstallProvider {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&final_path)
                 .with_context(|_| error::IoSnafu {
                     path: final_path.clone(),

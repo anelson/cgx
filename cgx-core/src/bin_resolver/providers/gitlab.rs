@@ -12,6 +12,8 @@ use crate::{
 };
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 pub(in crate::bin_resolver) struct GitlabProvider {
@@ -244,7 +246,6 @@ impl Provider for GitlabProvider {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&final_path)
                 .with_context(|_| error::IoSnafu {
                     path: final_path.clone(),
