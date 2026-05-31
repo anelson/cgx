@@ -30,13 +30,5 @@ cgx eza -la
 
 This is a thin wrapper around cgx that provides cargo subcommand integration.
 
-For complete documentation on cgx's features, configuration, and usage, please see the [cgx crate documentation](https://docs.rs/cgx/).
-
-## License
-
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+For complete documentation on cgx's features, configuration, and usage, please see the [cgx crate
+documentation](https://docs.rs/cgx/) and the [project README](https://github.com/anelson-labs/cgx#readme).
