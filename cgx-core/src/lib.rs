@@ -19,6 +19,8 @@ pub(crate) mod sbom;
 #[cfg(test)]
 pub(crate) mod testdata;
 
+use std::sync::Arc;
+
 use bin_resolver::BinaryResolver;
 use builder::{BuildOptions, CrateBuilder};
 use cache::Cache;
@@ -28,7 +30,6 @@ use cratespec::CrateSpec;
 use downloader::CrateDownloader;
 use error::Result;
 use http::HttpClient;
-use std::sync::Arc;
 
 // Re-export this third-party crate type that is nonetheless part of this crate's public API
 pub use cargo_metadata::Target;

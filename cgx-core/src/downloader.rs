@@ -1,3 +1,9 @@
+use std::path::{Path, PathBuf};
+
+use semver::Version;
+use snafu::ResultExt;
+use toml::Value;
+
 use crate::{
     Result,
     cache::Cache,
@@ -9,10 +15,6 @@ use crate::{
     http::HttpClient,
     registry::{DownloadUrlLookup, RegistryClient},
 };
-use semver::Version;
-use snafu::ResultExt;
-use std::path::{Path, PathBuf};
-use toml::Value;
 
 /// A crate whose code is available locally on disk after downloading.
 ///
@@ -351,9 +353,10 @@ impl CrateDownloader for DefaultCrateDownloader {
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+
     use super::*;
     use crate::{Config, cargo::CargoRunner};
-    use assert_matches::assert_matches;
 
     /// Create a test downloader with online config and an isolated temp directory.
     ///

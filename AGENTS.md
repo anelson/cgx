@@ -32,6 +32,14 @@ This is a Rust CLI binary that combines functionality of `cargo install`, `cargo
 - Put `use` imports at module scope near the top of the module. Do not import types at function or local scope. In
   `mod tests`, put test imports inside the test module at the top. Imports from the same crate or module should be
   grouped with braces.
+- Arrange imports in three blocks separated by a single blank line, in this order: `std`/`core`/`alloc`, then external
+  crates, then first-party paths (`crate`/`self`/`super`). Within a block, merge all imports that share a crate root
+  into a single braced `use`.
+- Do not put blank lines between `use` statements. The only blank lines allowed in an import section are the single
+  blank line separating each of the three groups above. Inserting a stray blank line after the existing `use` lines
+  defeats rustfmt's ability to regroup and reorder imports, so never do it when adding a new import. This applies to
+  re-exports (`pub use ...`) too: do not try to visually separate them from plain imports, since rustfmt sorts them in
+  with everything else in their group.
 
 ### Error Reporting
 

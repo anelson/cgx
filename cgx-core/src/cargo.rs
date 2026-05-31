@@ -1,19 +1,20 @@
-use crate::{
-    Result,
-    builder::{BuildOptions, BuildTarget},
-    error,
-    messages::{BuildMessage, MessageReporter},
-};
-use snafu::{OptionExt, ResultExt};
 use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
 };
-use tracing::debug;
 
 pub(crate) use cargo_metadata::Metadata;
+use snafu::{OptionExt, ResultExt};
+use tracing::debug;
+
+use crate::{
+    Result,
+    builder::{BuildOptions, BuildTarget},
+    error,
+    messages::{BuildMessage, MessageReporter},
+};
 
 /// Verbosity level for cargo build operations.
 ///

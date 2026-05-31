@@ -1,12 +1,13 @@
-use crate::{Result, builder::BuildOptions, crate_resolver::ResolvedCrate};
-use serde_cyclonedx::cyclonedx::v_1_4::{
-    Component, ComponentBuilder, CycloneDxBuilder, Dependency, DependencyBuilder, Metadata, MetadataBuilder,
-    PropertyBuilder, ToolBuilder,
-};
 use std::collections::{HashMap, HashSet};
 
 // Re-export the CycloneDx type so callers don't depend on third-party crate
 pub(crate) use serde_cyclonedx::cyclonedx::v_1_4::CycloneDx;
+use serde_cyclonedx::cyclonedx::v_1_4::{
+    Component, ComponentBuilder, CycloneDxBuilder, Dependency, DependencyBuilder, Metadata, MetadataBuilder,
+    PropertyBuilder, ToolBuilder,
+};
+
+use crate::{Result, builder::BuildOptions, crate_resolver::ResolvedCrate};
 
 /// Generate a `CycloneDX` SBOM from cargo metadata.
 ///
@@ -451,15 +452,17 @@ fn build_metadata(main_component: &Component) -> Result<Metadata> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::path::Path;
+
+    use serde_cyclonedx::cyclonedx::v_1_4::CycloneDx;
+    use snafu::ResultExt;
+
     use super::*;
     use crate::{
         cargo::{CargoMetadataOptions, CargoRunner},
         crate_resolver::ResolvedSource,
         testdata::CrateTestCase,
     };
-    use serde_cyclonedx::cyclonedx::v_1_4::CycloneDx;
-    use snafu::ResultExt;
-    use std::path::Path;
 
     /// Get a CargoRunner for testing.
     ///

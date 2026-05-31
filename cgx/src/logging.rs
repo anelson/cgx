@@ -1,4 +1,5 @@
 use std::{io::IsTerminal, sync::OnceLock};
+
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 

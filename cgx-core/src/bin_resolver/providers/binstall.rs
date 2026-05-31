@@ -1,3 +1,11 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::{collections::HashMap, path::PathBuf};
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
@@ -9,12 +17,6 @@ use crate::{
     http::{Bytes, HttpClient},
     messages::PrebuiltBinaryMessage,
 };
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::{collections::HashMap, path::PathBuf};
 
 pub(in crate::bin_resolver) struct BinstallProvider {
     reporter: crate::messages::MessageReporter,
@@ -351,10 +353,12 @@ impl Provider for BinstallProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use semver::Version;
+
     use super::*;
     use crate::{crate_resolver::ResolvedSource, cratespec::Forge, error::Error};
-    use semver::Version;
-    use std::fs;
 
     #[test]
     fn render_template_basic() {

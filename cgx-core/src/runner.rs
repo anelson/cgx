@@ -10,14 +10,16 @@
 //! The `run()` function never returns on success - it either replaces the process (Unix)
 //! or exits with the child's exit code (Windows/other).
 
-#[cfg(windows)]
-use crate::error;
-use crate::error::{Error, Result};
-#[cfg(windows)]
-use snafu::ResultExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{ffi::OsString, path::Path, process::Command};
+
+#[cfg(windows)]
+use snafu::ResultExt;
+
+#[cfg(windows)]
+use crate::error;
+use crate::error::{Error, Result};
 
 /// Run a binary, replacing or waiting for it depending on platform.
 ///

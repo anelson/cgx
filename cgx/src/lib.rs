@@ -1,21 +1,11 @@
 pub mod logging;
 mod reporter;
 
-use cgx_core::{
-    Target,
-    builder::BuildOptions,
-    cli::{CliArgs, MessageFormat},
-    config::Config,
-    cratespec::CrateSpec,
-    error,
-};
 use std::ffi::OsString;
 
-// Re-export key types from cgx-core for convenience
-pub use cgx_core::{
-    cli,
-    error::{Error, Result},
-};
+/// Re-export of the snafu [`snafu::Report`] type so that callers can refer to this type without
+/// taking an explicit snafu dep
+pub use snafu::Report as SnafuReport;
 
 /// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
 ///
@@ -24,10 +14,19 @@ pub use cgx_core::{
 /// interface, please open an issue with your use case for discussion.
 #[doc(hidden)]
 pub use cgx_core::messages;
-
-/// Re-export of the snafu [`snafu::Report`] type so that callers can refer to this type without
-/// taking an explicit snafu dep
-pub use snafu::Report as SnafuReport;
+use cgx_core::{
+    Target,
+    builder::BuildOptions,
+    cli::{CliArgs, MessageFormat},
+    config::Config,
+    cratespec::CrateSpec,
+    error,
+};
+// Re-export key types from cgx-core for convenience
+pub use cgx_core::{
+    cli,
+    error::{Error, Result},
+};
 
 /// Main entry point for the `cgx` engine.
 ///

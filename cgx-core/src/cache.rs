@@ -1,3 +1,18 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+use tracing::*;
+
 use crate::{
     Result,
     bin_resolver::ResolvedBinary,
@@ -9,19 +24,6 @@ use crate::{
     error,
     messages::{BuildCacheMessage, CrateResolutionMessage, PrebuiltBinaryMessage, SourceMessage},
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-use std::{
-    collections::hash_map::DefaultHasher,
-    fs,
-    hash::{Hash, Hasher},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
-use tracing::*;
 
 /// A cache entry wrapping a value with timestamp metadata.
 ///
@@ -857,12 +859,14 @@ struct CacheInner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{cell::RefCell, rc::Rc, time::Duration};
+
     use assert_matches::assert_matches;
     use semver::Version;
     use snafu::IntoError;
-    use std::{cell::RefCell, rc::Rc, time::Duration};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn test_cache() -> (Cache, TempDir) {
         test_cache_with_timeout(Duration::from_secs(3600))

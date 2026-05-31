@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
 use super::Message;
 use crate::git::GitSelector;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Messages related to git operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]

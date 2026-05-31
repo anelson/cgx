@@ -1,6 +1,8 @@
-use super::Message;
-use serde::{Deserialize, Serialize};
 use std::{ffi::OsString, path::PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use super::Message;
 
 /// Messages related to binary execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]

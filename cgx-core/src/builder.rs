@@ -1,3 +1,8 @@
+use std::{borrow::Cow, path::PathBuf, sync::Arc};
+
+use cargo_metadata::Target;
+use snafu::ResultExt;
+
 use crate::{
     Result,
     cache::Cache,
@@ -8,9 +13,6 @@ use crate::{
     downloader::DownloadedCrate,
     error,
 };
-use cargo_metadata::Target;
-use snafu::ResultExt;
-use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
 /// Which executable within a crate to build.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -570,6 +572,11 @@ impl RealCrateBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::Path};
+
+    use assert_matches::assert_matches;
+    use semver::Version;
+
     use super::*;
     use crate::{
         cargo::find_cargo,
@@ -577,9 +584,6 @@ mod tests {
         error::Error,
         testdata::CrateTestCase,
     };
-    use assert_matches::assert_matches;
-    use semver::Version;
-    use std::{fs, path::Path};
 
     fn test_builder() -> (RealCrateBuilder, tempfile::TempDir) {
         crate::logging::init_test_logging();

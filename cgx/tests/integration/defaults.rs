@@ -1,10 +1,11 @@
 //! Tests that do not override any config settings and verify the default behavior of cgx
 
-use crate::utils::{Cgx, CommandExt};
 use cgx::messages::{
     BuildCacheMessage, CrateResolutionMessage, Message, PrebuiltBinaryMessage, RunnerMessage, SourceMessage,
 };
 use predicates::prelude::*;
+
+use crate::utils::{Cgx, CommandExt};
 
 /// Test running a crate that publishes pre-built binaries (eza).
 ///

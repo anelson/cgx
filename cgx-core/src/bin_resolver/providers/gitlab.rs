@@ -1,3 +1,10 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use super::{ArchiveFormat, CandidateFilename, Provider};
 use crate::{
     Result,
@@ -10,11 +17,6 @@ use crate::{
     http::{Bytes, HttpClient},
     messages::PrebuiltBinaryMessage,
 };
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
 pub(in crate::bin_resolver) struct GitlabProvider {
     reporter: crate::messages::MessageReporter,
@@ -267,11 +269,13 @@ impl Provider for GitlabProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use semver::Version;
+    use url::Url;
+
     use super::*;
     use crate::{crate_resolver::ResolvedSource, cratespec::Forge};
-    use semver::Version;
-    use std::fs;
-    use url::Url;
 
     #[test]
     fn test_url_generation_includes_version_patterns() {

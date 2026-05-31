@@ -6,7 +6,6 @@ pub mod prebuilt_binary;
 pub mod runner;
 pub mod source;
 
-use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
 
 pub use build::BuildMessage;
@@ -15,6 +14,7 @@ pub use crate_resolution::CrateResolutionMessage;
 pub use git::GitMessage;
 pub use prebuilt_binary::PrebuiltBinaryMessage;
 pub use runner::RunnerMessage;
+use serde::{Deserialize, Serialize};
 pub use source::SourceMessage;
 
 // Re-export GitSelector since it's used in GitMessage's public API

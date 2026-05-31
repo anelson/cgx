@@ -3,12 +3,13 @@
 //! These tests explicitly set --prebuilt-binary flags to test non-default behavior,
 //! disqualification scenarios, cache interactions, and config overrides.
 
-use crate::utils::{Cgx, CommandExt};
 use cgx::messages::{
     BuildCacheMessage, BuildMessage, CrateResolutionMessage, Message, PrebuiltBinaryMessage, SourceMessage,
 };
 use cgx_core::config::BinaryProvider;
 use predicates::prelude::*;
+
+use crate::utils::{Cgx, CommandExt};
 
 /// Test that `--prebuilt-binary never` forces building from source even when binaries exist.
 #[test]

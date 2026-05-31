@@ -1,5 +1,13 @@
 mod providers;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use crate::{
     Result,
     builder::{BuildOptions, BuildTarget},
@@ -12,12 +20,6 @@ use crate::{
     http::HttpClient,
     messages::PrebuiltBinaryMessage,
 };
-use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 /// A resolved binary means we found, downloaded, and validated a pre-built binary for a crate, so
 /// that we don't have to build it from source.

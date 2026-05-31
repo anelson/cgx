@@ -1,4 +1,9 @@
-use crate::{Result, cli::CliArgs};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use figment::{
     Figment,
@@ -6,12 +11,9 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    time::Duration,
-};
 use strum::{Display, EnumIter, EnumString, IntoStaticStr, VariantNames};
+
+use crate::{Result, cli::CliArgs};
 
 const DEFAULT_RESOLVE_CACHE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -705,8 +707,9 @@ pub(crate) fn create_test_env() -> (tempfile::TempDir, Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
+    use super::*;
 
     /// Apply test-local config directory overrides so config loading cannot read
     /// host-level `/etc/cgx.toml` or user-level cgx config on the machine running tests.
@@ -906,9 +909,11 @@ mod tests {
     }
 
     mod prebuilt_validation_tests {
-        use super::*;
-        use assert_matches::assert_matches;
         use std::io::Write;
+
+        use assert_matches::assert_matches;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -967,8 +972,9 @@ mod tests {
     /// `testdata/configs` contains test config files constructed specificially to facilitate these
     /// tests
     mod hierarchy_tests {
-        use super::*;
         use assert_matches::assert_matches;
+
+        use super::*;
 
         /// Test loading config from a 3-level hierarchy (root → work → project1).
         ///
@@ -1180,8 +1186,9 @@ mod tests {
     }
 
     mod config_file_discovery_tests {
-        use super::*;
         use std::fs;
+
+        use super::*;
 
         /// Test that [`discover_config_files`] returns only the explicit file when --config-file is
         /// set.
@@ -1290,8 +1297,9 @@ mod tests {
     }
 
     mod override_tests {
-        use super::*;
         use std::fs;
+
+        use super::*;
 
         mod system_config_dir_tests {
             use super::*;
@@ -1727,9 +1735,11 @@ mod tests {
     }
 
     mod build_http_config_tests {
-        use super::*;
-        use assert_matches::assert_matches;
         use std::io::Write;
+
+        use assert_matches::assert_matches;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -1953,9 +1963,11 @@ mod tests {
     }
 
     mod build_http_config_env_tests {
-        use super::*;
-        use sealed_test::prelude::*;
         use std::io::Write;
+
+        use sealed_test::prelude::*;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -2168,8 +2180,9 @@ mod tests {
     }
 
     mod error_tests {
-        use super::*;
         use assert_matches::assert_matches;
+
+        use super::*;
 
         #[test]
         fn test_invalid_toml_syntax() {

@@ -1,11 +1,12 @@
+use std::time::Duration;
+
+use backon::{BlockingRetryable, ExponentialBuilder};
 pub use bytes::Bytes;
+use reqwest::blocking::{Client, Response};
 pub use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use snafu::ResultExt;
 
 use crate::{Result, config::HttpConfig, error};
-use backon::{BlockingRetryable, ExponentialBuilder};
-use reqwest::blocking::{Client, Response};
-use snafu::ResultExt;
-use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -239,8 +240,9 @@ impl HttpClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert_matches::assert_matches;
+
+    use super::*;
 
     #[test]
     fn test_construction_with_defaults() {
@@ -378,8 +380,9 @@ mod tests {
     }
 
     mod classify_retryable_status_tests {
-        use super::*;
         use httpmock::prelude::*;
+
+        use super::*;
 
         #[test]
         fn test_get_200_returned_directly() {
@@ -519,8 +522,9 @@ mod tests {
     }
 
     mod try_download_tests {
-        use super::*;
         use httpmock::{HttpMockRequest, HttpMockResponse, prelude::*};
+
+        use super::*;
 
         #[test]
         fn test_try_download_200_returns_some_bytes() {
@@ -588,8 +592,9 @@ mod tests {
     }
 
     mod header_tests {
-        use super::*;
         use httpmock::{Method::HEAD, prelude::*};
+
+        use super::*;
 
         #[test]
         fn test_user_agent_header_sent() {

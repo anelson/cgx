@@ -9,19 +9,21 @@
 //! - Warm cache reuse when multiple commits from the same repo are used over time
 //! - Correct handling of submodules, filters, and line endings via native gix checkout
 
-use crate::{
-    cache::Cache,
-    config::HttpConfig,
-    messages::{GitMessage, MessageReporter},
-};
-use backon::{BlockingRetryable, ExponentialBuilder};
-use gix::{ObjectId, bstr::BString, protocol::transport::IsSpuriousError, remote::Direction};
-use serde::{Deserialize, Serialize};
-use snafu::{IntoError, ResultExt, prelude::*};
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
+};
+
+use backon::{BlockingRetryable, ExponentialBuilder};
+use gix::{ObjectId, bstr::BString, protocol::transport::IsSpuriousError, remote::Direction};
+use serde::{Deserialize, Serialize};
+use snafu::{IntoError, ResultExt, prelude::*};
+
+use crate::{
+    cache::Cache,
+    config::HttpConfig,
+    messages::{GitMessage, MessageReporter},
 };
 
 /// Errors specific to git operations
@@ -515,9 +517,10 @@ fn checkout_from_db(db_path: &Path, commit_oid: ObjectId, dest: &Path) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert_matches::assert_matches;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn test_git_client() -> (GitClient, TempDir) {
         let (temp_dir, config) = crate::config::create_test_env();
@@ -737,9 +740,11 @@ mod tests {
     /// ([`fetch_ref`], [`is_retryable_error`]) and their gix error types are `pub(crate)` and
     /// not part of cgx-core's public API.
     mod integration {
-        use super::*;
-        use httpmock::prelude::*;
         use std::time::Duration;
+
+        use httpmock::prelude::*;
+
+        use super::*;
 
         /// Returns an HTTP configuration with near-zero retry delays so retry behavior can be
         /// exercised without slowing the test suite down.

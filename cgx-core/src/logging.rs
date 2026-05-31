@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::sync::OnceLock;
+
 #[cfg(test)]
 use tracing_subscriber::{EnvFilter, fmt};
 

@@ -4,6 +4,7 @@
 //! This module is only built when tests are enabled.
 
 use std::path::{Path, PathBuf};
+
 use tempfile::TempDir;
 
 pub(crate) struct CrateTestCase {

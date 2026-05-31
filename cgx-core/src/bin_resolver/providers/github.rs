@@ -1,3 +1,11 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use super::Provider;
 use crate::{
     Result,
@@ -10,12 +18,6 @@ use crate::{
     http::{ACCEPT, AUTHORIZATION, Bytes, HeaderMap, HeaderValue, HttpClient},
     messages::PrebuiltBinaryMessage,
 };
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
 
 pub(in crate::bin_resolver) struct GithubProvider {
     reporter: crate::messages::MessageReporter,
@@ -343,11 +345,13 @@ impl Provider for GithubProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use semver::Version;
+    use url::Url;
+
     use super::*;
     use crate::{crate_resolver::ResolvedSource, cratespec::Forge};
-    use semver::Version;
-    use std::fs;
-    use url::Url;
 
     #[test]
     fn test_parse_owner_repo_standard() {

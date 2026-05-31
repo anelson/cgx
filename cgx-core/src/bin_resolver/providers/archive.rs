@@ -1,11 +1,13 @@
-use crate::{Result, error};
-use bzip2::read::BzDecoder;
-use flate2::read::GzDecoder;
-use snafu::ResultExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
+use snafu::ResultExt;
 use xz2::read::XzDecoder;
+
+use crate::{Result, error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::bin_resolver) enum ArchiveFormat {
@@ -245,17 +247,19 @@ fn is_executable(_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::Error;
-    use flate2::{Compression, write::GzEncoder};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::{
         fs,
         io::{Cursor, Write},
     };
+
+    use flate2::{Compression, write::GzEncoder};
     use xz2::write::XzEncoder;
     use zip::write::SimpleFileOptions;
+
+    use super::*;
+    use crate::error::Error;
 
     impl ArchiveFormat {
         fn suffix(&self) -> &'static str {

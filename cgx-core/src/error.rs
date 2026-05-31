@@ -1,6 +1,7 @@
+use std::path::PathBuf;
+
 pub use reqwest::StatusCode;
 use snafu::prelude::*;
-use std::path::PathBuf;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

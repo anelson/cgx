@@ -1,7 +1,9 @@
-use crate::{Result, error};
+use std::{fmt::Write, path::Path};
+
 use ignore::WalkBuilder;
 use snafu::ResultExt;
-use std::{fmt::Write, path::Path};
+
+use crate::{Result, error};
 
 /// Format a byte slice as a lowercase hex string.
 ///

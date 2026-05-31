@@ -1,7 +1,9 @@
-use crate::config::{BinaryProvider, UsePrebuiltBinaries};
-use clap::{ArgAction, CommandFactory, Parser, ValueEnum, builder::TypedValueParser};
 use std::{collections::HashSet, path::PathBuf};
+
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum, builder::TypedValueParser};
 use strum::VariantNames;
+
+use crate::config::{BinaryProvider, UsePrebuiltBinaries};
 
 /// Creates a clap value parser that uses strum's [`VariantNames`] for possible values
 /// and strum's [`FromStr`](std::str::FromStr) for parsing. This ensures:
@@ -709,6 +711,9 @@ impl CliArgs {
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+    use clap::{CommandFactory, Parser};
+
     use super::*;
     use crate::{
         Result,
@@ -717,8 +722,6 @@ mod tests {
         cratespec::{CrateSpec, Forge, RegistrySource},
         git::GitSelector,
     };
-    use assert_matches::assert_matches;
-    use clap::{CommandFactory, Parser};
 
     #[test]
     fn verify_cli() {

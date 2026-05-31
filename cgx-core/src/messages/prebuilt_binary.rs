@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
 use super::Message;
 use crate::{bin_resolver::ResolvedBinary, config::BinaryProvider, crate_resolver::ResolvedCrate};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Messages related to prebuilt binary resolution and binary resolution cache operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
