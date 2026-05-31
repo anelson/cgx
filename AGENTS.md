@@ -141,6 +141,7 @@ backstop, not permission to attempt the commit.
 - Run tests in one crate: `cargo test -p crate --all-features`
 - Run one test in one crate: `cargo test -p crate --all-features test_name`
 - Main compile/lint/doc check: `just vibecheck`
+- Apply all formatters/beautifiers to local code files: `just fmt`
 - Formatting check: `just fmtcheck`
 - Dependency checks: `just depcheck`
 - Full local precommit sweep: `just precommit`

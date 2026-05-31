@@ -126,11 +126,18 @@ fmtcheck:
     cargo fmt --check
     taplo fmt --check
 
+# Rules live in `.ast-grep/rules`; their self-tests live in `.ast-grep/rule-tests`. Assumes the `ast-grep` binary is
+# installed, like `just` and `taplo`.
+# Run the ast-grep structural lints that clippy cannot express (e.g. `use` must be at module scope) plus rule self-tests
+ast-grep:
+    ast-grep test --skip-snapshot-tests
+    ast-grep scan
+
 # Do a Rust "vibe check" (*cringe*) on the codebase
 # This is helpful for humans but it's mainly intended to provide a deterministic way for coding agents
 # to get feedback on their almost certainly shitty changes before wasting a human's time with their garbage code.
 # Run the generated workflow check plus Rust compile, clippy, and docs checks.
-vibecheck: check-dist-release-generated
+vibecheck: check-dist-release-generated ast-grep
     cargo check --all-targets --workspace
     cargo check --all-targets --all-features --workspace
     cargo clippy --all-targets --all-features -- -D warnings

@@ -13,6 +13,10 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# ast-grep test snapshot baselines. We run `ast-grep test --skip-snapshot-tests`, so these are never needed; this
+# keeps a stray `ast-grep test --update-all` from littering the tree.
+.ast-grep/**/__snapshots__/
+
 # We need a directory where we can just dump crap without contaminating the repository
 scrap/
 

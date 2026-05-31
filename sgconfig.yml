@@ -1,0 +1,9 @@
+# ast-grep configuration.
+#
+# ast-grep enforces structural lints that clippy cannot express. Run them with `just ast-grep` (or directly with
+# `ast-grep scan`). The rules live in `.ast-grep/rules`; their self-tests live in `.ast-grep/rule-tests` and run via
+# `ast-grep test`.
+ruleDirs:
+  - .ast-grep/rules
+testConfigs:
+  - testDir: .ast-grep/rule-tests
