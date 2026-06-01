@@ -40,12 +40,12 @@ impl GitlabProvider {
         }
     }
 
-    /// Get the repository URL for a crate, filtering for GitLab hosts.
+    /// Get the GitLab repository URL for a crate.
     ///
     /// If the crate came from a GitLab forge, the forge URL is used directly (handles the fork
     /// scenario where Cargo.toml may still point to the upstream). For all other sources
     /// (including non-GitLab forges), falls back to the `[package].repository` field in
-    /// Cargo.toml, filtered to GitLab hosts only.
+    /// Cargo.toml only when it is a `https://gitlab.com/...` URL.
     fn get_repo_url(krate: &DownloadedCrate) -> Result<Option<String>> {
         match &krate.resolved.source {
             ResolvedSource::Forge {
@@ -89,8 +89,8 @@ impl GitlabProvider {
 
     /// Probe a URL with a HEAD request to check if the asset exists.
     ///
-    /// Returns `Ok(true)` if the asset exists (200 response), `Ok(false)` if it doesn't
-    /// (404 or other non-success), or `Err` if a connection/timeout error occurred.
+    /// Returns `Ok(true)` for a successful HTTP status, `Ok(false)` for 404 or another
+    /// non-success response, or `Err` if the request could not be completed.
     /// The error case is used by the caller to bail early when the server is unreachable.
     fn head_probe(&self, url: &str) -> Result<bool> {
         let response = self.http_client.head(url)?;

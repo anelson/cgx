@@ -52,12 +52,12 @@ impl GithubProvider {
         }
     }
 
-    /// Get the repository URL for a crate, filtering for GitHub hosts.
+    /// Get the GitHub repository URL for a crate.
     ///
     /// If the crate came from a GitHub forge, the forge URL is used directly (handles the fork
     /// scenario where Cargo.toml may still point to the upstream). For all other sources
     /// (including non-GitHub forges), falls back to the `[package].repository` field in
-    /// Cargo.toml, filtered to GitHub hosts only.
+    /// Cargo.toml only when it is a `https://github.com/...` URL.
     fn get_repo_url(krate: &DownloadedCrate) -> Result<Option<String>> {
         match &krate.resolved.source {
             ResolvedSource::Forge {
@@ -103,7 +103,8 @@ impl GithubProvider {
     /// List release assets for a given tag from the GitHub Releases API.
     ///
     /// Returns a vec of `(asset_name, download_url)` pairs.
-    /// On any failure (network, non-200, parse error), returns an empty vec.
+    /// If the request fails, returns a non-success status, or cannot be parsed, treats the release
+    /// as having no usable assets.
     fn list_release_assets(
         &self,
         api_base: &str,

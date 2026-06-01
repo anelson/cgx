@@ -17,10 +17,8 @@ use crate::{
 /// Which executable within a crate to build.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BuildTarget {
-    /// No specific target was specified which means build the one and only binary target, or fail
-    /// if there are more than one.  Note that as of this writing, the "default" flag on binaries
-    /// isn't stabilized and thus isn't supported here, so if there are multiple binaries and one
-    /// was not explicitly selected, then this will fail.
+    /// No specific target was requested. cgx builds Cargo's default binary target, using
+    /// `default-run` when the package defines one.
     #[default]
     DefaultBin,
 
@@ -33,7 +31,7 @@ pub enum BuildTarget {
 
 /// Options that control how a crate is built.
 ///
-/// These options map to flags passed to `cargo build` (or `cargo install`).
+/// These options map to flags passed to `cargo build`.
 /// They are orthogonal to the crate identity and location (see [`crate::CrateSpec`]),
 /// focusing instead on build configuration, feature selection, and compilation settings.
 ///
@@ -90,8 +88,7 @@ pub struct BuildOptions {
 
     /// Rust toolchain override to use for this build (e.g., "nightly", "1.70.0", "stable").
     ///
-    /// When set, cargo will be invoked with `+{toolchain}` prefix, allowing rustup to
-    /// select the appropriate toolchain.
+    /// When set, Cargo is run through `rustup run <toolchain>`.
     pub toolchain: Option<String>,
 
     /// Verbosity level for cargo build output.
@@ -187,13 +184,12 @@ impl BuildOptions {
 }
 
 pub trait CrateBuilder {
-    /// List the targets in the given crate that can be build using [`Self::build`].
+    /// List the targets in the given crate that can be built using [`Self::build`].
     ///
-    /// [`Self::build`] can run any bin or example target in the crate.
+    /// [`Self::build`] can build any bin or example target in the crate.
     ///
     /// Returns a tuple of:
-    /// - The default target, if any (i.e., the one that would be built if no explicit target is
-    ///   specified)
+    /// - The package's explicit `default-run` target, if any
     /// - A list of all binary targets
     /// - A list of all example targets
     fn list_targets(
@@ -204,8 +200,9 @@ pub trait CrateBuilder {
 
     /// Produce a compiled binary from the given crate, using the specified build options.
     ///
-    /// Compiled crates are also cached, so this may or may not actually compile anything,
-    /// depending on the state of the cache and the config.
+    /// Builds from registry and git sources can be cached. Local directory builds run directly from
+    /// the local source tree.  So this may or may not actually compile anything,
+    /// depending on the crate source, the state of the cache, and the config.
     ///
     /// Returns the full path to the compiled binary on success.
     fn build(&self, krate: &DownloadedCrate, options: &BuildOptions) -> Result<PathBuf>;
@@ -492,7 +489,7 @@ impl RealCrateBuilder {
         Ok((binary_path, sbom))
     }
 
-    /// Prepare a build directory from which the crate can be build.
+    /// Prepare a build directory from which the crate can be built.
     ///
     /// If the crate is in a local path, then that path is returned directly, meaning what we will
     /// do is equivalent to running `cargo build --release` in that directory.
@@ -523,8 +520,8 @@ impl RealCrateBuilder {
         let temp_path = temp_dir.path().to_path_buf();
         crate::helpers::copy_source_tree(&krate.crate_path, &temp_path)?;
 
-        // If locked is false (--unlocked was passed), delete Cargo.lock
-        // to force cargo to resolve dependencies fresh
+        // If locked is false (--unlocked was passed), delete Cargo.lock from copied source builds
+        // to force Cargo to resolve dependencies fresh.
         if !options.locked {
             let lock_path = temp_path.join("Cargo.lock");
             if lock_path.exists() {
@@ -614,7 +611,8 @@ mod tests {
         LocalDir,
     }
 
-    /// Create a fake [`DownloadedCrate`] from a [`TestCase`] for testing different source types
+    /// Create a fake [`DownloadedCrate`] from a [`CrateTestCase`] for testing different source
+    /// types
     fn fake_downloaded_crate(
         tc: &CrateTestCase,
         source_type: FakeSourceType,
@@ -663,7 +661,7 @@ mod tests {
         }
     }
 
-    /// Read the SBOM file for a built binary from the cache
+    /// Return the SBOM path for a built binary in the cache.
     fn read_sbom_for_binary(binary_path: &Path) -> PathBuf {
         // SBOM is stored at same level as binary with name "sbom.cyclonedx.json"
         binary_path.parent().unwrap().join("sbom.cyclonedx.json")

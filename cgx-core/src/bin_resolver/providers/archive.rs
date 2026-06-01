@@ -200,10 +200,8 @@ fn extract_naked_binary(archive_path: &Path, binary_name: &str, dest_dir: &Path)
 
 /// Find a binary executable in a directory, searching common locations.
 ///
-/// Looks for:
-/// - `binary_name` or `binary_name.exe` in the root
-/// - `binary_name` or `binary_name.exe` in `bin/`
-/// - `binary_name` or `binary_name.exe` in `target/release/`
+/// Looks for the binary name with the current platform's executable suffix in the archive root,
+/// `bin/`, and `target/release/`.
 fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf> {
     let exe_suffix = std::env::consts::EXE_SUFFIX;
     let candidates = [

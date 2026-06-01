@@ -80,10 +80,10 @@ fn test_cargo_subcommand_with_version() {
         .stderr(predicates::str::is_match(r"cgx \d+\.\d+\.\d+").unwrap());
 }
 
-/// Test that cargo subcommand pattern works with a flag before a tool name
+/// Test that the cargo subcommand pattern works with cgx flags after the subcommand arg.
 ///
-/// This tests: `cargo cgx --no-exec ripgrep` which should be processed as
-/// `cgx --no-exec ripgrep` after stripping the "cgx" subcommand arg
+/// This tests: `cargo cgx --no-exec --help` which should be processed as
+/// `cgx --no-exec --help` after stripping the "cgx" subcommand arg.
 #[test]
 fn test_cargo_subcommand_with_flags_and_tool() {
     let mut cargo_cgx = CargoCgx::find();
