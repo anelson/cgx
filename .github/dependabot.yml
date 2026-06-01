@@ -7,13 +7,35 @@ updates:
     commit-message:
       prefix: "deps"
       include: "scope"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 20
+    # Defense against supply chain attacks: wait until a release has been public
+    # for 7 days before proposing an update. Malicious releases tend to be
+    # discovered and yanked relatively quickly, so a short delay lets the
+    # ecosystem catch most of them before we pull them in.
+    cooldown:
+      default-days: 7
+    # Batch routine minor/patch bumps into a single PR per ecosystem to cut PR
+    # and CI volume. Majors are left ungrouped so each gets its own PR to review.
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "daily"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 20
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
     exclude-paths:
       # This is managed by `cargo-dist`; if it gets modified by dependabot then
       #cargo-dist detects that and fails
