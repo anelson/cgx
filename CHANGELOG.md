@@ -6,11 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### 💼 Other
+
+- _(refactor)_ Move from `anelson-labs/cgx` to `anelson/cgx` ([#191](https://github.com/anelson/cgx/pull/191))
+
 ## [0.0.10] - 2026-05-28
 
 ### 💼 Other
 
-- *(deps)* Bump sha2 from 0.10.9 to 0.11.0 ([#150](https://github.com/anelson/cgx/pull/150))
+- _(deps)_ Bump sha2 from 0.10.9 to 0.11.0 ([#150](https://github.com/anelson/cgx/pull/150))
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -18,14 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🛡️ Security
 
-- *(deps)* Bump gix from 0.80.0 to 0.83.0 ([#148](https://github.com/anelson/cgx/pull/148))
+- _(deps)_ Bump gix from 0.80.0 to 0.83.0 ([#148](https://github.com/anelson/cgx/pull/148))
+
 ## [0.0.9] - 2026-03-14
 
 ### 🚀 Features
 
-- Add ability to resolve pre-built binaries for crates  ([#93](https://github.com/anelson/cgx/pull/93))
-- *(http)* Centralize HTTP client with retry, proxy, and timeout support ([#114](https://github.com/anelson/cgx/pull/114))
-- *(git)* Align gix HTTP behavior with cgx HTTP config and document curl runtime deps ([#128](https://github.com/anelson/cgx/pull/128))
+- Add ability to resolve pre-built binaries for crates ([#93](https://github.com/anelson/cgx/pull/93))
+- _(http)_ Centralize HTTP client with retry, proxy, and timeout support ([#114](https://github.com/anelson/cgx/pull/114))
+- _(git)_ Align gix HTTP behavior with cgx HTTP config and document curl runtime deps ([#128](https://github.com/anelson/cgx/pull/128))
 
 ### 📚 Documentation
 
@@ -34,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚙️ Miscellaneous Tasks
 
 - Update Cargo.toml dependencies
+
 ## [0.0.8] - 2025-11-16
 
 ### 🚀 Features
@@ -43,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚙️ Miscellaneous Tasks
 
 - Configure cargo-dist to exclude cargo-cgx from release text ([#65](https://github.com/anelson/cgx/pull/65))
+
 ## [0.0.7] - 2025-11-07
 
 ### 🚀 Features
@@ -52,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚙️ Miscellaneous Tasks
 
 - Do not try to use `cargo-auditable` when building `cgx` release bins ([#62](https://github.com/anelson/cgx/pull/62))
+
 ## [0.0.6] - 2025-11-06
 
 ### 🚀 Features
@@ -61,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚙️ Miscellaneous Tasks
 
 - Update Cargo.lock dependencies
+
 ## [0.0.5] - 2025-11-04
 
 ### 🚜 Refactor
@@ -70,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚙️ Miscellaneous Tasks
 
 - Update Cargo.toml dependencies
+
 ## [0.0.4] - 2025-11-04
 
 ### 🚀 Features
@@ -94,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🧪 Testing
 
 - Add integration tests that actually drive the CLI and verify behavior ([#34](https://github.com/anelson/cgx/pull/34))
+
 ## [0.0.3] - 2025-10-05
 
 ### ⚙️ Miscellaneous Tasks
