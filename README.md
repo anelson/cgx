@@ -1,6 +1,6 @@
 # cgx
 
-[![CI](https://github.com/anelson-labs/cgx/actions/workflows/ci.yml/badge.svg)](https://github.com/anelson-labs/cgx/actions/workflows/ci.yml)
+[![CI](https://github.com/anelson/cgx/actions/workflows/ci.yml/badge.svg)](https://github.com/anelson/cgx/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/cgx?link=https%3A%2F%2Fcrates.io%2Fcrates%2Fcgx)](https://crates.io/crates/cgx)
 ![license](https://img.shields.io/crates/l/cgx.svg)
 
@@ -19,19 +19,19 @@ command.
 **macOS and Linux:**
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/anelson-labs/cgx/releases/latest/download/cgx-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/anelson/cgx/releases/latest/download/cgx-installer.sh | sh
 ```
 
 **Windows:**
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/anelson-labs/cgx/releases/latest/download/cgx-installer.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/anelson/cgx/releases/latest/download/cgx-installer.ps1 | iex"
 ```
 
 The installer will download the appropriate binary for your platform and add it to your PATH.
 
 > **Note:** To install a specific version for CI/reproducible builds, replace `latest` in the URL above with the desired
-> version tag from the [Releases page](https://github.com/anelson-labs/cgx/releases), such as `v0.0.10`.
+> version tag from the [Releases page](https://github.com/anelson/cgx/releases), such as `v0.0.10`.
 
 ### Alternative Installation Methods
 
@@ -51,7 +51,7 @@ cargo binstall cgx
 
 **Manual download:**
 
-Download prebuilt binaries directly from the [Releases page](https://github.com/anelson-labs/cgx/releases).
+Download prebuilt binaries directly from the [Releases page](https://github.com/anelson/cgx/releases).
 
 ---
 
