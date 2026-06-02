@@ -3,10 +3,6 @@ mod reporter;
 
 use std::ffi::OsString;
 
-/// Re-export of the snafu [`snafu::Report`] type so that callers can refer to this type without
-/// taking an explicit snafu dep
-pub use snafu::Report as SnafuReport;
-
 /// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
 ///
 /// Internal messaging types exposed solely for integration testing. This is NOT a stable interface
@@ -27,6 +23,9 @@ pub use cgx_core::{
     cli,
     error::{Error, Result},
 };
+/// Re-export of the snafu [`snafu::Report`] type so that callers can refer to this type without
+/// taking an explicit snafu dep
+pub use snafu::Report as SnafuReport;
 
 /// Main entry point for the `cgx` engine.
 ///
