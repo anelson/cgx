@@ -30,6 +30,9 @@ use error::Result;
 use http::HttpClient;
 use std::sync::Arc;
 
+// Re-export this third-party crate type that is nonetheless part of this crate's public API
+pub use cargo_metadata::Target;
+
 /// Instance of the engine that powers the `cgx` tool.
 ///
 /// This is packaged this way so that our `main.rs` is as minimal as possible.  That's useful for a
@@ -155,12 +158,7 @@ impl Cgx {
         &self,
         crate_spec: &CrateSpec,
         build_options: &BuildOptions,
-    ) -> Result<(
-        String,
-        Option<cargo_metadata::Target>,
-        Vec<cargo_metadata::Target>,
-        Vec<cargo_metadata::Target>,
-    )> {
+    ) -> Result<(String, Option<Target>, Vec<Target>, Vec<Target>)> {
         let resolved_crate = self.resolver.resolve(crate_spec)?;
         let crate_name = resolved_crate.name.clone();
         let downloaded_crate = self.downloader.download(resolved_crate)?;
