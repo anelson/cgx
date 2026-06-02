@@ -1,7 +1,9 @@
+use std::{path::PathBuf, time::Duration};
+
+use serde::{Deserialize, Serialize};
+
 use super::Message;
 use crate::{crate_resolver::ResolvedCrate, cratespec::CrateSpec};
-use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, time::Duration};
 
 /// Messages related to crate resolution and resolution cache operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]

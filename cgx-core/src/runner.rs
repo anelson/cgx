@@ -10,12 +10,16 @@
 //! The `run()` function never returns on success - it either replaces the process (Unix)
 //! or exits with the child's exit code (Windows/other).
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::{ffi::OsString, path::Path, process::Command};
+
+#[cfg(windows)]
+use snafu::ResultExt;
+
 #[cfg(windows)]
 use crate::error;
 use crate::error::{Error, Result};
-#[cfg(windows)]
-use snafu::ResultExt;
-use std::{ffi::OsString, path::Path, process::Command};
 
 /// Run a binary, replacing or waiting for it depending on platform.
 ///
@@ -61,8 +65,6 @@ pub fn run(bin_path: &Path, args: &[OsString]) -> Result<()> {
 /// Signals are handled naturally because the target binary receives them directly.
 #[cfg(unix)]
 fn exec_replace(bin_path: &Path, args: &[OsString]) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
     let mut cmd = Command::new(bin_path);
     cmd.args(args);
     // Environment and current directory are inherited by default

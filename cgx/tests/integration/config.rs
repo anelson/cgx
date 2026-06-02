@@ -3,9 +3,10 @@
 //! These tests verify that cgx correctly loads and honors configuration from cgx.toml files,
 //! including the config hierarchy (user < cwd < CLI).
 
-use crate::utils::Cgx;
 use assert_fs::prelude::*;
 use predicates::prelude::*;
+
+use crate::utils::Cgx;
 
 /// Test that a cgx.toml in the cwd pins a tool version.
 ///

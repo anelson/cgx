@@ -1,18 +1,3 @@
-use crate::{
-    Result,
-    bin_resolver::ResolvedBinary,
-    builder::BuildOptions,
-    config::{Config, UsePrebuiltBinaries},
-    crate_resolver::{ResolvedCrate, ResolvedSource},
-    cratespec::{CrateSpec, Forge, RegistrySource},
-    downloader::DownloadedCrate,
-    error,
-    messages::{BuildCacheMessage, CrateResolutionMessage, PrebuiltBinaryMessage, SourceMessage},
-};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
 use std::{
     collections::hash_map::DefaultHasher,
     fs,
@@ -21,7 +6,24 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
 use tracing::*;
+
+use crate::{
+    Result,
+    bin_resolver::ResolvedBinary,
+    builder::{BuildOptions, BuildTarget},
+    config::{Config, UsePrebuiltBinaries},
+    crate_resolver::{ResolvedCrate, ResolvedSource},
+    cratespec::{CrateSpec, Forge, RegistrySource},
+    downloader::DownloadedCrate,
+    error,
+    messages::{BuildCacheMessage, CrateResolutionMessage, PrebuiltBinaryMessage, SourceMessage},
+};
 
 /// A cache entry wrapping a value with timestamp metadata.
 ///
@@ -835,9 +837,7 @@ impl Cache {
     ///
     /// The binary name is deterministic based on the crate name and build target,
     /// with platform-specific extensions added automatically.
-    fn expected_binary_name(crate_name: &str, build_target: &crate::builder::BuildTarget) -> String {
-        use crate::builder::BuildTarget;
-
+    fn expected_binary_name(crate_name: &str, build_target: &BuildTarget) -> String {
         let base_name = match build_target {
             BuildTarget::DefaultBin => crate_name,
             BuildTarget::Bin(name) | BuildTarget::Example(name) => name.as_str(),
@@ -859,12 +859,14 @@ struct CacheInner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{cell::RefCell, rc::Rc, time::Duration};
+
     use assert_matches::assert_matches;
     use semver::Version;
     use snafu::IntoError;
-    use std::{cell::RefCell, rc::Rc, time::Duration};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn test_cache() -> (Cache, TempDir) {
         test_cache_with_timeout(Duration::from_secs(3600))

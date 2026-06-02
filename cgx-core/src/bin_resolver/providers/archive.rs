@@ -1,9 +1,13 @@
-use crate::{Result, error};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use snafu::ResultExt;
-use std::path::{Path, PathBuf};
 use xz2::read::XzDecoder;
+
+use crate::{Result, error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::bin_resolver) enum ArchiveFormat {
@@ -180,7 +184,6 @@ fn extract_naked_binary(archive_path: &Path, binary_name: &str, dest_dir: &Path)
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&dest_path)
             .with_context(|_| error::IoSnafu {
                 path: dest_path.clone(),
@@ -197,10 +200,8 @@ fn extract_naked_binary(archive_path: &Path, binary_name: &str, dest_dir: &Path)
 
 /// Find a binary executable in a directory, searching common locations.
 ///
-/// Looks for:
-/// - `binary_name` or `binary_name.exe` in the root
-/// - `binary_name` or `binary_name.exe` in `bin/`
-/// - `binary_name` or `binary_name.exe` in `target/release/`
+/// Looks for the binary name with the current platform's executable suffix in the archive root,
+/// `bin/`, and `target/release/`.
 fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf> {
     let exe_suffix = std::env::consts::EXE_SUFFIX;
     let candidates = [
@@ -232,7 +233,6 @@ fn find_binary_in_dir(dir: &Path, binary_name: &str) -> Result<PathBuf> {
 /// Check if a file is executable.
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .map(|m| m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
@@ -245,15 +245,19 @@ fn is_executable(_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::Error;
-    use flate2::{Compression, write::GzEncoder};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         fs,
         io::{Cursor, Write},
     };
+
+    use flate2::{Compression, write::GzEncoder};
     use xz2::write::XzEncoder;
     use zip::write::SimpleFileOptions;
+
+    use super::*;
+    use crate::error::Error;
 
     impl ArchiveFormat {
         fn suffix(&self) -> &'static str {
@@ -301,7 +305,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&binary_path).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&binary_path, perms).unwrap();
@@ -538,7 +541,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let perms = fs::metadata(&binary_path).unwrap().permissions();
             assert_eq!(perms.mode() & 0o777, 0o755, "Binary should have 755 permissions");
         }
@@ -552,7 +554,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&binary_path).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&binary_path, perms).unwrap();
@@ -655,8 +656,6 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_non_executable_file_in_archive() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp_src = tempfile::tempdir().unwrap();
         let binary_path = temp_src.path().join("testbin");
 
@@ -699,7 +698,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&binary_path).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&binary_path, perms).unwrap();
@@ -720,7 +718,6 @@ mod tests {
         let mut file = fs::File::create(&binary_path).unwrap();
         file.write_all(b"test").unwrap();
 
-        use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&binary_path).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&binary_path, perms).unwrap();
@@ -744,7 +741,6 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&binary_path).unwrap().permissions();
             perms.set_mode(0o755);
             fs::set_permissions(&binary_path, perms).unwrap();

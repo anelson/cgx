@@ -17,15 +17,15 @@ pub(super) trait Provider {
     /// Attempt to find and download a pre-built binary for the given crate.
     ///
     /// All providers receive the full [`DownloadedCrate`], which includes both the resolved
-    /// metadata and the path to the downloaded crate source. Providers that only need the
-    /// metadata (like heuristic URL probers) can access it via `krate.resolved`.
+    /// metadata and the crate source directory. Providers that only need the metadata (like
+    /// heuristic URL probers) can access it via `krate.resolved`.
     ///
     /// Returns `Ok(Some(binary))` if found, `Ok(None)` if not available from this provider,
-    /// or `Err` if an error occurred during the attempt.
+    /// or `Err` for failures that should stop binary resolution.
     fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>>;
 }
 
-/// A candidate release asset filename paired with its known archive format.
+/// A candidate release asset filename paired with instructions for extracting or copying it.
 pub(super) struct CandidateFilename {
     pub filename: String,
     pub format: ArchiveFormat,

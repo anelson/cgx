@@ -1,21 +1,30 @@
-# Example of a config file that I want cgx to be able to parse and use
-# A system-wide config file will be read if present, from `/etc/cgx.toml` on Linux and macOS (and on Windows the
-# idiomatic equivalent)
-# User-specific config files will be read if present, from `$XDG_CONFIG_HOME/cgx/cgx.toml` or the platform equivalent
-# This file can be at the root of a project, or in a subdirectory, or in a parent directory.
+# Example of a config file that cgx can parse and use.
 #
-# Config settings are additive.  Settings from the system config file are overwridden by the user config file, which are
-# overwritten by the settings in each directory up to the root.
+# A system-wide config file will be read if present, from `/etc/cgx.toml` on
+# Linux and macOS, or from the platform equivalent on Windows.
 #
-# So if I have a project in `~/projects/work/project1`, and in that directory I run a `cgx` command, it will look for
-# and read the following config files, in order, with later files overriding earlier ones if they both contain the same
+# User-specific config files will be read if present, from
+# `$XDG_CONFIG_HOME/cgx/cgx.toml` or the platform equivalent.
+#
+# This file can be at the root of a project, in a subdirectory, or in a parent
+# directory.
+#
+# Config settings are additive. Settings from the system config file are
+# overridden by the user config file, which are overridden by the settings in
+# each directory up to the current directory.
+#
+# So if I have a project in `~/projects/work/project1`, and in that directory I
+# run a `cgx` command, it will look for and read the following config files, in
+# order, with later files overriding earlier ones if they both contain the same
 # setting:
-# - `/etc/cgx.toml
+#
+# - `/etc/cgx.toml`
 # - `$XDG_CONFIG_HOME/cgx/cgx.toml`
 # - `/cgx.toml`
 # - `/home/cgx.toml`
 # - `~/cgx.toml`
 # - `~/projects/cgx.toml`
+# - `~/projects/work/cgx.toml`
 # - `~/projects/work/project1/cgx.toml`
 
 bin_dir               = "~/.local/bin"
@@ -27,7 +36,12 @@ offline               = false
 resolve_cache_timeout = "1h"
 toolchain             = "stable"
 
-# HTTP client settings for registry queries, binary downloads, API calls, and git-over-HTTP.
+# By default, `cgx` will use crates.io if no registry is explicitly specified.
+# This overrides that default.
+default_registry = "my-registry"
+
+# HTTP client settings for registry queries, binary downloads, API calls, and
+# git-over-HTTP.
 #
 # For git-over-HTTP, these settings are also applied where possible:
 # - proxy
@@ -40,43 +54,42 @@ toolchain             = "stable"
 [http]
 backoff_base = "500ms"
 backoff_max  = "5s"
+proxy        = "socks5://localhost:1080"
 retries      = 2
 timeout      = "30s"
-# proxy      = "socks5://localhost:1080"
 
-# By default, `cgx` will use crates.io if no registry is explicitly specified.  This overrides that default
-default_registry = "my-registry"
-
-# List where cgx should look for pre-built binaries, before building from source.
-# If this is set to an empty array, it disables using pre-built binaries entirely, and always builds from source.
-# Particularly security-conscious users may prefer that.
+# List where cgx should look for pre-built binaries, before building from
+# source. The default mode is "auto": try prebuilt binaries and fall back to
+# building from source.
+#
+# To disable prebuilt binaries, set `use_prebuilt_binaries = "never"`.
+[prebuilt_binaries]
+use_prebuilt_binaries = "auto"
+# Note that an empty `binary_providers` list is only valid if prebuilt binaries are disabled.
 binary_providers = [
-  # The same logic used by `cargo-binstall`
+  # The same metadata used by `cargo-binstall`.
   "binstall",
 
-  # GitHub releases on the repo where the crate is located (if the crate's repo is on Github)
+  # GitHub releases on the repo where the crate is located.
   "github-releases",
 
-  # GitLab releases on the repo where the crate is located (if the crate's repo is on GitLab)
+  # GitLab releases on the repo where the crate is located.
   "gitlab-releases",
 
-  # The community-driven repository of pre-built binaries
+  # The community-driven repository of pre-built binaries.
   "quickinstall",
 ]
 
-# `cgx` can invoke any binary crate on crates.io, it doesn't need to be listed here, but by listing
-# a tool here it can be pinned to a specific version, or customized in some way by using a different registry,
-# or a git repo, or a local path, or customizing features enabled.
+# `cgx` can invoke any binary crate on crates.io, it doesn't need to be listed
+# here, but listing a tool here can pin it to a specific version or customize
+# its source, registry, path, or features.
 #
-# Each entry has the same format as a dependency in Cargo.toml
+# Each entry has the same format as a dependency in Cargo.toml.
 [tools]
-# This is not a very useful entry, as it matches what is already the default behavior when `cgx` is invoked with
-# a tool that doesn't have a specific version
 ripgrep   = "*"
 taplo-cli = { version = "1.11.0", features = ["schema"] }
 
-# Not all crates have intituive names.  You can specify aliases here, to alias a more familiar name.
-# Note that by doing this, actual crates with the aliased name become inaccessible
+# Not all crates have intuitive names. You can specify aliases here.
 [aliases]
 rg    = "ripgrep"
 taplo = "taplo-cli"

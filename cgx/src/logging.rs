@@ -1,6 +1,7 @@
 use std::{io::IsTerminal, sync::OnceLock};
+
 use tracing::Level;
-use tracing_subscriber::reload;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
 use crate::{CliArgs, Config};
 
@@ -14,7 +15,7 @@ const DEFAULT_TRACING_FILTER: &str = "info";
 ///
 /// This allows us to update the log level after loading configuration from files,
 /// while still having logging available during the config loading process itself.
-type ReloadHandle = reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+type ReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
 /// Global storage for the reload handle, initialized once during [`init`].
 static RELOAD_HANDLE: OnceLock<ReloadHandle> = OnceLock::new();
@@ -45,8 +46,6 @@ static RELOAD_HANDLE: OnceLock<ReloadHandle> = OnceLock::new();
 /// This function will panic if called more than once in the same process, as the
 /// global tracing subscriber can only be initialized once.
 pub(crate) fn init(args: &CliArgs) {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
     let (level, use_simple_format) = match args.verbose {
         0 => (Level::WARN, true),
         1 => (Level::INFO, false),
@@ -132,8 +131,6 @@ pub(crate) fn init(args: &CliArgs) {
 ///
 /// More complex filter syntax is also supported (e.g., `"cgx=debug,info"`).
 pub(crate) fn apply_config(config: &Config, args: &CliArgs) {
-    use tracing_subscriber::EnvFilter;
-
     // Don't override if user explicitly set verbosity via CLI
     if args.verbose > 0 {
         tracing::debug!("Not applying config log_level: CLI verbosity flag takes precedence");

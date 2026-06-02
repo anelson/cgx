@@ -1,22 +1,28 @@
 mod providers;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use crate::{
     Result,
     builder::{BuildOptions, BuildTarget},
     cache::Cache,
     config::{BinaryProvider, Config, UsePrebuiltBinaries},
-    crate_resolver::ResolvedCrate,
+    crate_resolver::{ResolvedCrate, ResolvedSource},
+    cratespec::RegistrySource,
     downloader::DownloadedCrate,
     error,
     http::HttpClient,
     messages::PrebuiltBinaryMessage,
 };
-use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 
-/// A resolved binary means we found, downloaded, and validated a pre-built binary for a crate, so
-/// that we don't have to build it from source.
+/// A resolved binary is a pre-built executable that cgx found and prepared, so the crate can run
+/// without being built from source.
 ///
 /// This type is the result of resolving a [`ResolvedCrate`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -27,26 +33,18 @@ pub struct ResolvedBinary {
     /// From what binary provider this binary was obtained
     pub provider: BinaryProvider,
 
-    /// Path to the downloaded binary ready for execution
+    /// Path to the executable cgx should run
     pub path: std::path::PathBuf,
 }
 
 pub trait BinaryResolver {
-    /// Attempt to resolve a pre-built binary for the given crate.
+    /// Attempt to resolve a pre-built binary for the given crate from cache or providers.
     ///
     /// Returns:
     /// - `Ok(Some(ResolvedBinary))` - Found a pre-built binary
     /// - `Ok(None)` - No pre-built binary available, or pre-built binaries are
     ///   disabled/disqualified
-    /// - `Err(...)` - An error occurred during resolution, or pre-built binary was required but not
-    ///   found
-    ///
-    /// This method handles all checks internally:
-    /// - If pre-built binaries are disabled in config (`UsePrebuiltBinaries::Never`), returns
-    ///   `Ok(None)`
-    /// - If build options disqualify pre-built binaries (custom features, target, etc.), returns
-    ///   `Ok(None)`
-    /// - If `UsePrebuiltBinaries::Always` is set and no binary is found, returns an error
+    /// - `Err(...)` - Resolution failed in a way that should stop execution
     fn resolve(
         &self,
         krate: &DownloadedCrate,
@@ -74,8 +72,8 @@ struct DefaultBinaryResolver {
 
 /// Check if the build options disqualify the use of pre-built binaries.
 ///
-/// Pre-built binaries can only be used for the default configuration.
-/// Any customization (features, target, profile, etc.) requires building from source.
+/// Pre-built binaries are skipped when the request changes what Cargo would build, such as
+/// selecting features, a target, a profile, a toolchain, a bin, or an example.
 fn is_disqualified(build_options: &BuildOptions) -> Option<&'static str> {
     if build_options.build_target != BuildTarget::DefaultBin {
         return Some("explicit --bin or --example specified");
@@ -119,8 +117,8 @@ impl DefaultBinaryResolver {
 
     /// Relocate a resolved binary from the provider's cache to the `bin_dir` structure.
     ///
-    /// This ensures all binaries (pre-built and source-built) live in the same directory
-    /// structure, making paths consistent and predictable.
+    /// Pre-built binaries are copied into `bin_dir` so the path cgx returns is stable and separate
+    /// from provider-specific cache directories.
     fn relocate_to_bin_dir(
         &self,
         mut binary: ResolvedBinary,
@@ -157,7 +155,6 @@ impl DefaultBinaryResolver {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&target_path)
                 .with_context(|_| error::IoSnafu {
                     path: target_path.clone(),
@@ -174,10 +171,7 @@ impl DefaultBinaryResolver {
     }
 
     /// Compute a hash of the source for use in the `bin_dir` structure.
-    fn compute_source_hash(source: &crate::crate_resolver::ResolvedSource) -> String {
-        use crate::{crate_resolver::ResolvedSource, cratespec::RegistrySource};
-        use sha2::{Digest, Sha256};
-
+    fn compute_source_hash(source: &ResolvedSource) -> String {
         let mut hasher = Sha256::new();
 
         match source {

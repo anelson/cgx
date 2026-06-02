@@ -204,6 +204,11 @@ jobs:
         with:
           tool: taplo
 
+      - name: Install ast-grep
+        uses: taiki-e/install-action@v2
+        with:
+          tool: ast-grep
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false

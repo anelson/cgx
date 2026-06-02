@@ -1,13 +1,19 @@
-use crate::{Result, cli::CliArgs};
-use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
-use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     time::Duration,
 };
+
+use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
+use figment::{
+    Figment,
+    providers::{Format, Serialized, Toml},
+};
+use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr, VariantNames};
+
+use crate::{Result, cli::CliArgs};
 
 const DEFAULT_RESOLVE_CACHE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -406,11 +412,6 @@ impl Config {
     /// Load config from the CLI args and a specified directory which may or may not contain config
     /// files.
     pub fn load_from_dir(cwd: &Path, args: &CliArgs) -> Result<Self> {
-        use figment::{
-            Figment,
-            providers::{Format, Serialized, Toml},
-        };
-
         let strategy = Self::get_user_dirs()?;
 
         // Start with base config defaults, then merge config files
@@ -706,8 +707,9 @@ pub(crate) fn create_test_env() -> (tempfile::TempDir, Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
+
+    use super::*;
 
     /// Apply test-local config directory overrides so config loading cannot read
     /// host-level `/etc/cgx.toml` or user-level cgx config on the machine running tests.
@@ -907,9 +909,11 @@ mod tests {
     }
 
     mod prebuilt_validation_tests {
-        use super::*;
-        use assert_matches::assert_matches;
         use std::io::Write;
+
+        use assert_matches::assert_matches;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -968,8 +972,9 @@ mod tests {
     /// `testdata/configs` contains test config files constructed specificially to facilitate these
     /// tests
     mod hierarchy_tests {
-        use super::*;
         use assert_matches::assert_matches;
+
+        use super::*;
 
         /// Test loading config from a 3-level hierarchy (root → work → project1).
         ///
@@ -1181,6 +1186,8 @@ mod tests {
     }
 
     mod config_file_discovery_tests {
+        use std::fs;
+
         use super::*;
 
         /// Test that [`discover_config_files`] returns only the explicit file when --config-file is
@@ -1189,8 +1196,6 @@ mod tests {
         /// This directly tests the discovery logic to ensure hierarchy configs are not included.
         #[test]
         fn test_discover_only_explicit_file() {
-            use std::fs;
-
             // RAII guard to ensure user config cleanup happens even if test panics
             struct UserConfigGuard {
                 path: PathBuf,
@@ -1263,8 +1268,6 @@ mod tests {
         /// Test that hierarchy configs are discovered when --config-file is not set.
         #[test]
         fn test_discover_hierarchy_without_explicit() {
-            use std::fs;
-
             let temp_dir = tempfile::tempdir().unwrap();
             let cwd = temp_dir.path();
 
@@ -1294,8 +1297,9 @@ mod tests {
     }
 
     mod override_tests {
-        use super::*;
         use std::fs;
+
+        use super::*;
 
         mod system_config_dir_tests {
             use super::*;
@@ -1731,9 +1735,11 @@ mod tests {
     }
 
     mod build_http_config_tests {
-        use super::*;
-        use assert_matches::assert_matches;
         use std::io::Write;
+
+        use assert_matches::assert_matches;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -1957,9 +1963,11 @@ mod tests {
     }
 
     mod build_http_config_env_tests {
-        use super::*;
-        use sealed_test::prelude::*;
         use std::io::Write;
+
+        use sealed_test::prelude::*;
+
+        use super::*;
 
         fn create_temp_config(toml_content: &str) -> tempfile::TempDir {
             let temp_dir = tempfile::tempdir().unwrap();
@@ -2172,8 +2180,9 @@ mod tests {
     }
 
     mod error_tests {
-        use super::*;
         use assert_matches::assert_matches;
+
+        use super::*;
 
         #[test]
         fn test_invalid_toml_syntax() {

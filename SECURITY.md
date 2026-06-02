@@ -10,12 +10,12 @@ We take the security of `cgx` very seriously. If you believe you've found a secu
 
 Instead, please use one of these secure channels:
 
-1. **GitHub Security Advisories**: Use the "Report a vulnerability" button in the Security tab. See the [Github
-   guidance on reporting security
+1. **GitHub Security Advisories**: Use the "Report a vulnerability" button in the Security tab. See the [GitHub
+   guidance on privately reporting security
    vulnerabilities](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
    for additional information.
-1. **Email**: Send details to `security@cgx.sh`
-1. **Backup contact**: If no response within 48 hours, email `anelson@cgx.sh`
+1. **Email**: Send details to `security@cgx.sh`.
+1. **Backup contact**: If no response arrives within 48 hours, email `anelson@cgx.sh`.
 
 ### What to Include
 
@@ -69,36 +69,34 @@ This security policy applies to:
 
 **In Scope:**
 
-- `cgx` (all supported versions)
-- Official Docker images
-- Documentation that could lead to insecure configurations
-- Dependencies with security implications
+- `cgx`, `cgx-core`, and `cargo-cgx`.
+- Documentation that could lead to insecure configurations.
+- Dependencies with security implications.
 
 **Out of Scope:**
 
-- Third-party integrations or plugins
-- Issues requiring physical access to the server
-- Social engineering attacks
-- Attacks requiring compromised credentials (unless the vulnerability enables credential compromise)
-- Theoretical vulnerabilities without practical exploitation
+- Third-party integrations or unofficial packages.
+- Issues requiring physical access to a user's machine.
+- Social engineering attacks.
+- Attacks requiring compromised credentials, unless the vulnerability enables credential compromise.
+- Theoretical vulnerabilities without practical exploitation.
 
 ## Security Measures
 
 **Our Commitments:**
 
-- Regular security audits of dependencies using `cargo audit`
-- Automated security scanning in CI/CD pipeline
-- Following Rust security best practices
-- Prompt security updates for critical dependencies
-- Security-focused code review process
+- Dependency advisory and policy checks using `cargo deny`.
+- Automated dependency and CI checks for pull requests.
+- Prompt security updates for critical dependencies.
+- Security-focused review for changes that affect process execution, downloads, archives, git operations, or trust
+  boundaries.
 
 **User Responsibilities:**
 
-- Keep `cgx` updated to the latest version (ideally by enabling auto self-update)
-- Follow security configuration guidelines
-- Implement proper network security (firewalls, TLS, etc.)
-- Regular security monitoring and logging
-- Secure credential management
+- Keep `cgx` updated to the latest release.
+- Review source and binary trust settings before running tools from unfamiliar crates or repositories.
+- Follow normal network security and credential management practices.
+- Report suspected security issues privately.
 
 ## Legal Safe Harbor
 
@@ -106,43 +104,40 @@ We support security research conducted in good faith. If you follow these guidel
 
 **We will NOT:**
 
-- Initiate legal action against you
-- Contact law enforcement about your research
-- Suspend or terminate your access to `cgx` services
+- Initiate legal action against you.
+- Contact law enforcement about your research.
+- Suspend or terminate access because of good-faith research.
 
 **You must:**
 
-- Only test against your own `cgx` installations
-- Not access, modify, or delete user data
-- Not perform testing that could degrade service availability
-- Not publicly disclose the issue before coordinated disclosure
-- Act in good faith and not for malicious purposes
+- Only test against your own `cgx` installations and accounts.
+- Not access, modify, or delete other users' data.
+- Not perform testing that could degrade service availability.
+- Not publicly disclose the issue before coordinated disclosure.
+- Act in good faith and not for malicious purposes.
 
 ## Recognition
 
 We believe in recognizing security researchers who help keep `cgx` secure:
 
-- **Security Advisory Credits**: We'll credit you in our GitHub Security Advisories (unless you prefer to remain anonymous)
-- **Hall of Fame**: Significant contributors may be listed in our security acknowledgments
-- **Swag**: We may send `cgx` merchandise for notable contributions
+- **Security Advisory Credits**: We'll credit you in GitHub Security Advisories unless you prefer to remain anonymous.
+- **Security acknowledgments**: Significant contributors may be listed in security notes or release notes.
 
 ## Security Updates
 
 **Stay Informed:**
 
-- Subscribe to our [GitHub releases](https://github.com/cgxlabs/cgx/releases) for security updates
-- Join our community channels for security announcements
-- Enable GitHub notifications for security advisories
+- Subscribe to [GitHub releases](https://github.com/anelson-labs/cgx/releases) for security updates.
+- Enable GitHub notifications for security advisories.
 
 **Update Process:**
 
-- Security updates are published as patch releases (e.g., 0.12.1 → 0.12.2)
-- Critical vulnerabilities may receive out-of-band releases
-- Docker images are updated simultaneously with releases
-- Security advisories are published through GitHub Security Advisories
+- Security updates are published as patch releases when practical.
+- Critical vulnerabilities may receive out-of-band releases.
+- Security advisories are published through GitHub Security Advisories when appropriate.
 
 ## Contact Information
 
-- **Security reports**: security@cgx.sh
-- **General inquiries**: anelson@cgx.sh
-- **PGP Key**: Available upon request for sensitive communications
+- Security reports: `security@cgx.sh`
+- General inquiries: `anelson@cgx.sh`
+- GnuPG Key: Available upon request for sensitive communications

@@ -1,19 +1,20 @@
-use crate::{
-    Result,
-    builder::{BuildOptions, BuildTarget},
-    error,
-    messages::{BuildMessage, MessageReporter},
-};
-use snafu::{OptionExt, ResultExt};
 use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
 };
-use tracing::debug;
 
 pub(crate) use cargo_metadata::Metadata;
+use snafu::{OptionExt, ResultExt};
+use tracing::debug;
+
+use crate::{
+    Result,
+    builder::{BuildOptions, BuildTarget},
+    error,
+    messages::{BuildMessage, MessageReporter},
+};
 
 /// Verbosity level for cargo build operations.
 ///
@@ -185,8 +186,6 @@ struct RealCargoRunner {
 
 impl CargoRunner for RealCargoRunner {
     fn metadata(&self, source_dir: &Path, options: &CargoMetadataOptions) -> Result<Metadata> {
-        use snafu::ResultExt;
-
         let mut cmd = cargo_metadata::MetadataCommand::new();
         cmd.cargo_path(&self.cargo_path).current_dir(source_dir);
 

@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
 use super::Message;
 use crate::crate_resolver::{ResolvedCrate, ResolvedSource};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Messages related to source code downloading and source cache operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]

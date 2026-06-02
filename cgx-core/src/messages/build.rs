@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
 use super::Message;
 use crate::builder::BuildOptions;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Messages related to build operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]

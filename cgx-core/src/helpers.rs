@@ -1,6 +1,9 @@
-use crate::{Result, error};
-use snafu::ResultExt;
 use std::{fmt::Write, path::Path};
+
+use ignore::WalkBuilder;
+use snafu::ResultExt;
+
+use crate::{Result, error};
 
 /// Format a byte slice as a lowercase hex string.
 ///
@@ -21,8 +24,6 @@ pub(crate) fn format_hex_lower(bytes: impl AsRef<[u8]>) -> String {
 /// Uses the `ignore` crate to walk the source tree while respecting gitignore rules,
 /// then copies each file to the destination, preserving directory structure.
 pub(crate) fn copy_source_tree(src: &Path, dst: &Path) -> Result<()> {
-    use ignore::WalkBuilder;
-
     let walker = WalkBuilder::new(src)
         .hidden(false) // Include hidden files (like .cargo)
         .git_ignore(true) // Respect .gitignore

@@ -1,3 +1,10 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+use sha2::{Digest, Sha256};
+use snafu::ResultExt;
+
 use super::{ArchiveFormat, CandidateFilename, Provider};
 use crate::{
     Result,
@@ -10,9 +17,6 @@ use crate::{
     http::{Bytes, HttpClient},
     messages::PrebuiltBinaryMessage,
 };
-use sha2::{Digest, Sha256};
-use snafu::ResultExt;
-use std::path::PathBuf;
 
 pub(in crate::bin_resolver) struct GitlabProvider {
     reporter: crate::messages::MessageReporter,
@@ -36,12 +40,12 @@ impl GitlabProvider {
         }
     }
 
-    /// Get the repository URL for a crate, filtering for GitLab hosts.
+    /// Get the GitLab repository URL for a crate.
     ///
     /// If the crate came from a GitLab forge, the forge URL is used directly (handles the fork
     /// scenario where Cargo.toml may still point to the upstream). For all other sources
     /// (including non-GitLab forges), falls back to the `[package].repository` field in
-    /// Cargo.toml, filtered to GitLab hosts only.
+    /// Cargo.toml only when it is a `https://gitlab.com/...` URL.
     fn get_repo_url(krate: &DownloadedCrate) -> Result<Option<String>> {
         match &krate.resolved.source {
             ResolvedSource::Forge {
@@ -85,8 +89,8 @@ impl GitlabProvider {
 
     /// Probe a URL with a HEAD request to check if the asset exists.
     ///
-    /// Returns `Ok(true)` if the asset exists (200 response), `Ok(false)` if it doesn't
-    /// (404 or other non-success), or `Err` if a connection/timeout error occurred.
+    /// Returns `Ok(true)` for a successful HTTP status, `Ok(false)` for 404 or another
+    /// non-success response, or `Err` if the request could not be completed.
     /// The error case is used by the caller to bail early when the server is unreachable.
     fn head_probe(&self, url: &str) -> Result<bool> {
         let response = self.http_client.head(url)?;
@@ -244,7 +248,6 @@ impl Provider for GitlabProvider {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&final_path)
                 .with_context(|_| error::IoSnafu {
                     path: final_path.clone(),
@@ -266,11 +269,13 @@ impl Provider for GitlabProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use semver::Version;
+    use url::Url;
+
     use super::*;
     use crate::{crate_resolver::ResolvedSource, cratespec::Forge};
-    use semver::Version;
-    use std::fs;
-    use url::Url;
 
     #[test]
     fn test_url_generation_includes_version_patterns() {

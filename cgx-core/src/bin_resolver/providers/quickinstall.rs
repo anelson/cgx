@@ -1,3 +1,9 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+use snafu::ResultExt;
+
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
@@ -9,8 +15,6 @@ use crate::{
     http::{Bytes, HttpClient},
     messages::PrebuiltBinaryMessage,
 };
-use snafu::ResultExt;
-use std::path::PathBuf;
 
 pub(in crate::bin_resolver) struct QuickinstallProvider {
     reporter: crate::messages::MessageReporter,
@@ -94,7 +98,6 @@ impl Provider for QuickinstallProvider {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&final_path)
                 .with_context(|_| error::IoSnafu {
                     path: final_path.clone(),

@@ -27,14 +27,14 @@ jobs:
       - name: Enable auto-merge for Dependabot PRs
         run: gh pr merge --auto --squash "$PR_URL"
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}│
+          PR_URL: ${{ github.event.pull_request.html_url }}
 
           # Use a PAT instead of GITHUB_TOKEN so the merge push triggers
           # downstream workflows (e.g. release-plz).  Merges performed with
           # GITHUB_TOKEN silently skip workflow triggers as a GitHub Actions
           # safeguard against recursive loops.
           #
-          # Technically we're abusing the RELEAZE_PLZ_TOKEN a bit here, since it's not provisioend for
+          # Technically we're abusing the RELEASE_PLZ_TOKEN a bit here, since it's not provisioned for
           # dependabot auto-merge, but this is a workaround.
           #
           # References:

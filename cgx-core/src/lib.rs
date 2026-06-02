@@ -19,19 +19,19 @@ pub(crate) mod sbom;
 #[cfg(test)]
 pub(crate) mod testdata;
 
+use std::sync::Arc;
+
 use bin_resolver::BinaryResolver;
 use builder::{BuildOptions, CrateBuilder};
 use cache::Cache;
+// Re-export this third-party crate type that is nonetheless part of this crate's public API
+pub use cargo_metadata::Target;
 use config::Config;
 use crate_resolver::CrateResolver;
 use cratespec::CrateSpec;
 use downloader::CrateDownloader;
 use error::Result;
 use http::HttpClient;
-use std::sync::Arc;
-
-// Re-export this third-party crate type that is nonetheless part of this crate's public API
-pub use cargo_metadata::Target;
 
 /// Instance of the engine that powers the `cgx` tool.
 ///

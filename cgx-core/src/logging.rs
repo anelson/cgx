@@ -1,3 +1,9 @@
+#[cfg(test)]
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use tracing_subscriber::{EnvFilter, fmt};
+
 /// Initialize tracing for tests with sensible defaults.
 ///
 /// This function configures tracing to work correctly with cargo test's output capture,
@@ -15,9 +21,6 @@
 /// Call this at the beginning of any test that would benefit from seeing log output.
 #[cfg(test)]
 pub(crate) fn init_test_logging() {
-    use std::sync::OnceLock;
-    use tracing_subscriber::{EnvFilter, fmt};
-
     static INIT: OnceLock<()> = OnceLock::new();
 
     INIT.get_or_init(|| {

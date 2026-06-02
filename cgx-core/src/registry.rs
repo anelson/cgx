@@ -1,4 +1,3 @@
-use crate::{Result, config::HttpConfig, cratespec::RegistrySource, error, http::HttpClient};
 use backon::{BlockingRetryable, ExponentialBuilder};
 use semver::Version;
 use snafu::ResultExt;
@@ -8,6 +7,8 @@ use tame_index::{
     index::RemoteSparseIndex,
     utils::flock::{FileLock, LockOptions},
 };
+
+use crate::{Result, config::HttpConfig, cratespec::RegistrySource, error, http::HttpClient};
 
 /// Result of looking up a download URL for a specific crate version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,11 +208,12 @@ fn is_retryable_tame_error(err: &TameIndexError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+
+    use super::*;
 
     fn fast_http_config(retries: usize) -> HttpConfig {
         HttpConfig {

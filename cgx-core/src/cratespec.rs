@@ -1,3 +1,10 @@
+use std::path::PathBuf;
+
+use semver::VersionReq;
+use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
+use url::Url;
+
 use crate::{
     Result,
     cli::CliArgs,
@@ -5,11 +12,6 @@ use crate::{
     error,
     git::GitSelector,
 };
-use semver::VersionReq;
-use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
-use std::path::PathBuf;
-use url::Url;
 
 /// A specification of a crate that the user wants to execute.
 ///
@@ -514,12 +516,13 @@ impl Forge {
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+
     use super::*;
     use crate::{
         cli::CliArgs,
         config::{Config, ToolConfig},
     };
-    use assert_matches::assert_matches;
 
     /// Test that config aliases are resolved before processing the crate spec.
     ///

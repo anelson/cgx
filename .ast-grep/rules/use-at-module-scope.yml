@@ -1,0 +1,17 @@
+id: use-at-module-scope
+language: rust
+severity: error
+message: "`use` must be at module scope, not inside a function or block"
+note: |
+  This `use` is a statement inside a function body or block. Project style (see AGENTS.md) requires imports to live at
+  module scope near the top of the module. In `mod tests`, put the import at the top of the test module instead.
+
+  clippy has no lint for this, so it is enforced structurally by ast-grep.
+rule:
+  # A `use` whose immediate parent is a `block` is a statement inside a function body or a bare/`unsafe`/`async`/control
+  # block, i.e. local scope. A `use` at module scope sits directly under a `source_file` or a module's `declaration_list`
+  # instead, so it is not matched. Using the default `stopBy: neighbor` (immediate parent only) is deliberate: a `use`
+  # inside a `mod` that is itself nested in a function is still legitimate module scope and must not be flagged.
+  kind: use_declaration
+  inside:
+    kind: block

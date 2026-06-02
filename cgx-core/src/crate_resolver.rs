@@ -1,3 +1,12 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
+
 use crate::{
     Result,
     cache::Cache,
@@ -8,13 +17,6 @@ use crate::{
     git::{GitClient, GitSelector},
     http::HttpClient,
     registry::RegistryClient,
-};
-use semver::{Version, VersionReq};
-use serde::{Deserialize, Serialize};
-use snafu::OptionExt;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
 };
 
 /// A resolved crate represents a concrete, validated reference to a specific crate version.
@@ -406,10 +408,12 @@ impl<R: CrateResolver> CrateResolver for CachingResolver<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use assert_matches::assert_matches;
+
     use super::*;
     use crate::testdata::CrateTestCase;
-    use assert_matches::assert_matches;
-    use std::time::Duration;
 
     /// Create a test resolver with online config and an isolated temp directory.
     ///
@@ -624,6 +628,10 @@ mod tests {
     /// These tests will actually hit the registry over the network.  Hopefully they don't get
     /// throttled.
     mod registry {
+        use std::thread;
+
+        use rand::seq::SliceRandom;
+
         use super::*;
         use crate::error::Error;
 
@@ -932,9 +940,6 @@ mod tests {
         /// This reproduces: <https://github.com/EmbarkStudios/tame-index/issues/94>
         #[test]
         fn lock_contention_stress_test() {
-            use rand::seq::SliceRandom;
-            use std::thread;
-
             let crates = vec![
                 "serde",
                 "tokio",

@@ -7,6 +7,23 @@ comment_width          = 100
 error_on_line_overflow = true
 error_on_unformatted   = true
 format_strings         = true
-imports_granularity    = "Crate"
 max_width              = 110
 wrap_comments          = true
+
+# `group_imports` sorts imports into std / external-crate / first-party blocks separated by blank lines.
+#
+# Be aware that rustfmt is not visibility-aware: it sorts `pub use` re-exports in with the plain `use`
+# statements in the same group rather than keeping them visually distinct. This does some pretty horrible
+# things to the readability of re-exports, scattering them among ordinary imports. It is a known rustfmt
+# limitation that the maintainers have closed as "not planned":
+#
+# See for example:
+#
+#   https://github.com/rust-lang/rustfmt/issues/4723
+#   https://github.com/rust-lang/rustfmt/issues/4709
+#   https://github.com/rust-lang/rustfmt/issues/4693
+#
+# We begrudgingly accept this tradeoff: the universal, mechanically-enforced import consistency we get from rustfmt is,
+# for now, considered worth the price of losing visually-distinct formatting of re-exports.
+group_imports       = "StdExternalCrate"
+imports_granularity = "Crate"

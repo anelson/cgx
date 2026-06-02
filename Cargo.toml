@@ -70,7 +70,6 @@ inherits      = "release"
 lto           = true
 
 
-#
 # Enable some optional lints that are not on by default but we want to enforce
 #
 # This is inspired by the Embark Studios list at <https://github.com/EmbarkStudios/rust-ecosystem/blob/main/lints.toml>

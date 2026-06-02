@@ -3,8 +3,9 @@
 //! These tests verify that cgx correctly handles git sources, including fetching,
 //! checking out, building, and caching.
 
-use crate::utils::{Cgx, CommandExt};
 use cgx::messages::{BuildCacheMessage, CrateResolutionMessage, GitMessage, GitSelector, Message};
+
+use crate::utils::{Cgx, CommandExt};
 
 /// Test running a crate from a git source with a specific tag.
 ///

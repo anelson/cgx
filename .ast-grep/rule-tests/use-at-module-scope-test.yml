@@ -1,0 +1,52 @@
+id: use-at-module-scope
+valid:
+  # Crate root.
+  - use std::collections::HashMap;
+  # Re-export at module scope.
+  - pub use std::fmt::Write;
+  # Inside a module body.
+  - |
+    mod m {
+        use std::io::Read;
+        pub use std::io::Write;
+    }
+  # A module nested inside a function: the `use` is still at module scope.
+  - |
+    fn f() {
+        mod inner {
+            use std::io::Read;
+        }
+    }
+invalid:
+  # Function body.
+  - |
+    fn f() {
+        use std::io::Read;
+    }
+  # Associated function body.
+  - |
+    impl Foo {
+        fn assoc() {
+            use std::io::Read;
+        }
+    }
+  # Closure body.
+  - |
+    fn f() {
+        let c = || { use std::io::Read; };
+    }
+  # `unsafe` block.
+  - |
+    fn f() {
+        unsafe { use std::io::Read; }
+    }
+  # `async` block.
+  - |
+    fn f() {
+        async { use std::io::Read; };
+    }
+  # Control-flow block.
+  - |
+    fn f() {
+        if true { use std::io::Read; }
+    }
