@@ -31,4 +31,4 @@ cgx eza -la
 This is a thin wrapper around cgx that provides cargo subcommand integration.
 
 For complete documentation on cgx's features, configuration, and usage, please see the [cgx crate
-documentation](https://docs.rs/cgx/) and the [project README](https://github.com/anelson-labs/cgx#readme).
+documentation](https://docs.rs/cgx/) and the [project README](https://github.com/anelson/cgx#readme).

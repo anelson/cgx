@@ -5,9 +5,9 @@ resolver        = "3"
 
 [workspace.package]
 edition      = "2024"
-homepage     = "https://github.com/anelson-labs/cgx"
+homepage     = "https://github.com/anelson/cgx"
 license      = "MIT OR Apache-2.0"
-repository   = "https://github.com/anelson-labs/cgx"
+repository   = "https://github.com/anelson/cgx"
 rust-version = "1.85.1"
 
 [workspace.dependencies]

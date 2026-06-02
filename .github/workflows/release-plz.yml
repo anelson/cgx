@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
-    if: ${{ github.repository_owner == 'anelson-labs' }}
+    if: ${{ github.repository_owner == 'anelson' }}
     steps:
       - &checkout
         name: Checkout repository
@@ -44,7 +44,7 @@ jobs:
     concurrency:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
-    if: ${{ github.repository_owner == 'anelson-labs' }}
+    if: ${{ github.repository_owner == 'anelson' }}
     steps:
       - *checkout
       - *install-rust

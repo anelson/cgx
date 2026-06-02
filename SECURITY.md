@@ -127,7 +127,7 @@ We believe in recognizing security researchers who help keep `cgx` secure:
 
 **Stay Informed:**
 
-- Subscribe to [GitHub releases](https://github.com/anelson-labs/cgx/releases) for security updates.
+- Subscribe to [GitHub releases](https://github.com/anelson/cgx/releases) for security updates.
 - Enable GitHub notifications for security advisories.
 
 **Update Process:**
