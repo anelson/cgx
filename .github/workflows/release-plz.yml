@@ -13,6 +13,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+      id-token: write
     if: ${{ github.repository_owner == 'anelson' }}
     steps:
       - &checkout
@@ -32,7 +33,6 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:
@@ -60,4 +60,3 @@ jobs:
           # which would leave the release PR with no CI checks and therefore
           # unmergeable under the required-status branch protection.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - _(refactor)_ Move from `anelson-labs/cgx` to `anelson/cgx` ([#191](https://github.com/anelson/cgx/pull/191))
 
+### 🛡️ Security
+
+- _(ci)_ Switch to using Trusted Publishing to crates.io ([#192](https://github.com/anelson/cgx/pull/192))
+
 ## [0.0.10] - 2026-05-28
 
 ### 💼 Other
