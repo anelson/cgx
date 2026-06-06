@@ -63,7 +63,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - &install-rust
         uses: dtolnay/rust-toolchain@master
@@ -71,17 +71,17 @@ jobs:
           toolchain: 1.85.1
 
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: just
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: cargo-deny@0.19.0
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: cargo-machete@0.8.0
 
@@ -136,7 +136,7 @@ jobs:
             cache_key: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - *install-rust
 
@@ -163,7 +163,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-release-plz == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - *install-rust
 
@@ -183,7 +183,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       # dtolnay in his infinite wisdom did not think that CI builds should honor
       # rust-toolchain files, so we must specify the toolchain version here AND
@@ -195,17 +195,17 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install just
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: just
 
       - name: Install taplo
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: taplo
 
       - name: Install ast-grep
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: ast-grep
 
@@ -224,12 +224,12 @@ jobs:
         run: taplo fmt --check
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: cargo-deny@0.19.0
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.80.0
         with:
           tool: cargo-machete@0.8.0
 
@@ -244,7 +244,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       # dtolnay in his infinite wisdom did not think that CI builds should honor
       # rust-toolchain files, so we must specify the toolchain version here AND
@@ -298,7 +298,7 @@ jobs:
             cache_key: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - *install-rust
 
@@ -335,7 +335,7 @@ jobs:
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - *install-rust
 
@@ -383,7 +383,7 @@ jobs:
             cache_key: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - *install-rust
 
