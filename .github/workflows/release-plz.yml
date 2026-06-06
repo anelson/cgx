@@ -9,22 +9,20 @@ jobs:
   # Release unpublished packages.
   release-plz-release:
     name: Release-plz release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: read
       id-token: write
     if: ${{ github.repository_owner == 'anelson' }}
     steps:
-      - &checkout
-        name: Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - &install-rust
-        name: Install Rust toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz
@@ -32,31 +30,4 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-
-  # Create a PR with the new versions and changelog, preparing the next release.
-  release-plz-pr:
-    name: Release-plz PR
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
-    if: ${{ github.repository_owner == 'anelson' }}
-    steps:
-      - *checkout
-      - *install-rust
-
-      - name: Run release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
-        env:
-          # Use the PAT, not GITHUB_TOKEN, so the PR-open and PR-update events
-          # actually fire workflow runs. GitHub's recursive-loop safeguard
-          # suppresses `pull_request` events caused by the default GITHUB_TOKEN,
-          # which would leave the release PR with no CI checks and therefore
-          # unmergeable under the required-status branch protection.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

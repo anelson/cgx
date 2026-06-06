@@ -236,8 +236,8 @@ jobs:
       - name: Run dependency checks
         run: just depcheck
 
-  # Stage 2: Linux amd64 Build and Test.  This will catch most build issues and broken tests,
-  # before we we move on to the more expensive and slower platform-specific builds and tests.
+  # Stage 2: Linux amd64 Build and Test.  This is one of the three representative platforms where
+  # regular PR CI executes the full integration test suite.
   test-linux-amd64:
     name: Test (Linux amd64)
     needs: [detect-pr-type, lint]
@@ -280,11 +280,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo test --workspace
 
-  # Stage 3: Primary platforms (Windows amd64, Mac ARM64)
-  # After Linux amd64, these are the platforms most likely to catch platform-specific breakage.
+  # Stage 3: Representative non-Linux platforms. Regular PR CI executes the full integration test
+  # suite on one Windows and one macOS target
   test-platforms:
     name: Test (${{ matrix.name }})
-    needs: [detect-pr-type, test-linux-amd64]
+    needs: [detect-pr-type, lint]
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     strategy:
       fail-fast: false
@@ -293,10 +293,6 @@ jobs:
           - os: windows-2025
             name: Windows amd64
             cache_key: x86_64-pc-windows-msvc
-          - os: windows-2025
-            name: Windows GNU amd64
-            target: x86_64-pc-windows-gnu
-            cache_key: x86_64-pc-windows-gnu
           - os: macos-15
             name: Mac ARM64
             cache_key: aarch64-apple-darwin
@@ -306,10 +302,6 @@ jobs:
 
       - *install-rust
 
-      - name: Add target
-        if: matrix.target
-        run: rustup target add ${{ matrix.target }}
-
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.cache_key }}
@@ -317,22 +309,19 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Build test artifacts
-        env:
-          TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
-        run: cargo test --workspace ${{ env.TARGET_FLAG }} --no-run
+        run: cargo test --workspace --no-run
 
       - name: Run tests
         env:
-          TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: cargo test --workspace ${{ env.TARGET_FLAG }}
+        run: cargo test --workspace
 
-  # Stage 3b: Linux musl (static, vendored OpenSSL + libcurl)
-  # Builds each arch natively on its own runner and links statically against the musl target.
-  # The musl OpenSSL/libcurl come from the vendored static build configured in cgx-core/Cargo.toml,
-  test-musl:
-    name: Test (Linux musl ${{ matrix.name }})
-    needs: [detect-pr-type, test-linux-amd64]
+  # Stage 3b: Linux musl build coverage (static, vendored OpenSSL + libcurl)
+  # Regular PR CI compiles tests on these targets but does not execute the slow integration suite.
+  # The musl OpenSSL/libcurl come from the vendored static build configured in cgx-core/Cargo.toml.
+  build-musl:
+    name: Build Tests (Linux musl ${{ matrix.name }})
+    needs: [detect-pr-type, lint]
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     strategy:
       fail-fast: false
@@ -368,23 +357,21 @@ jobs:
       - name: Build test artifacts
         run: cargo test --workspace --target ${{ matrix.target }} --no-run
 
-      - name: Run tests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: cargo test --workspace --target ${{ matrix.target }}
-
-  # Stage 4: Extended platforms (ARM + Intel Mac)
-  # Alternative architectures that in all likelihood work just as well as the primary arch,
-  # but we build and test them anyway in the interest of being thorough.
-  # No point wasting resources on these unless the primary platforms have already passed.
-  test-platforms-extended:
-    name: Test (${{ matrix.name }})
-    needs: [detect-pr-type, test-linux-amd64, test-platforms]
+  # Stage 3c: Additional platform build coverage
+  # These targets compile all tests on regular PRs. Full test execution for each target happens in
+  # the separate Full Platform Tests workflow before release-plz updates the release PR.
+  build-platforms:
+    name: Build Tests (${{ matrix.name }})
+    needs: [detect-pr-type, lint]
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     strategy:
       fail-fast: false
       matrix:
         include:
+          - os: windows-2025
+            name: Windows GNU amd64
+            target: x86_64-pc-windows-gnu
+            cache_key: x86_64-pc-windows-gnu
           - os: windows-11-arm
             name: Windows ARM64
             cache_key: aarch64-pc-windows-msvc
@@ -400,6 +387,10 @@ jobs:
 
       - *install-rust
 
+      - name: Add target
+        if: matrix.target
+        run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.cache_key }}
@@ -407,12 +398,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Build test artifacts
-        run: cargo test --workspace --no-run
-
-      - name: Run tests
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: cargo test --workspace
+          TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+        run: cargo test --workspace ${{ env.TARGET_FLAG }} --no-run
 
   # Aggregate job that depends on all previous builds.  This is the check that
   # must pass for the PR to be considered successful.
@@ -428,8 +416,8 @@ jobs:
         release-plz-check,
         test-linux-amd64,
         test-platforms,
-        test-musl,
-        test-platforms-extended,
+        build-musl,
+        build-platforms,
       ]
     runs-on: ubuntu-24.04
     if: always()
@@ -457,12 +445,12 @@ jobs:
             echo "All dependabot checks passed"
           else
             echo "Checking full CI for regular PR..."
-            # For regular PRs, check all full CI jobs
+            # For regular PRs, check representative full-test jobs and all build-only jobs.
             if [ "${{ needs.test-linux-amd64.result }}" != "success" ] || \
                [ "${{ needs.test-platforms.result }}" != "success" ] || \
-               [ "${{ needs.test-musl.result }}" != "success" ] || \
-               [ "${{ needs.test-platforms-extended.result }}" != "success" ]; then
-              echo "One or more test jobs failed"
+               [ "${{ needs.build-musl.result }}" != "success" ] || \
+               [ "${{ needs.build-platforms.result }}" != "success" ]; then
+              echo "One or more regular CI jobs failed"
               exit 1
             fi
             echo "All builds and tests passed"

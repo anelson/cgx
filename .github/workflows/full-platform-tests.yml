@@ -1,0 +1,264 @@
+name: Full Platform Tests
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  should-run:
+    name: Check Whether Full Tests Are Needed
+    runs-on: ubuntu-24.04
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+    steps:
+      - name: Decide whether to run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_FILE: full-platform-tests.yml
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch always runs the full platform test suite."
+            exit 0
+          fi
+
+          last_success_sha="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$WORKFLOW_FILE" \
+              --branch master \
+              --status success \
+              --limit 1 \
+              --json headSha \
+              --jq '.[0].headSha // ""'
+          )"
+
+          if [ -z "$last_success_sha" ]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+            echo "No previous successful full-platform run found."
+          elif [ "$last_success_sha" = "$GITHUB_SHA" ]; then
+            echo "should-run=false" >> "$GITHUB_OUTPUT"
+            echo "Current master SHA $GITHUB_SHA was already covered by a successful full-platform run."
+          else
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+            echo "Current master SHA $GITHUB_SHA is newer than last successful full-platform SHA $last_success_sha."
+          fi
+
+  test-linux-amd64:
+    name: Test (Linux amd64)
+    needs: should-run
+    if: needs.should-run.outputs.should-run == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - &install-rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: x86_64-unknown-linux-gnu
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build test artifacts
+        run: cargo test --workspace --no-run
+
+      - name: Verify runtime linkage (Linux)
+        run: |
+          LINKAGE_OUTPUT="$(ldd target/debug/cgx 2>&1 || true)"
+          echo "$LINKAGE_OUTPUT"
+
+          if echo "$LINKAGE_OUTPUT" | grep -q "not a dynamic executable"; then
+            echo "Static binary detected; shared-library runtime check skipped."
+            exit 0
+          fi
+
+          if echo "$LINKAGE_OUTPUT" | grep -q "not found"; then
+            echo "Missing runtime shared library dependency detected."
+            exit 1
+          fi
+
+      - name: Run tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo test --workspace
+
+  test-platforms:
+    name: Test (${{ matrix.name }})
+    needs: should-run
+    if: needs.should-run.outputs.should-run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            name: Windows amd64
+            cache_key: x86_64-pc-windows-msvc
+          - os: windows-2025
+            name: Windows GNU amd64
+            target: x86_64-pc-windows-gnu
+            cache_key: x86_64-pc-windows-gnu
+          - os: macos-15
+            name: Mac ARM64
+            cache_key: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - *install-rust
+
+      - name: Add target
+        if: matrix.target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.cache_key }}
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build test artifacts
+        env:
+          TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+        run: cargo test --workspace ${{ env.TARGET_FLAG }} --no-run
+
+      - name: Run tests
+        env:
+          TARGET_FLAG: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo test --workspace ${{ env.TARGET_FLAG }}
+
+  test-musl:
+    name: Test (Linux musl ${{ matrix.name }})
+    needs: should-run
+    if: needs.should-run.outputs.should-run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: amd64
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            name: arm64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - *install-rust
+
+      - name: Add musl target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.target }}
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build test artifacts
+        run: cargo test --workspace --target ${{ matrix.target }} --no-run
+
+      - name: Run tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+  test-platforms-extended:
+    name: Test (${{ matrix.name }})
+    needs: should-run
+    if: needs.should-run.outputs.should-run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-11-arm
+            name: Windows ARM64
+            cache_key: aarch64-pc-windows-msvc
+          - os: ubuntu-24.04-arm
+            name: Linux ARM64
+            cache_key: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            name: Mac Intel
+            cache_key: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - *install-rust
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.cache_key }}
+          add-job-id-key: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build test artifacts
+        run: cargo test --workspace --no-run
+
+      - name: Run tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo test --workspace
+
+  release-plz-pr:
+    name: Release-plz PR
+    needs:
+      [
+        should-run,
+        test-linux-amd64,
+        test-platforms,
+        test-musl,
+        test-platforms-extended,
+      ]
+    if: >-
+      needs.should-run.outputs.should-run == 'true' &&
+      github.repository_owner == 'anelson' &&
+      github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # Use the PAT, not GITHUB_TOKEN, so the PR-open and PR-update events
+          # actually fire workflow runs. GitHub's recursive-loop safeguard
+          # suppresses `pull_request` events caused by the default GITHUB_TOKEN,
+          # which would leave the release PR with no CI checks and therefore
+          # unmergeable under the required-status branch protection.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

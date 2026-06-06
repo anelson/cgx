@@ -126,6 +126,30 @@ just xmac-check
 
 Both of these assume that you're running on Linux (or, in the case of `xmac-check`, any platform that can run Docker).
 
+## CI Builds
+
+Regular PR CI is optimized for fast feedback without dropping platform build coverage. It runs the full test suite on
+one representative target per major OS family:
+
+- Linux amd64 on `ubuntu-24.04`
+- Windows amd64 MSVC on `windows-2025`
+- macOS ARM64 on `macos-15`
+
+The remaining supported targets still compile all test artifacts with `cargo test --workspace --no-run`, but do not run
+the integration tests during ordinary PR CI:
+
+- Windows GNU amd64
+- Linux musl amd64
+- Linux musl arm64
+- Windows ARM64
+- Linux ARM64
+- macOS Intel
+
+The full all-platform test suite runs in the `Full Platform Tests` workflow. That workflow runs nightly on `master`
+only when `master` has new commits since the last successful full-platform run, and it can also be started manually
+from GitHub Actions. Dependabot and release-plz PRs use intentionally lighter CI fast paths because their expected
+changes are narrow and mechanical.
+
 ## Release Infrastructure
 
 Releases are driven by release-plz and cargo-dist:
@@ -134,6 +158,20 @@ Releases are driven by release-plz and cargo-dist:
 - cargo-dist owns the generated release workflow in `.github/workflows/release.yml`.
 - `release.yml` and `.github/workflows/dist-dry-run-release.yml` are generated files. Do not edit them directly; run
   `just regen-dist-release` after changing cargo-dist config or release workflow setup.
+
+### Making a release
+
+Releases are prepared by the release-plz PR. That PR is created or updated only after the `Full Platform Tests` workflow
+passes on `master`.
+
+If new commits land on `master` after the release-plz PR was last updated, the release PR will not automatically include
+those commits until another full-platform workflow run succeeds. To refresh the release PR sooner than the next
+scheduled run, manually dispatch `Full Platform Tests` on `master` from GitHub Actions and wait for it to pass.
+
+Before merging a release-plz PR that is expected to produce a release, run the release dry run described below.
+
+To publish a release, review and merge the release-plz PR. Once the PR lands on `master`, the `Release-plz` workflow runs
+the release command that publishes crates and creates the version tag.
 
 ### Linux musl build targets
 
