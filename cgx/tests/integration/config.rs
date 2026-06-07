@@ -3,10 +3,51 @@
 //! These tests verify that cgx correctly loads and honors configuration from cgx.toml files,
 //! including the config hierarchy (user < cwd < CLI).
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use assert_fs::prelude::*;
+use cgx::messages::{Message, RunnerMessage};
 use predicates::prelude::*;
 
-use crate::utils::Cgx;
+use crate::utils::{Cgx, CommandExt};
+
+const TIMESTAMP_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../cgx-core/testdata/crates/timestamp"
+);
+
+fn timestamp_fixture(cgx: &Cgx) -> PathBuf {
+    copy_timestamp_fixture(cgx.test_fs().cwd.path())
+}
+
+fn copy_timestamp_fixture(root: &Path) -> PathBuf {
+    let destination = root.join("timestamp-fixture");
+    copy_dir(Path::new(TIMESTAMP_FIXTURE), &destination);
+    destination
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+
+        if source_path.is_dir() {
+            copy_dir(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).unwrap();
+        }
+    }
+}
+
+fn toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
 
 /// Test that a cgx.toml in the cwd pins a tool version.
 ///
@@ -214,4 +255,234 @@ cargo-binstall = { git = "https://github.com/cargo-bins/cargo-binstall.git", tag
         .assert()
         .success()
         .stdout(predicates::str::contains("cargo-binstall-1.14.0"));
+}
+
+#[test]
+fn config_features_are_honored_for_execution() {
+    let mut cgx = Cgx::with_test_fs();
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&format!(
+            r#"
+[tools]
+timestamp = {{ path = "{}", features = ["frobnulator"] }}
+"#,
+            toml_path(&timestamp_fixture)
+        ))
+        .unwrap();
+
+    cgx.cmd
+        .arg("timestamp")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Features enabled: frobnulator, gonkolator",
+        ));
+}
+
+#[test]
+fn cli_features_replace_config_features_for_execution() {
+    let mut cgx = Cgx::with_test_fs();
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&format!(
+            r#"
+[tools]
+timestamp = {{ path = "{}", features = ["frobnulator"] }}
+"#,
+            toml_path(&timestamp_fixture)
+        ))
+        .unwrap();
+
+    cgx.cmd
+        .arg("--features")
+        .arg("gonkolator")
+        .arg("timestamp")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Features enabled: gonkolator"))
+        .stdout(predicates::str::contains("frobnulator").not());
+}
+
+#[test]
+fn prefetch_single_tool_prepares_without_stdout() {
+    let mut cgx = Cgx::with_test_fs();
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.cmd
+        .arg("--prefetch")
+        .arg("--path")
+        .arg(&timestamp_fixture)
+        .arg("timestamp")
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+}
+
+#[test]
+fn prefetch_all_covers_tools_and_alias_invocations() {
+    let mut cgx = Cgx::with_test_fs();
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&format!(
+            r#"
+[tools]
+timestamp = {{ path = "{}" }}
+
+[aliases]
+ts = "timestamp"
+"#,
+            toml_path(&timestamp_fixture)
+        ))
+        .unwrap();
+
+    cgx.cmd.arg("--prefetch-all").with_json_messages();
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+
+    assert.success().stdout(predicates::str::is_empty());
+
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
+                    if invocation == "timestamp"
+            )
+        }),
+        "expected prefetch-all completion for configured tool"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
+                    if invocation == "ts"
+            )
+        }),
+        "expected prefetch-all completion for alias invocation"
+    );
+}
+
+#[test]
+fn prefetch_all_continues_after_failures_and_exits_nonzero() {
+    let mut cgx = Cgx::with_test_fs();
+    let missing_path = cgx.test_fs().cwd.child("missing");
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&format!(
+            r#"
+[tools]
+aaa_bad = {{ path = "{}" }}
+timestamp = {{ path = "{}" }}
+"#,
+            toml_path(missing_path.path()),
+            toml_path(&timestamp_fixture)
+        ))
+        .unwrap();
+
+    cgx.cmd.arg("--prefetch-all").with_json_messages();
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+
+    assert.failure();
+
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::PrefetchAllFailed { invocation, .. })
+                    if invocation == "aaa_bad"
+            )
+        }),
+        "expected prefetch-all failure for bad tool"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
+                    if invocation == "timestamp"
+            )
+        }),
+        "expected prefetch-all to continue after a failure"
+    );
+}
+
+#[test]
+fn list_tools_outputs_valid_toml_and_json_messages() {
+    let mut cgx = Cgx::with_test_fs();
+    let timestamp_fixture = timestamp_fixture(&cgx);
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&format!(
+            r#"
+[tools]
+timestamp = {{ path = "{}", features = ["frobnulator"] }}
+
+[aliases]
+ts = "timestamp"
+"#,
+            toml_path(&timestamp_fixture)
+        ))
+        .unwrap();
+
+    cgx.cmd.arg("--list-tools").with_json_messages();
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    let output = assert
+        .success()
+        .stdout(predicates::str::contains("[tools]"))
+        .stdout(predicates::str::contains("[aliases]"))
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::ListTool { name, .. }) if name == "timestamp"
+            )
+        }),
+        "expected list-tools JSON message for configured tool"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::ListAlias { name, target })
+                    if name == "ts" && target == "timestamp"
+            )
+        }),
+        "expected list-tools JSON message for configured alias"
+    );
+
+    let rendered_toml = String::from_utf8(output).unwrap();
+    let verify_cwd = assert_fs::TempDir::with_prefix("cgx-list-tools-verify-").unwrap();
+    let verify_home = assert_fs::TempDir::with_prefix("cgx-list-tools-home-").unwrap();
+    verify_cwd.child("cgx.toml").write_str(&rendered_toml).unwrap();
+
+    let mut verify = Cgx::find();
+    verify
+        .cmd
+        .current_dir(verify_cwd.path())
+        .env("HOME", verify_home.path())
+        .env("XDG_CONFIG_HOME", verify_home.path().join("config"))
+        .arg("--list-tools")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("timestamp"))
+        .stdout(predicates::str::contains("ts"));
 }

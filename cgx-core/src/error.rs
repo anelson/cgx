@@ -136,6 +136,9 @@ pub enum Error {
     #[snafu(display("JSON serialization error: {source}"))]
     Json { source: serde_json::Error },
 
+    #[snafu(display("TOML serialization error: {source}"))]
+    TomlSerialize { source: toml::ser::Error },
+
     #[snafu(display("Cannot download '{name}' v{version}: network required but offline mode enabled"))]
     OfflineMode { name: String, version: String },
 
@@ -257,6 +260,13 @@ pub enum Error {
 
     #[snafu(display("HTTP {status} from {url}"))]
     HttpStatus { url: String, status: u16 },
+
+    #[snafu(display(
+        "Failed to prefetch {} configured tool(s): {}",
+        failures.len(),
+        failures.join("; ")
+    ))]
+    PrefetchAllFailed { failures: Vec<String> },
 
     #[snafu(display("Invalid HTTP timeout duration '{value}': {source}"))]
     InvalidHttpTimeout {

@@ -84,7 +84,7 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 /// from a git repository, matching cargo's `GitReference` semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GitSelector {
-    /// Use the remote's default branch (fetches HEAD).
+    /// No branch has been explicitly specified, so sse the remote's default branch (fetches HEAD).
     DefaultBranch,
     /// Explicit branch name.
     Branch(String),

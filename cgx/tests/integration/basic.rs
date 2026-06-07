@@ -34,6 +34,6 @@ fn test_version_output() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::is_empty())
-        .stderr(predicates::str::is_match(r"cgx \d+\.\d+\.\d+ \([0-9a-f]{7} \d{4}-\d{2}-\d{2}\)\n").unwrap());
+        .stdout(predicates::str::is_match(r"cgx \d+\.\d+\.\d+ \([0-9a-f]{7} \d{4}-\d{2}-\d{2}\)\n").unwrap())
+        .stderr(predicates::str::is_empty());
 }

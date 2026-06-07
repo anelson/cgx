@@ -1,7 +1,7 @@
 pub mod logging;
 mod reporter;
 
-use std::ffi::OsString;
+use std::{collections::BTreeSet, ffi::OsString};
 
 /// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
 ///
@@ -13,7 +13,7 @@ pub use cgx_core::messages;
 use cgx_core::{
     Target,
     builder::BuildOptions,
-    cli::{CliArgs, MessageFormat},
+    cli::{Cli, CrateInvocation, MessageFormat, PrefetchAll},
     config::Config,
     cratespec::CrateSpec,
     error,
@@ -32,48 +32,34 @@ pub use snafu::Report as SnafuReport;
 /// Meant to be called from `main.rs` or other frontends.
 #[snafu::report]
 pub fn cgx_main() -> Result<()> {
-    let args = CliArgs::parse_from_cli_args();
+    let cli = Cli::parse_from_cli_args(cgx_version_string());
 
     // Initialize tracing early, before any other operations
-    logging::init(&args);
+    logging::init(cli.verbose());
 
-    if let Some(version_arg) = &args.version {
-        if version_arg.is_empty() {
-            let version = env!("CARGO_PKG_VERSION");
-
-            match (
-                option_env!("VERGEN_GIT_SHA"),
-                option_env!("VERGEN_GIT_COMMIT_DATE"),
-            ) {
-                (Some(sha), Some(date))
-                    if sha != "VERGEN_IDEMPOTENT_OUTPUT" && date != "VERGEN_IDEMPOTENT_OUTPUT" =>
-                {
-                    eprintln!("cgx {} ({} {})", version, sha, date);
-                }
-                _ => {
-                    eprintln!("cgx {}", version);
-                }
-            }
-            return Ok(());
-        }
-    }
-
-    let config = Config::load(&args)?;
+    let config = Config::load(&cli.config_inputs())?;
 
     // Apply log level from config file if appropriate
-    logging::apply_config(&config, &args);
+    logging::apply_config(&config, cli.verbose());
 
-    let crate_spec = CrateSpec::load(&config, &args)?;
-    let build_options = BuildOptions::load(&config, &args.build_options, args.verbose)?;
-
-    // Spawn a separate thread that will handle messages from the cgx core and report them to the user
-    // in the appropriate way.
-    let json_mode = matches!(args.message_format, Some(MessageFormat::Json));
+    // Spawn a separate thread that will handle messages from the cgx core and report them to the
+    // user in the appropriate way.
+    let json_mode = matches!(cli.message_format(), Some(MessageFormat::Json));
     let reporter_thread = reporter::ReporterThread::spawn(json_mode);
 
-    // Decode and prepare the command that the user wants to execute based on the args and env.
-    // This is where the heavy lifting happens.
-    let result = prepare_command(&reporter_thread, config, crate_spec, build_options, args);
+    // Decode and prepare the command that the user wants to execute. This is where the heavy
+    // lifting happens.
+    let result = match &cli {
+        Cli::ListTargets(invocation) => prepare_list_targets(&reporter_thread, &config, invocation),
+        Cli::ListTools(_) => prepare_list_tools(&reporter_thread, &config),
+        Cli::Prefetch(invocation) => prepare_prefetch(&reporter_thread, &config, invocation),
+        Cli::PrefetchAll(prefetch_all) => prepare_prefetch_all(&reporter_thread, &config, prefetch_all),
+        Cli::NoExec(invocation) => prepare_no_exec(&reporter_thread, &config, invocation),
+        Cli::Run {
+            invocation,
+            tool_args,
+        } => prepare_run(&reporter_thread, &config, invocation, tool_args.clone()),
+    };
 
     // Success or failure, there will be no more messages produced after this point, so join the
     // reporter thread to make sure we've processed any that were emitted before we proceed
@@ -83,7 +69,7 @@ pub fn cgx_main() -> Result<()> {
         Command::NoExec { bin_path } => {
             // Print path to stdout for scripting (e.g., binary=$(cgx --no-exec tool))
             println!("{}", bin_path.display());
-            return Ok(());
+            Ok(())
         }
         Command::Execute {
             bin_path,
@@ -121,12 +107,36 @@ pub fn cgx_main() -> Result<()> {
                 println!("example: {}", example.name);
             }
 
-            return Ok(());
+            Ok(())
         }
+        Command::ListTools { toml } => {
+            print!("{}", toml);
+            Ok(())
+        }
+        Command::Prefetched => Ok(()),
     }
 }
 
-/// Possible successful results of [`prepare_command`]
+/// Build the version string shown by `-V`/`--version`.
+///
+/// clap prepends the command name (`cgx`), so this returns just the version, including the git sha
+/// and commit date when they were available at build time (via `vergen`).
+fn cgx_version_string() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match (
+        option_env!("VERGEN_GIT_SHA"),
+        option_env!("VERGEN_GIT_COMMIT_DATE"),
+    ) {
+        (Some(sha), Some(date))
+            if sha != "VERGEN_IDEMPOTENT_OUTPUT" && date != "VERGEN_IDEMPOTENT_OUTPUT" =>
+        {
+            format!("{version} ({sha} {date})")
+        }
+        _ => version.to_string(),
+    }
+}
+
+/// Possible successful results of preparing a command for execution.
 enum Command {
     /// Binary is ready to go but user requested `--no-exec` so just print the path we'd execute
     NoExec { bin_path: std::path::PathBuf },
@@ -142,46 +152,191 @@ enum Command {
         bins: Vec<Target>,
         examples: Vec<Target>,
     },
+    /// User asked to list configured tools and aliases
+    ListTools { toml: String },
+    /// Binary preparation completed without execution
+    Prefetched,
 }
 
-/// Internal implementation that does the actual work of decoding the args, determinine that
-/// command the user wants performed, and preparing the environment as needed.
-fn prepare_command(
-    reporter_thread: &reporter::ReporterThread,
-    config: Config,
-    crate_spec: CrateSpec,
-    build_options: BuildOptions,
-    args: CliArgs,
-) -> Result<Command> {
-    let cgx = cgx_core::Cgx::new(config, reporter_thread.message_reporter().clone())?;
+fn prepare_list_tools(reporter_thread: &reporter::ReporterThread, config: &Config) -> Result<Command> {
+    let reporter = reporter_thread.message_reporter();
 
-    if args.list_targets {
-        let (crate_name, default, bins, examples) = cgx.list_targets(&crate_spec, &build_options)?;
-
-        return Ok(Command::ListTargets {
-            crate_name,
-            default,
-            bins,
-            examples,
-        });
+    let mut tools: Vec<_> = config.tools.iter().collect();
+    tools.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (name, tool_config) in tools {
+        reporter.report(|| messages::RunnerMessage::list_tool(name, tool_config));
     }
+
+    let mut aliases: Vec<_> = config.aliases.iter().collect();
+    aliases.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (name, target) in aliases {
+        reporter.report(|| messages::RunnerMessage::list_alias(name, target));
+    }
+
+    Ok(Command::ListTools {
+        toml: config.tools_toml()?,
+    })
+}
+
+fn prepare_prefetch_all(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    prefetch_all: &PrefetchAll,
+) -> Result<Command> {
+    let cgx = cgx_core::Cgx::new(config.clone(), reporter_thread.message_reporter().clone())?;
+    let invocations = configured_invocations(config);
+    let reporter = reporter_thread.message_reporter();
+    let mut failures = Vec::new();
+
+    for invocation in invocations {
+        reporter.report(|| messages::RunnerMessage::prefetch_all_started(&invocation));
+
+        let result = prefetch_invocation(&cgx, config, prefetch_all, &invocation);
+        match result {
+            Ok(bin_path) => {
+                reporter.report(|| messages::RunnerMessage::prefetch_all_completed(&invocation, &bin_path));
+            }
+            Err(err) => {
+                reporter.report(|| messages::RunnerMessage::prefetch_all_failed(&invocation, &err));
+                failures.push(format!("{}: {}", invocation, err));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(Command::Prefetched)
+    } else {
+        error::PrefetchAllFailedSnafu { failures }.fail()
+    }
+}
+
+fn configured_invocations(config: &Config) -> Vec<String> {
+    config
+        .tools
+        .keys()
+        .chain(config.aliases.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn prefetch_invocation(
+    cgx: &cgx_core::Cgx,
+    config: &Config,
+    prefetch_all: &PrefetchAll,
+    invocation: &str,
+) -> Result<std::path::PathBuf> {
+    let invocation = prefetch_all.invocation_for(invocation);
+
+    let crate_spec = CrateSpec::load(config, &invocation)?;
+    let build_options = BuildOptions::load_for_tool_name(
+        config,
+        &invocation.build_options,
+        invocation.reporting.verbose,
+        crate_spec.configured_tool_name(),
+    )?;
+
+    cgx.crate_to_bin(&crate_spec, &build_options)
+}
+
+/// Resolve a single crate invocation into a [`cgx_core::Cgx`] engine plus its crate spec and build
+/// options, shared by the run/no-exec/prefetch/list-targets commands.
+fn prepare_engine(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    invocation: &CrateInvocation,
+) -> Result<(cgx_core::Cgx, CrateSpec, BuildOptions)> {
+    let crate_spec = CrateSpec::load(config, invocation)?;
+    let build_options = BuildOptions::load_for_tool_name(
+        config,
+        &invocation.build_options,
+        invocation.reporting.verbose,
+        crate_spec.configured_tool_name(),
+    )?;
+    let cgx = cgx_core::Cgx::new(config.clone(), reporter_thread.message_reporter().clone())?;
+
+    Ok((cgx, crate_spec, build_options))
+}
+
+/// Prepare and execute a crate, forwarding `tool_args` to the executed binary.
+fn prepare_run(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    invocation: &CrateInvocation,
+    tool_args: Vec<OsString>,
+) -> Result<Command> {
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let bin_path = cgx.crate_to_bin(&crate_spec, &build_options)?;
+
+    reporter_thread
+        .message_reporter()
+        .report(|| messages::RunnerMessage::execution_plan(&bin_path, &tool_args, false));
+
+    Ok(Command::Execute {
+        bin_path,
+        binary_args: tool_args,
+    })
+}
+
+/// Prepare a crate without executing it, printing the resolved binary path to stdout.
+fn prepare_no_exec(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    invocation: &CrateInvocation,
+) -> Result<Command> {
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let bin_path = cgx.crate_to_bin(&crate_spec, &build_options)?;
+
+    let no_args: Vec<OsString> = Vec::new();
+    reporter_thread
+        .message_reporter()
+        .report(|| messages::RunnerMessage::execution_plan(&bin_path, &no_args, true));
+
+    Ok(Command::NoExec { bin_path })
+}
+
+/// Prepare a crate without executing it or printing its path.
+fn prepare_prefetch(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    invocation: &CrateInvocation,
+) -> Result<Command> {
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+
+    let label = invocation
+        .crate_spec
+        .as_deref()
+        .or_else(|| crate_spec.configured_tool_name())
+        .unwrap_or("<source>")
+        .to_string();
+
+    reporter_thread
+        .message_reporter()
+        .report(|| messages::RunnerMessage::prefetch_started(&label));
 
     let bin_path = cgx.crate_to_bin(&crate_spec, &build_options)?;
 
-    // Extract arguments to pass to the binary
-    let binary_args = CrateSpec::get_binary_args(&args);
-
-    // Report the execution plan
     reporter_thread
         .message_reporter()
-        .report(|| messages::RunnerMessage::execution_plan(&bin_path, &binary_args, args.no_exec));
+        .report(|| messages::RunnerMessage::prefetch_completed(&label, &bin_path));
 
-    if args.no_exec {
-        Ok(Command::NoExec { bin_path })
-    } else {
-        Ok(Command::Execute {
-            bin_path,
-            binary_args,
-        })
-    }
+    Ok(Command::Prefetched)
+}
+
+/// Resolve a crate and list its runnable targets without building or executing.
+fn prepare_list_targets(
+    reporter_thread: &reporter::ReporterThread,
+    config: &Config,
+    invocation: &CrateInvocation,
+) -> Result<Command> {
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let (crate_name, default, bins, examples) = cgx.list_targets(&crate_spec, &build_options)?;
+
+    Ok(Command::ListTargets {
+        crate_name,
+        default,
+        bins,
+        examples,
+    })
 }

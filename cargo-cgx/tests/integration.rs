@@ -43,8 +43,8 @@ fn test_version_output() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::is_empty())
-        .stderr(predicates::str::is_match(r"cgx \d+\.\d+\.\d+").unwrap());
+        .stdout(predicates::str::is_match(r"cgx \d+\.\d+\.\d+").unwrap())
+        .stderr(predicates::str::is_empty());
 }
 
 /// Test the cargo subcommand invocation pattern: `cargo cgx` -> `cargo-cgx cgx`
@@ -76,8 +76,8 @@ fn test_cargo_subcommand_with_version() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::is_empty())
-        .stderr(predicates::str::is_match(r"cgx \d+\.\d+\.\d+").unwrap());
+        .stdout(predicates::str::is_match(r"cgx \d+\.\d+\.\d+").unwrap())
+        .stderr(predicates::str::is_empty());
 }
 
 /// Test that the cargo subcommand pattern works with cgx flags after the subcommand arg.

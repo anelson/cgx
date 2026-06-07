@@ -3,7 +3,7 @@ use std::{io::IsTerminal, sync::OnceLock};
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
-use crate::{CliArgs, Config};
+use crate::Config;
 
 /// Default tracing filter expression for INFO level logging.
 ///
@@ -45,8 +45,8 @@ static RELOAD_HANDLE: OnceLock<ReloadHandle> = OnceLock::new();
 ///
 /// This function will panic if called more than once in the same process, as the
 /// global tracing subscriber can only be initialized once.
-pub(crate) fn init(args: &CliArgs) {
-    let (level, use_simple_format) = match args.verbose {
+pub(crate) fn init(verbose: u8) {
+    let (level, use_simple_format) = match verbose {
         0 => (Level::WARN, true),
         1 => (Level::INFO, false),
         2 => (Level::DEBUG, false),
@@ -59,7 +59,7 @@ pub(crate) fn init(args: &CliArgs) {
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| {
             // Neither env var set, use hard-coded default based on verbosity
-            if args.verbose == 0 {
+            if verbose == 0 {
                 // For silent mode, only show WARN and ERROR
                 EnvFilter::new("warn")
             } else {
@@ -130,9 +130,9 @@ pub(crate) fn init(args: &CliArgs) {
 /// - `"error"` - Errors only
 ///
 /// More complex filter syntax is also supported (e.g., `"cgx=debug,info"`).
-pub(crate) fn apply_config(config: &Config, args: &CliArgs) {
+pub(crate) fn apply_config(config: &Config, verbose: u8) {
     // Don't override if user explicitly set verbosity via CLI
-    if args.verbose > 0 {
+    if verbose > 0 {
         tracing::debug!("Not applying config log_level: CLI verbosity flag takes precedence");
         return;
     }

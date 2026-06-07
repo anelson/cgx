@@ -171,6 +171,30 @@ impl BuildOptions {
         })
     }
 
+    /// Load build options for a configured tool name.
+    ///
+    /// This starts with [`Self::load`] and then applies configured tool features when the CLI did
+    /// not provide `--features`.
+    pub fn load_for_tool_name(
+        config: &Config,
+        args: &BuildOptionsArgs,
+        verbose: u8,
+        tool_name: Option<&str>,
+    ) -> Result<Self> {
+        let mut options = Self::load(config, args, verbose)?;
+
+        if args.features.is_none() {
+            if let Some(features) = tool_name
+                .and_then(|name| config.tools.get(name))
+                .and_then(crate::config::ToolConfig::features)
+            {
+                options.features = features.to_vec();
+            }
+        }
+
+        Ok(options)
+    }
+
     /// Parse a feature string into a vector of feature names.
     ///
     /// Handles both comma-separated and space-separated features.
@@ -1559,7 +1583,7 @@ mod tests {
 
     mod build_options {
         use super::*;
-        use crate::cli::CliArgs;
+        use crate::cli::Cli;
 
         mod features_parsing {
             use super::*;
@@ -1568,8 +1592,10 @@ mod tests {
             #[test]
             fn empty_features_string() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", "", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", "", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.features.is_empty());
             }
@@ -1578,8 +1604,10 @@ mod tests {
             #[test]
             fn single_feature() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", "feat1", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", "feat1", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.features, vec!["feat1"]);
             }
@@ -1588,8 +1616,10 @@ mod tests {
             #[test]
             fn comma_separated_features() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", "feat1,feat2", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", "feat1,feat2", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1598,8 +1628,10 @@ mod tests {
             #[test]
             fn space_separated_features() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", "feat1 feat2", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", "feat1 feat2", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1608,8 +1640,10 @@ mod tests {
             #[test]
             fn mixed_separator_features() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", "feat1, feat2 feat3", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", "feat1, feat2 feat3", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2", "feat3"]);
             }
@@ -1618,8 +1652,10 @@ mod tests {
             #[test]
             fn whitespace_handling() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--features", " feat1 , feat2 ", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--features", " feat1 , feat2 ", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1628,8 +1664,10 @@ mod tests {
             #[test]
             fn no_features_flag() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.features.is_empty());
             }
@@ -1642,8 +1680,10 @@ mod tests {
             #[test]
             fn debug_flag_maps_to_dev() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--debug", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--debug", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.profile, Some("dev".to_string()));
             }
@@ -1652,8 +1692,10 @@ mod tests {
             #[test]
             fn explicit_profile() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--profile", "custom", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--profile", "custom", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.profile, Some("custom".to_string()));
             }
@@ -1662,8 +1704,10 @@ mod tests {
             #[test]
             fn no_profile_specified() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.profile, None);
             }
@@ -1676,8 +1720,10 @@ mod tests {
             #[test]
             fn default_bin_when_no_flags() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::DefaultBin);
             }
@@ -1686,8 +1732,10 @@ mod tests {
             #[test]
             fn explicit_bin() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--bin", "foo", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--bin", "foo", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::Bin("foo".to_string()));
             }
@@ -1696,8 +1744,10 @@ mod tests {
             #[test]
             fn explicit_example() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--example", "bar", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--example", "bar", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::Example("bar".to_string()));
             }
@@ -1713,8 +1763,10 @@ mod tests {
             #[test]
             fn reads_default_locked_true() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.locked, "Should read locked=true from default Config");
                 assert!(!options.offline, "Should read offline=false from default Config");
@@ -1726,8 +1778,10 @@ mod tests {
                     locked: false,
                     ..Default::default()
                 };
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(!options.locked, "Should read locked=false from Config");
             }
@@ -1738,8 +1792,10 @@ mod tests {
                     offline: true,
                     ..Default::default()
                 };
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.offline, "Should read offline=true from Config");
             }
@@ -1751,8 +1807,10 @@ mod tests {
                     offline: true,
                     ..Default::default()
                 };
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(!options.locked, "Should read locked=false from Config");
                 assert!(options.offline, "Should read offline=true from Config");
@@ -1770,8 +1828,10 @@ mod tests {
             #[test]
             fn reads_default_none() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(
                     options.toolchain, None,
@@ -1785,8 +1845,10 @@ mod tests {
                     toolchain: Some("stable".to_string()),
                     ..Default::default()
                 };
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(
                     options.toolchain,
@@ -1801,8 +1863,10 @@ mod tests {
                     toolchain: Some("nightly".to_string()),
                     ..Default::default()
                 };
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(
                     options.toolchain,
@@ -1819,8 +1883,10 @@ mod tests {
             #[test]
             fn all_features() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--all-features", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--all-features", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.all_features);
             }
@@ -1829,8 +1895,10 @@ mod tests {
             #[test]
             fn no_default_features() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--no-default-features", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--no-default-features", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.no_default_features);
             }
@@ -1839,8 +1907,10 @@ mod tests {
             #[test]
             fn target() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--target", "x86_64-unknown-linux-gnu", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--target", "x86_64-unknown-linux-gnu", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.target, Some("x86_64-unknown-linux-gnu".to_string()));
             }
@@ -1849,8 +1919,10 @@ mod tests {
             #[test]
             fn jobs() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--jobs", "4", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--jobs", "4", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert_eq!(options.jobs, Some(4));
             }
@@ -1859,8 +1931,10 @@ mod tests {
             #[test]
             fn ignore_rust_version() {
                 let config = Config::default();
-                let args = CliArgs::parse_from_test_args(["--ignore-rust-version", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["--ignore-rust-version", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
 
                 assert!(options.ignore_rust_version);
             }
@@ -1870,16 +1944,22 @@ mod tests {
             fn cargo_verbosity() {
                 let config = Config::default();
 
-                let args = CliArgs::parse_from_test_args(["tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
                 assert_eq!(options.cargo_verbosity, CargoVerbosity::Normal);
 
-                let args = CliArgs::parse_from_test_args(["-v", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["-v", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
                 assert_eq!(options.cargo_verbosity, CargoVerbosity::Verbose);
 
-                let args = CliArgs::parse_from_test_args(["-vv", "tool"]);
-                let options = BuildOptions::load(&config, &args.build_options, args.verbose).unwrap();
+                let args = Cli::parse_from_test_args(["-vv", "tool"]);
+                let options =
+                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
+                        .unwrap();
                 assert_eq!(options.cargo_verbosity, CargoVerbosity::VeryVerbose);
             }
         }
