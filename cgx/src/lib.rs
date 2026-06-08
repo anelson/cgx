@@ -13,9 +13,9 @@ pub use cgx_core::messages;
 use cgx_core::{
     Target,
     builder::BuildOptions,
-    cli::{Cli, CrateInvocation, MessageFormat, PrefetchAll},
+    cli::{Cli, CrateArgs, MessageFormat, PrefetchAll},
     config::Config,
-    cratespec::CrateSpec,
+    cratespec::{CrateRequest, CrateSpec},
     error,
 };
 // Re-export key types from cgx-core for convenience
@@ -35,12 +35,12 @@ pub fn cgx_main() -> Result<()> {
     let cli = Cli::parse_from_cli_args(cgx_version_string());
 
     // Initialize tracing early, before any other operations
-    logging::init(cli.verbose());
+    logging::init(cli.verbosity());
 
-    let config = Config::load(&cli.config_inputs())?;
+    let config = Config::load(&cli.to_config_overrides())?;
 
     // Apply log level from config file if appropriate
-    logging::apply_config(&config, cli.verbose());
+    logging::apply_config(&config);
 
     // Spawn a separate thread that will handle messages from the cgx core and report them to the
     // user in the appropriate way.
@@ -50,15 +50,12 @@ pub fn cgx_main() -> Result<()> {
     // Decode and prepare the command that the user wants to execute. This is where the heavy
     // lifting happens.
     let result = match &cli {
-        Cli::ListTargets(invocation) => prepare_list_targets(&reporter_thread, &config, invocation),
+        Cli::ListTargets(args) => prepare_list_targets(&reporter_thread, &config, args),
         Cli::ListTools(_) => prepare_list_tools(&reporter_thread, &config),
-        Cli::Prefetch(invocation) => prepare_prefetch(&reporter_thread, &config, invocation),
+        Cli::Prefetch(args) => prepare_prefetch(&reporter_thread, &config, args),
         Cli::PrefetchAll(prefetch_all) => prepare_prefetch_all(&reporter_thread, &config, prefetch_all),
-        Cli::NoExec(invocation) => prepare_no_exec(&reporter_thread, &config, invocation),
-        Cli::Run {
-            invocation,
-            tool_args,
-        } => prepare_run(&reporter_thread, &config, invocation, tool_args.clone()),
+        Cli::NoExec(args) => prepare_no_exec(&reporter_thread, &config, args),
+        Cli::Run { args, tool_args } => prepare_run(&reporter_thread, &config, args, tool_args.clone()),
     };
 
     // Success or failure, there will be no more messages produced after this point, so join the
@@ -225,35 +222,25 @@ fn prefetch_invocation(
     cgx: &cgx_core::Cgx,
     config: &Config,
     prefetch_all: &PrefetchAll,
-    invocation: &str,
+    tool_name: &str,
 ) -> Result<std::path::PathBuf> {
-    let invocation = prefetch_all.invocation_for(invocation);
-
-    let crate_spec = CrateSpec::load(config, &invocation)?;
-    let build_options = BuildOptions::load_for_tool_name(
-        config,
-        &invocation.build_options,
-        invocation.reporting.verbose,
-        crate_spec.configured_tool_name(),
-    )?;
+    let crate_spec = CrateSpec::load(config, &CrateRequest::for_configured_tool(tool_name))?;
+    let build_options =
+        BuildOptions::load_for_crate(config, &prefetch_all.to_build_overrides(), &crate_spec)?;
 
     cgx.crate_to_bin(&crate_spec, &build_options)
 }
 
-/// Resolve a single crate invocation into a [`cgx_core::Cgx`] engine plus its crate spec and build
-/// options, shared by the run/no-exec/prefetch/list-targets commands.
+/// Resolve a single set of crate arguments into a [`cgx_core::Cgx`] engine plus its crate spec and
+/// build options, for use by multiple commands that need a `Cgx` instance to operate on a specific
+/// crate.
 fn prepare_engine(
     reporter_thread: &reporter::ReporterThread,
     config: &Config,
-    invocation: &CrateInvocation,
+    args: &CrateArgs,
 ) -> Result<(cgx_core::Cgx, CrateSpec, BuildOptions)> {
-    let crate_spec = CrateSpec::load(config, invocation)?;
-    let build_options = BuildOptions::load_for_tool_name(
-        config,
-        &invocation.build_options,
-        invocation.reporting.verbose,
-        crate_spec.configured_tool_name(),
-    )?;
+    let crate_spec = CrateSpec::load(config, &args.crate_request()?)?;
+    let build_options = BuildOptions::load_for_crate(config, &args.to_build_overrides(), &crate_spec)?;
     let cgx = cgx_core::Cgx::new(config.clone(), reporter_thread.message_reporter().clone())?;
 
     Ok((cgx, crate_spec, build_options))
@@ -263,10 +250,10 @@ fn prepare_engine(
 fn prepare_run(
     reporter_thread: &reporter::ReporterThread,
     config: &Config,
-    invocation: &CrateInvocation,
+    args: &CrateArgs,
     tool_args: Vec<OsString>,
 ) -> Result<Command> {
-    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, args)?;
     let bin_path = cgx.crate_to_bin(&crate_spec, &build_options)?;
 
     reporter_thread
@@ -283,9 +270,9 @@ fn prepare_run(
 fn prepare_no_exec(
     reporter_thread: &reporter::ReporterThread,
     config: &Config,
-    invocation: &CrateInvocation,
+    args: &CrateArgs,
 ) -> Result<Command> {
-    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, args)?;
     let bin_path = cgx.crate_to_bin(&crate_spec, &build_options)?;
 
     let no_args: Vec<OsString> = Vec::new();
@@ -300,11 +287,11 @@ fn prepare_no_exec(
 fn prepare_prefetch(
     reporter_thread: &reporter::ReporterThread,
     config: &Config,
-    invocation: &CrateInvocation,
+    args: &CrateArgs,
 ) -> Result<Command> {
-    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, args)?;
 
-    let label = invocation
+    let label = args
         .crate_spec
         .as_deref()
         .or_else(|| crate_spec.configured_tool_name())
@@ -328,9 +315,9 @@ fn prepare_prefetch(
 fn prepare_list_targets(
     reporter_thread: &reporter::ReporterThread,
     config: &Config,
-    invocation: &CrateInvocation,
+    args: &CrateArgs,
 ) -> Result<Command> {
-    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, invocation)?;
+    let (cgx, crate_spec, build_options) = prepare_engine(reporter_thread, config, args)?;
     let (crate_name, default, bins, examples) = cgx.list_targets(&crate_spec, &build_options)?;
 
     Ok(Command::ListTargets {

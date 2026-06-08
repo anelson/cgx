@@ -3,51 +3,11 @@
 //! These tests verify that cgx correctly loads and honors configuration from cgx.toml files,
 //! including the config hierarchy (user < cwd < CLI).
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
-
 use assert_fs::prelude::*;
-use cgx::messages::{Message, RunnerMessage};
+use cgx::messages::{CgxMessage, Message, Provenance, RunnerMessage};
 use predicates::prelude::*;
 
 use crate::utils::{Cgx, CommandExt};
-
-const TIMESTAMP_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../cgx-core/testdata/crates/timestamp"
-);
-
-fn timestamp_fixture(cgx: &Cgx) -> PathBuf {
-    copy_timestamp_fixture(cgx.test_fs().cwd.path())
-}
-
-fn copy_timestamp_fixture(root: &Path) -> PathBuf {
-    let destination = root.join("timestamp-fixture");
-    copy_dir(Path::new(TIMESTAMP_FIXTURE), &destination);
-    destination
-}
-
-fn copy_dir(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination).unwrap();
-
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-
-        if source_path.is_dir() {
-            copy_dir(&source_path, &destination_path);
-        } else {
-            fs::copy(&source_path, &destination_path).unwrap();
-        }
-    }
-}
-
-fn toml_path(path: &Path) -> String {
-    path.display().to_string().replace('\\', "\\\\")
-}
 
 /// Test that a cgx.toml in the cwd pins a tool version.
 ///
@@ -258,91 +218,118 @@ cargo-binstall = { git = "https://github.com/cargo-bins/cargo-binstall.git", tag
 }
 
 #[test]
-fn config_features_are_honored_for_execution() {
+fn config_features_are_honored() {
     let mut cgx = Cgx::with_test_fs();
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
+    // A feature configured for a tool in `[tools]` must reach the resolved build plan. We assert on
+    // the `CratePlan` message via `--list-targets` (resolve + metadata, no compile) rather than
+    // running the tool. `vendored-openssl` is a real `eza` feature, so resolution succeeds.
     cgx.test_fs()
         .cwd
         .child("cgx.toml")
-        .write_str(&format!(
+        .write_str(
             r#"
 [tools]
-timestamp = {{ path = "{}", features = ["frobnulator"] }}
+eza = { version = "=0.23.1", features = ["vendored-openssl"] }
 "#,
-            toml_path(&timestamp_fixture)
-        ))
+        )
         .unwrap();
 
-    cgx.cmd
-        .arg("timestamp")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(
-            "Features enabled: frobnulator, gonkolator",
-        ));
+    cgx.cmd.arg("--list-targets").with_json_messages().arg("eza");
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    assert.success();
+
+    let features = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features.clone()),
+            _ => None,
+        })
+        .expect("expected a CratePlan message");
+
+    assert_eq!(features, vec!["vendored-openssl"]);
 }
 
 #[test]
-fn cli_features_replace_config_features_for_execution() {
+fn cli_features_replace_config_features() {
     let mut cgx = Cgx::with_test_fs();
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
+    // `--features` on the CLI replaces (does not merge with) the configured tool features, so only
+    // the CLI feature reaches the build plan. The configured feature is never applied, so it need
+    // not be a real `eza` feature.
     cgx.test_fs()
         .cwd
         .child("cgx.toml")
-        .write_str(&format!(
+        .write_str(
             r#"
 [tools]
-timestamp = {{ path = "{}", features = ["frobnulator"] }}
+eza = { version = "=0.23.1", features = ["a-config-only-feature"] }
 "#,
-            toml_path(&timestamp_fixture)
-        ))
+        )
         .unwrap();
 
     cgx.cmd
+        .arg("--list-targets")
         .arg("--features")
-        .arg("gonkolator")
-        .arg("timestamp")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Features enabled: gonkolator"))
-        .stdout(predicates::str::contains("frobnulator").not());
+        .arg("vendored-openssl")
+        .with_json_messages()
+        .arg("eza");
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    assert.success();
+
+    let features = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features.clone()),
+            _ => None,
+        })
+        .expect("expected a CratePlan message");
+    assert_eq!(features, vec!["vendored-openssl"]);
+    assert!(!features.contains(&"a-config-only-feature".to_string()));
 }
 
 #[test]
 fn prefetch_single_tool_prepares_without_stdout() {
     let mut cgx = Cgx::with_test_fs();
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
-    cgx.cmd
-        .arg("--prefetch")
-        .arg("--path")
-        .arg(&timestamp_fixture)
-        .arg("timestamp")
-        .assert()
-        .success()
-        .stdout(predicates::str::is_empty());
+    // Default options leave a pre-built binary eligible, so this prepares `eza` without compiling.
+    cgx.cmd.arg("--prefetch").with_json_messages().arg("eza@=0.23.1");
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    assert.success().stdout(predicates::str::is_empty());
+
+    // Preparing the crate emits a provenance message recording how (and where) the binary was obtained.
+    let binary_path = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::Prebuilt { binary_path, .. },
+                ..
+            }) => Some(binary_path.clone()),
+            _ => None,
+        })
+        .expect("expected a CrateProvenance message reporting a pre-built binary");
+    assert!(
+        !binary_path.as_os_str().is_empty(),
+        "prebuilt provenance should report the binary path"
+    );
 }
 
 #[test]
 fn prefetch_all_covers_tools_and_alias_invocations() {
     let mut cgx = Cgx::with_test_fs();
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
     cgx.test_fs()
         .cwd
         .child("cgx.toml")
-        .write_str(&format!(
+        .write_str(
             r#"
 [tools]
-timestamp = {{ path = "{}" }}
+eza = "=0.23.1"
 
 [aliases]
-ts = "timestamp"
+e = "eza"
 "#,
-            toml_path(&timestamp_fixture)
-        ))
+        )
         .unwrap();
 
     cgx.cmd.arg("--prefetch-all").with_json_messages();
@@ -355,7 +342,7 @@ ts = "timestamp"
             matches!(
                 message,
                 Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "timestamp"
+                    if invocation == "eza"
             )
         }),
         "expected prefetch-all completion for configured tool"
@@ -365,7 +352,7 @@ ts = "timestamp"
             matches!(
                 message,
                 Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "ts"
+                    if invocation == "e"
             )
         }),
         "expected prefetch-all completion for alias invocation"
@@ -376,8 +363,9 @@ ts = "timestamp"
 fn prefetch_all_continues_after_failures_and_exits_nonzero() {
     let mut cgx = Cgx::with_test_fs();
     let missing_path = cgx.test_fs().cwd.child("missing");
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
+    // `aaa_bad` points at a missing path so it fails deterministically (no network); `eza` still
+    // resolves, and the overall command exits non-zero.
     cgx.test_fs()
         .cwd
         .child("cgx.toml")
@@ -385,10 +373,9 @@ fn prefetch_all_continues_after_failures_and_exits_nonzero() {
             r#"
 [tools]
 aaa_bad = {{ path = "{}" }}
-timestamp = {{ path = "{}" }}
+eza = "=0.23.1"
 "#,
-            toml_path(missing_path.path()),
-            toml_path(&timestamp_fixture)
+            missing_path.display().to_string().replace('\\', "\\\\"),
         ))
         .unwrap();
 
@@ -412,7 +399,7 @@ timestamp = {{ path = "{}" }}
             matches!(
                 message,
                 Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "timestamp"
+                    if invocation == "eza"
             )
         }),
         "expected prefetch-all to continue after a failure"
@@ -422,21 +409,20 @@ timestamp = {{ path = "{}" }}
 #[test]
 fn list_tools_outputs_valid_toml_and_json_messages() {
     let mut cgx = Cgx::with_test_fs();
-    let timestamp_fixture = timestamp_fixture(&cgx);
 
+    // `--list-tools` only renders the merged config, so no crate is resolved or built.
     cgx.test_fs()
         .cwd
         .child("cgx.toml")
-        .write_str(&format!(
+        .write_str(
             r#"
 [tools]
-timestamp = {{ path = "{}", features = ["frobnulator"] }}
+eza = { version = "=0.23.1", features = ["vendored-openssl"] }
 
 [aliases]
-ts = "timestamp"
+e = "eza"
 "#,
-            toml_path(&timestamp_fixture)
-        ))
+        )
         .unwrap();
 
     cgx.cmd.arg("--list-tools").with_json_messages();
@@ -453,7 +439,7 @@ ts = "timestamp"
         messages.iter().any(|message| {
             matches!(
                 message,
-                Message::Runner(RunnerMessage::ListTool { name, .. }) if name == "timestamp"
+                Message::Runner(RunnerMessage::ListTool { name, .. }) if name == "eza"
             )
         }),
         "expected list-tools JSON message for configured tool"
@@ -463,7 +449,7 @@ ts = "timestamp"
             matches!(
                 message,
                 Message::Runner(RunnerMessage::ListAlias { name, target })
-                    if name == "ts" && target == "timestamp"
+                    if name == "e" && target == "eza"
             )
         }),
         "expected list-tools JSON message for configured alias"
@@ -483,6 +469,6 @@ ts = "timestamp"
         .arg("--list-tools")
         .assert()
         .success()
-        .stdout(predicates::str::contains("timestamp"))
-        .stdout(predicates::str::contains("ts"));
+        .stdout(predicates::str::contains("eza"))
+        .stdout(predicates::str::contains("e"));
 }

@@ -7,7 +7,9 @@ use clap::{
 use strum::VariantNames;
 
 use crate::{
-    config::{BinaryProvider, UsePrebuiltBinaries},
+    builder::{BuildOverrides, BuildTarget},
+    config::{BinaryProvider, ConfigOverrides, LockMode, UsePrebuiltBinaries, Verbosity},
+    cratespec::{CrateRequest, Source},
     git::GitSelector,
 };
 
@@ -16,18 +18,18 @@ use crate::{
 #[derive(Clone, Debug)]
 pub enum Cli {
     /// Resolve a crate and list its runnable targets without building or executing.
-    ListTargets(CrateInvocation),
+    ListTargets(CrateArgs),
     /// Render the merged configured tools and aliases without resolving them.
     ListTools(ListTools),
     /// Prepare a crate without executing it or printing its path.
-    Prefetch(CrateInvocation),
+    Prefetch(CrateArgs),
     /// Prefetch every tool and alias configured in the `cgx` configuration.
     PrefetchAll(PrefetchAll),
     /// Prepare a crate without executing it; print the resolved binary path to stdout.
-    NoExec(CrateInvocation),
+    NoExec(CrateArgs),
     /// Prepare a crate and execute it, forwarding `tool_args` to the executed binary.
     Run {
-        invocation: CrateInvocation,
+        args: CrateArgs,
         tool_args: Vec<OsString>,
     },
 }
@@ -43,40 +45,19 @@ impl Cli {
         Self::parse_from_arg_strings(args, Some(version)).unwrap_or_else(|err| err.exit())
     }
 
-    /// Gather the configuration-affecting arguments this command supplies, defaulting the groups
-    /// the command does not accept.
+    /// Translate the configuration-affecting arguments this command supplies into a
+    /// [`ConfigOverrides`], leaving as default any options that the command doesn't accept.
     ///
-    /// Not all commands even take all config options, but by having a single [`ConfigInputs`]
-    /// representation for the sum total of CLI-based config settings it makes it easier to load
-    /// and render the config in a single shared code path.
-    pub fn config_inputs(&self) -> ConfigInputs {
+    /// Not all commands even take all config options, but by translating each into a single
+    /// [`ConfigOverrides`] representation of the sum total of CLI-based config settings it makes it
+    /// easier to load and render the config in a single shared code path.
+    pub fn to_config_overrides(&self) -> ConfigOverrides {
         match self {
-            Cli::ListTargets(invocation)
-            | Cli::Prefetch(invocation)
-            | Cli::NoExec(invocation)
-            | Cli::Run { invocation, .. } => ConfigInputs {
-                config: invocation.config.clone(),
-                http: invocation.http.clone(),
-                prebuilt: invocation.prebuilt.clone(),
-                cargo: invocation.cargo.clone(),
-                toolchain: invocation.toolchain.clone(),
-            },
-            Cli::ListTools(list_tools) => ConfigInputs {
-                config: list_tools.config.clone(),
-                toolchain: list_tools.toolchain.clone(),
-                ..ConfigInputs::default()
-            },
-            Cli::PrefetchAll(prefetch_all) => ConfigInputs {
-                config: prefetch_all.config.clone(),
-                http: prefetch_all.http.clone(),
-                prebuilt: PrebuiltBinaryArgs::default(),
-                cargo: CargoBehaviorArgs {
-                    offline: prefetch_all.offline,
-                    refresh: prefetch_all.refresh,
-                    ..CargoBehaviorArgs::default()
-                },
-                toolchain: prefetch_all.toolchain.clone(),
-            },
+            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => {
+                args.to_config_overrides()
+            }
+            Cli::ListTools(list_tools) => list_tools.to_config_overrides(),
+            Cli::PrefetchAll(prefetch_all) => prefetch_all.to_config_overrides(),
         }
     }
 
@@ -86,17 +67,16 @@ impl Cli {
     }
 
     /// The requested verbosity level for this command.
-    pub fn verbose(&self) -> u8 {
-        self.reporting().verbose
+    pub fn verbosity(&self) -> Verbosity {
+        Verbosity::from_count(self.reporting().verbose)
     }
 
     /// The reporting controls carried by this command's variant.
     fn reporting(&self) -> &ReportingArgs {
         match self {
-            Cli::ListTargets(invocation)
-            | Cli::Prefetch(invocation)
-            | Cli::NoExec(invocation)
-            | Cli::Run { invocation, .. } => &invocation.reporting,
+            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => {
+                &args.reporting
+            }
             Cli::ListTools(list_tools) => &list_tools.reporting,
             Cli::PrefetchAll(prefetch_all) => &prefetch_all.reporting,
         }
@@ -232,18 +212,17 @@ impl Cli {
         Self::parse_from_arg_strings(args, None)
     }
 
-    /// Borrow the [`CrateInvocation`] of a crate-level command, panicking for config-level
-    /// commands.
+    /// Borrow the [`CrateArgs`] of a crate-level command, panicking on commands that don't
+    /// take crate args.
     ///
-    /// Test helper for asserting on resolved crate invocations.
+    /// Test helper for asserting on parsed crate arguments.
     #[cfg(test)]
-    pub fn crate_invocation(&self) -> &CrateInvocation {
+    pub fn crate_args(&self) -> &CrateArgs {
         match self {
-            Cli::ListTargets(invocation)
-            | Cli::Prefetch(invocation)
-            | Cli::NoExec(invocation)
-            | Cli::Run { invocation, .. } => invocation,
-            other => panic!("expected a crate-level command, got {other:?}"),
+            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => args,
+            other @ (Cli::ListTools(_) | Cli::PrefetchAll(_)) => {
+                panic!("expected a crate-level command, got {other:?}")
+            }
         }
     }
 
@@ -257,9 +236,12 @@ impl Cli {
     }
 }
 
-/// Arguments for the invocation (or at least preparation to invoke) a single crate.
+/// The parsed command-line arguments for preparing or running a single crate.
+///
+/// Not all possible commands involve running a single crate so not all commands will include
+/// these crate args.
 #[derive(Clone, Debug)]
-pub struct CrateInvocation {
+pub struct CrateArgs {
     /// The crate spec (name, optionally with an `@VERSION` suffix), or `None` when the name is
     /// discovered from the source (e.g. `--git`/`--path`).
     pub crate_spec: Option<String>,
@@ -285,6 +267,98 @@ pub struct CrateInvocation {
     pub toolchain: Option<String>,
 }
 
+impl CrateArgs {
+    /// Translate these arguments into a [`CrateRequest`] for [`crate::cratespec::CrateSpec::load`].
+    ///
+    /// This also performs some validation checking for conflicting args that `clap` is not
+    /// expressive enough to handle on its own, therefore it's fallible.
+    pub fn crate_request(&self) -> crate::Result<CrateRequest> {
+        // Split the CLI-only `name@version` convention into name and version-suffix string.
+        let (name, at_version) = match &self.crate_spec {
+            Some(spec) => match spec.split_once('@') {
+                Some((name, version)) => (Some(name.to_string()), Some(version.to_string())),
+                None => (Some(spec.clone()), None),
+            },
+            None => (None, None),
+        };
+
+        // Users can either specify a semver version req with the `name@version` syntax in the
+        // crate name, or they can specify the version with `--crate-version`, but they cannot
+        // provide both. (of course they can also not specify any version at all to default to the
+        // latest suitable version)
+        let version = match (at_version, self.crate_version.clone()) {
+            (Some(at_version), Some(flag_version)) => {
+                return crate::error::ConflictingVersionsSnafu {
+                    at_version,
+                    flag_version,
+                }
+                .fail();
+            }
+            (Some(version), None) | (None, Some(version)) => Some(version),
+            (None, None) => None,
+        };
+
+        Ok(CrateRequest {
+            name,
+            version,
+            source: self.source.clone(),
+            git_ref: self.git_selector.clone(),
+        })
+    }
+
+    /// Translate a subset of these arguments into [`BuildOverrides`] for
+    /// [`crate::builder::BuildOptions::load`].
+    pub fn to_build_overrides(&self) -> BuildOverrides {
+        let build = &self.build_options;
+        BuildOverrides {
+            features: build.features.as_deref().map(Self::parse_features),
+            all_features: build.all_features,
+            no_default_features: build.no_default_features,
+            profile: if build.debug {
+                Some("dev".to_string())
+            } else {
+                build.profile.clone()
+            },
+            target: build.target.clone(),
+            jobs: build.jobs,
+            ignore_rust_version: build.ignore_rust_version,
+            target_selection: build.build_target(),
+            toolchain: self.toolchain.clone(),
+        }
+    }
+
+    /// Translate a subset of these arguments into [`ConfigOverrides`]
+    pub fn to_config_overrides(&self) -> ConfigOverrides {
+        ConfigOverrides {
+            http_timeout: self.http.http_timeout.clone(),
+            http_retries: self.http.http_retries,
+            http_proxy: self.http.http_proxy.clone(),
+            lockfile: self.cargo.lock_mode(),
+            offline: self.cargo.offline,
+            refresh: self.cargo.refresh,
+            prebuilt_binary: self.prebuilt.prebuilt_binary,
+            prebuilt_binary_sources: self.prebuilt.prebuilt_binary_sources.clone(),
+            prebuilt_binary_no_verify_checksums: self.prebuilt.prebuilt_binary_no_verify_checksums,
+            prebuilt_binary_no_verify_signatures: self.prebuilt.prebuilt_binary_no_verify_signatures,
+            verbosity: Verbosity::from_count(self.reporting.verbose),
+            ..self.config.to_config_overrides()
+        }
+    }
+
+    /// Tokenize a `--features` string into individual feature names.
+    ///
+    /// Features may be separated by commas or whitespace; empty tokens are dropped, so an empty
+    /// input yields an empty vector (distinct from `--features` being absent, which the caller
+    /// represents as `None`).
+    fn parse_features(features_str: &str) -> Vec<String> {
+        features_str
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
 /// Arguments for `--prefetch-all`
 #[derive(Clone, Debug, Default)]
 pub struct PrefetchAll {
@@ -307,32 +381,28 @@ pub struct PrefetchAll {
 }
 
 impl PrefetchAll {
-    /// Build the per-tool [`CrateInvocation`] used to prefetch one configured tool by name, given
-    /// that crate's name.
+    /// The build overrides applied to every tool prefetched by `--prefetch-all`.
     ///
-    /// None of the usual crate-level params are set here, because in the case of `--prefetch-all`
-    /// the list of crates to prefetch and all of their options come from the `cgx` config.
-    pub fn invocation_for(&self, crate_spec: &str) -> CrateInvocation {
-        CrateInvocation {
-            crate_spec: Some(crate_spec.to_string()),
-            crate_version: None,
-            source: Source::Default,
-            git_selector: GitSelector::DefaultBranch,
-            build_options: BuildOptionsArgs {
-                jobs: self.jobs,
-                ignore_rust_version: self.ignore_rust_version,
-                ..BuildOptionsArgs::default()
-            },
-            cargo: CargoBehaviorArgs {
-                offline: self.offline,
-                refresh: self.refresh,
-                ..CargoBehaviorArgs::default()
-            },
-            prebuilt: PrebuiltBinaryArgs::default(),
-            config: self.config.clone(),
-            http: self.http.clone(),
-            reporting: self.reporting.clone(),
+    /// `--prefetch-all` doesn't take per-crate compilation options, so only the generic build knobs
+    /// it does accept are set; the rest take the defaults or can be set in the config file.
+    pub fn to_build_overrides(&self) -> BuildOverrides {
+        BuildOverrides {
+            jobs: self.jobs,
+            ignore_rust_version: self.ignore_rust_version,
             toolchain: self.toolchain.clone(),
+            ..BuildOverrides::default()
+        }
+    }
+
+    /// The config overrides applied when loading config for the `--prefetch-all` run.
+    pub fn to_config_overrides(&self) -> ConfigOverrides {
+        ConfigOverrides {
+            http_timeout: self.http.http_timeout.clone(),
+            http_retries: self.http.http_retries,
+            http_proxy: self.http.http_proxy.clone(),
+            offline: self.offline,
+            refresh: self.refresh,
+            ..self.config.to_config_overrides()
         }
     }
 }
@@ -344,57 +414,15 @@ pub struct ListTools {
     pub config: ConfigArgs,
     /// Output and diagnostic controls.
     pub reporting: ReportingArgs,
-    /// Toolchain from a leading `+toolchain` token.
-    pub toolchain: Option<String>,
 }
 
-/// The source from which to obtain a crate, collapsed from the mutually-exclusive source selectors.
-///
-/// The raw strings held here are validated (URL and `owner/repo` parsing) downstream in
-/// [`CrateSpec::load`](crate::cratespec::CrateSpec::load) so that domain errors keep their typed
-/// [`Error`](crate::error::Error) variants instead of surfacing as clap errors.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub enum Source {
-    /// No explicit source selector; resolve via config if present, ultimately defaulting to
-    /// crates.io absent explicit config override.
-    #[default]
-    Default,
-    /// `--git <URL>`
-    Git { url: String },
-    /// `--registry <NAME>`
-    Registry { name: String },
-    /// `--index <URL>`
-    Index { url: String },
-    /// `--path <PATH>`
-    Path { path: PathBuf },
-    /// `--github <owner/repo>`, with optional `--github-url`
-    GitHub {
-        repo: String,
-        custom_url: Option<String>,
-    },
-    /// `--gitlab <owner/repo>`, with optional `--gitlab-url`
-    GitLab {
-        repo: String,
-        custom_url: Option<String>,
-    },
-}
-
-impl Source {
-    /// True for git-backed sources, the only sources a non-default [`GitSelector`] may accompany.
-    pub fn is_git(&self) -> bool {
-        matches!(
-            self,
-            Source::Git { .. } | Source::GitHub { .. } | Source::GitLab { .. }
-        )
-    }
-
-    /// True when a crate name can be discovered from the source itself, making an explicit crate
-    /// spec optional.
-    fn allows_crate_discovery(&self) -> bool {
-        matches!(
-            self,
-            Source::Git { .. } | Source::GitHub { .. } | Source::GitLab { .. } | Source::Path { .. }
-        )
+impl ListTools {
+    /// The config overrides applied when loading config for the `--list-tools` run.
+    pub fn to_config_overrides(&self) -> ConfigOverrides {
+        ConfigOverrides {
+            verbosity: Verbosity::from_count(self.reporting.verbose),
+            ..self.config.to_config_overrides()
+        }
     }
 }
 
@@ -464,9 +492,21 @@ impl BuildOptionsArgs {
     fn is_present(&self) -> bool {
         self.has_compilation_options() || self.jobs.is_some() || self.ignore_rust_version
     }
-}
 
-/// Lockfile and cache behavior flags that affect dependency resolution and cache identity for one tool.
+    /// Resolve the mutually-exclusive `--bin`/`--example` flags into a [`BuildTarget`].
+    fn build_target(&self) -> BuildTarget {
+        match (&self.bin, &self.example) {
+            (Some(_), Some(_)) => {
+                unreachable!("BUG: clap should enforce mutual exclusivity");
+            }
+            (Some(bin_name), None) => BuildTarget::Bin(bin_name.clone()),
+            (None, Some(example_name)) => BuildTarget::Example(example_name.clone()),
+            (None, None) => BuildTarget::default(),
+        }
+    }
+}
+/// Lockfile and cache behavior flags that affect dependency resolution and cache identity for one
+/// tool.
 ///
 /// The mutually-exclusive `--locked`/`--frozen`/`--unlocked` flags share a `lockfile`
 /// arg-group
@@ -491,6 +531,24 @@ pub struct CargoBehaviorArgs {
     /// Force refresh of all cached data for this crate.
     #[arg(long)]
     pub refresh: bool,
+}
+
+impl CargoBehaviorArgs {
+    /// Collapse the mutually-exclusive `--locked`/`--frozen`/`--unlocked` flags into a
+    /// [`LockMode`].
+    ///
+    /// The `lockfile` clap arg-group guarantees at most one is set.
+    fn lock_mode(&self) -> LockMode {
+        if self.unlocked {
+            LockMode::Unlocked
+        } else if self.frozen {
+            LockMode::Frozen
+        } else if self.locked {
+            LockMode::Locked
+        } else {
+            LockMode::Default
+        }
+    }
 }
 
 /// Creates a clap value parser that uses strum's [`VariantNames`] for possible values
@@ -565,6 +623,20 @@ pub struct ConfigArgs {
     pub user_config_dir: Option<PathBuf>,
 }
 
+impl ConfigArgs {
+    /// Create a new [`ConfigOverrides`] consisting of default values except those that are
+    /// overridden by options specified in this struct.
+    fn to_config_overrides(&self) -> ConfigOverrides {
+        ConfigOverrides {
+            config_file: self.config_file.clone(),
+            system_config_dir: self.system_config_dir.clone(),
+            app_dir: self.app_dir.clone(),
+            user_config_dir: self.user_config_dir.clone(),
+            ..ConfigOverrides::default()
+        }
+    }
+}
+
 /// Network tuning options used by commands that may resolve, download, or build crates.
 #[derive(Clone, Debug, Default, Args)]
 pub struct HttpArgs {
@@ -613,22 +685,6 @@ pub struct ReportingArgs {
 pub enum MessageFormat {
     /// JSON format, one message per line
     Json,
-}
-
-/// The subset of arguments that influence configuration loading, gathered per command variant by
-/// [`Cli::config_inputs`].
-#[derive(Clone, Debug, Default)]
-pub struct ConfigInputs {
-    /// Config file discovery overrides.
-    pub config: ConfigArgs,
-    /// HTTP tuning options.
-    pub http: HttpArgs,
-    /// Pre-built binary lookup config.
-    pub prebuilt: PrebuiltBinaryArgs,
-    /// Cargo behavior flags (lockfile / offline / refresh).
-    pub cargo: CargoBehaviorArgs,
-    /// Toolchain from a leading `+toolchain` token.
-    pub toolchain: Option<String>,
 }
 
 // Raw clap parse result.
@@ -827,14 +883,14 @@ impl RawCli {
             if http.is_present() {
                 return Err(Self::forbidden(mode, "--http-* options"));
             }
-            return Ok(Cli::ListTools(ListTools {
-                config,
-                reporting,
-                toolchain,
-            }));
+            if toolchain.is_some() {
+                return Err(Self::forbidden(mode, "+toolchain"));
+            }
+            return Ok(Cli::ListTools(ListTools { config, reporting }));
         }
 
-        // Crate-level commands (run / no-exec / prefetch / list-targets).
+        // By this point we know that the command is one that operates on a specific crate, so
+        // crate-level args are supported as well
         let git_selector = source.git_selector();
         let source = source.to_source();
 
@@ -855,7 +911,7 @@ impl RawCli {
             ));
         }
 
-        let invocation = CrateInvocation {
+        let crate_args = CrateArgs {
             crate_spec,
             crate_version,
             source,
@@ -871,15 +927,15 @@ impl RawCli {
 
         if prefetch {
             Self::ensure_no_crate_args(&tool_args, "--prefetch")?;
-            Ok(Cli::Prefetch(invocation))
+            Ok(Cli::Prefetch(crate_args))
         } else if list_targets {
             Self::ensure_no_crate_args(&tool_args, "--list-targets")?;
-            Ok(Cli::ListTargets(invocation))
+            Ok(Cli::ListTargets(crate_args))
         } else if no_exec {
-            Ok(Cli::NoExec(invocation))
+            Ok(Cli::NoExec(crate_args))
         } else {
             Ok(Cli::Run {
-                invocation,
+                args: crate_args,
                 tool_args,
             })
         }
@@ -1067,12 +1123,29 @@ mod tests {
         RawCli::command().debug_assert();
     }
 
+    /// The repeated `-v` flag maps to a [`Verbosity`] level, saturating at the most verbose.
+    #[test]
+    fn verbosity_reflects_repeated_v_flag() {
+        let cases = [
+            (vec!["tool"], Verbosity::Normal),
+            (vec!["-v", "tool"], Verbosity::Verbose),
+            (vec!["-vv", "tool"], Verbosity::VeryVerbose),
+            (vec!["-vvv", "tool"], Verbosity::ExtremelyVerbose),
+            (vec!["-vvvv", "tool"], Verbosity::ExtremelyVerbose),
+        ];
+        for (args, expected) in cases {
+            let verbosity = Cli::parse_from_test_args(args).verbosity();
+            assert_eq!(verbosity, expected);
+        }
+    }
+
     mod cratespec {
         use super::*;
         fn parse_cratespec_from_args(args: &[&str]) -> Result<CrateSpec> {
             let cli = Cli::parse_from_test_args(args);
             let config = Config::default();
-            CrateSpec::load(&config, cli.crate_invocation())
+            let request = cli.crate_args().crate_request()?;
+            CrateSpec::load(&config, &request)
         }
 
         #[test]
@@ -1105,17 +1178,13 @@ mod tests {
         }
 
         #[test]
-        fn test_crate_with_matching_versions() {
-            let cr = parse_cratespec_from_args(&["--crate-version", "14", "ripgrep@14"]).unwrap();
-            assert_matches!(
-                cr,
-                CrateSpec::CratesIo { ref name, version: Some(ref v) }
-                if name == "ripgrep" && v == &semver::VersionReq::parse("14").unwrap()
-            );
-        }
-
-        #[test]
         fn test_crate_with_conflicting_versions() {
+            // Users can only specify the crate semver version req one way, either
+            // `--crate-version` or as part of the crate name.  It doesn't matter if they specify
+            // the same version in both, or different versions, it's not allowed.
+            let result = parse_cratespec_from_args(&["--crate-version", "14", "ripgrep@14"]);
+            assert_matches!(result, Err(crate::error::Error::ConflictingVersions { .. }));
+
             let result = parse_cratespec_from_args(&["--crate-version", "15", "ripgrep@14"]);
             assert_matches!(result, Err(crate::error::Error::ConflictingVersions { .. }));
         }
@@ -1575,7 +1644,7 @@ mod tests {
         fn parse_build_options_from_args(args: &[&str]) -> Result<BuildOptions> {
             let cli = Cli::parse_from_test_args(args);
             let config = Config::default();
-            BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose())
+            BuildOptions::load(&config, &cli.crate_args().to_build_overrides())
         }
 
         #[test]
@@ -1638,8 +1707,7 @@ mod tests {
                 offline: true,
                 ..Default::default()
             };
-            let opts =
-                BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose()).unwrap();
+            let opts = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
             assert!(opts.locked);
             assert!(opts.offline);
         }
@@ -1652,8 +1720,7 @@ mod tests {
                 offline: false,
                 ..Default::default()
             };
-            let opts =
-                BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose()).unwrap();
+            let opts = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
             assert!(opts.locked);
             assert!(!opts.offline);
         }
@@ -1666,8 +1733,7 @@ mod tests {
                 offline: true,
                 ..Default::default()
             };
-            let opts =
-                BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose()).unwrap();
+            let opts = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
             assert!(!opts.locked);
             assert!(opts.offline);
         }
@@ -1793,7 +1859,7 @@ mod tests {
             let args = vec!["+nightly", "ripgrep", "--version", "14"];
             let cli = Cli::parse_from_test_args(args);
 
-            let invocation = cli.crate_invocation();
+            let invocation = cli.crate_args();
             assert_eq!(invocation.toolchain.as_deref(), Some("nightly"));
             assert_eq!(invocation.crate_spec.as_deref(), Some("ripgrep"));
 
@@ -1812,8 +1878,7 @@ mod tests {
                 toolchain: Some("nightly".to_string()),
                 ..Default::default()
             };
-            let opts =
-                BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose()).unwrap();
+            let opts = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
             assert_eq!(opts.toolchain, Some("nightly".to_string()));
         }
 
@@ -1823,8 +1888,7 @@ mod tests {
             let cli = Cli::parse_from_test_args(args);
 
             let config = Config::default();
-            let opts =
-                BuildOptions::load(&config, &cli.crate_invocation().build_options, cli.verbose()).unwrap();
+            let opts = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
             assert_eq!(opts.toolchain, None);
         }
     }
@@ -1835,8 +1899,6 @@ mod tests {
         #[test]
         fn test_config_overrides_can_combine() {
             // Verify that system-config-dir, app-dir, and user-config-dir work together.
-            // This tests our design decision that these three options are compatible,
-            // not just clap functionality.
             let inputs = Cli::parse_from_test_args([
                 "--system-config-dir",
                 "/tmp/system",
@@ -1846,13 +1908,10 @@ mod tests {
                 "/tmp/user",
                 "ripgrep",
             ])
-            .config_inputs();
-            assert_eq!(
-                inputs.config.system_config_dir,
-                Some(PathBuf::from("/tmp/system"))
-            );
-            assert_eq!(inputs.config.app_dir, Some(PathBuf::from("/tmp/app")));
-            assert_eq!(inputs.config.user_config_dir, Some(PathBuf::from("/tmp/user")));
+            .to_config_overrides();
+            assert_eq!(inputs.system_config_dir, Some(PathBuf::from("/tmp/system")));
+            assert_eq!(inputs.app_dir, Some(PathBuf::from("/tmp/app")));
+            assert_eq!(inputs.user_config_dir, Some(PathBuf::from("/tmp/user")));
         }
     }
 
@@ -1872,7 +1931,7 @@ mod tests {
             .unwrap();
 
             assert_matches!(&cli, Cli::Prefetch(_));
-            let invocation = cli.crate_invocation();
+            let invocation = cli.crate_args();
             assert_eq!(invocation.crate_spec.as_deref(), Some("timestamp"));
             assert_eq!(invocation.build_options.features.as_deref(), Some("frobnulator"));
             assert!(cli.tool_args().is_empty());
@@ -1929,6 +1988,39 @@ mod tests {
                 prefetch_all.config.user_config_dir,
                 Some(PathBuf::from("/tmp/user"))
             );
+        }
+
+        #[test]
+        fn prefetch_all_controls_reach_loaders() {
+            // The parse test above checks the raw flags properly map to `PrefetchAll`; this checks they
+            // actually flow through into `BuildOptions` and `Config`
+            let cli = Cli::parse_from_test_args([
+                "--prefetch-all",
+                "--offline",
+                "--refresh",
+                "--jobs",
+                "2",
+                "--ignore-rust-version",
+            ]);
+            let Cli::PrefetchAll(prefetch_all) = &cli else {
+                panic!("expected a prefetch-all command");
+            };
+
+            // Build knobs reach BuildOptions.
+            let build_options =
+                BuildOptions::load(&Config::default(), &prefetch_all.to_build_overrides()).unwrap();
+            assert_eq!(build_options.jobs, Some(2));
+            assert!(build_options.ignore_rust_version);
+
+            // Network/refresh knobs reach Config, loaded from an isolated tree so host config
+            // cannot interfere with the assertion.
+            let temp = tempfile::tempdir().unwrap();
+            let mut overrides = prefetch_all.to_config_overrides();
+            overrides.system_config_dir = Some(temp.path().join("system"));
+            overrides.user_config_dir = Some(temp.path().join("user"));
+            let config = Config::load_from_dir(temp.path(), &overrides).unwrap();
+            assert!(config.offline);
+            assert!(config.refresh);
         }
 
         #[test]
@@ -2005,6 +2097,9 @@ mod tests {
             }
         }
 
+        /// If `--features` isn't present on the command line and the config TOML has an entry for
+        /// the crate in the `[tools]` section that specifies features, those features are applied
+        /// to the build options for that crate.
         #[test]
         fn config_features_apply_when_cli_features_absent() {
             let cli = Cli::parse_from_test_args(["timestamp"]);
@@ -2023,17 +2118,21 @@ mod tests {
                 },
             );
 
-            let options = BuildOptions::load_for_tool_name(
+            let options = BuildOptions::load_for_crate(
                 &config,
-                &cli.crate_invocation().build_options,
-                cli.verbose(),
-                Some("timestamp"),
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
             )
             .unwrap();
 
             assert_eq!(options.features, vec!["frobnulator"]);
         }
 
+        /// When the config TOML contains a crate in the `[tools]` section that specifies features,
+        /// that is overridden by any features specified on the CLI.
         #[test]
         fn cli_features_replace_config_features() {
             let cli = Cli::parse_from_test_args(["--features", "gonkolator", "timestamp"]);
@@ -2052,11 +2151,13 @@ mod tests {
                 },
             );
 
-            let options = BuildOptions::load_for_tool_name(
+            let options = BuildOptions::load_for_crate(
                 &config,
-                &cli.crate_invocation().build_options,
-                cli.verbose(),
-                Some("timestamp"),
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
             )
             .unwrap();
 
@@ -2083,14 +2184,14 @@ mod tests {
         #[test]
         fn crate_then_tool_args_pass_through_without_dashdash() {
             let cli = run(&["ripgrep", "--color=always", "-i"]);
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("ripgrep"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("ripgrep"));
             assert_eq!(tool_args(&cli), ["--color=always", "-i"]);
         }
 
         #[test]
         fn cgx_flags_before_crate_are_not_tool_args() {
             let cli = run(&["--features", "foo", "ripgrep", "--color=always", "-i"]);
-            let invocation = cli.crate_invocation();
+            let invocation = cli.crate_args();
             assert_eq!(invocation.crate_spec.as_deref(), Some("ripgrep"));
             assert_eq!(invocation.build_options.features.as_deref(), Some("foo"));
             assert_eq!(tool_args(&cli), ["--color=always", "-i"]);
@@ -2100,10 +2201,7 @@ mod tests {
         fn same_flag_before_and_after_crate_is_split_by_position() {
             // `-F x` is cgx's features flag; `-F y` after the crate is forwarded to the tool.
             let cli = run(&["-F", "x", "ripgrep", "-F", "y"]);
-            assert_eq!(
-                cli.crate_invocation().build_options.features.as_deref(),
-                Some("x")
-            );
+            assert_eq!(cli.crate_args().build_options.features.as_deref(), Some("x"));
             assert_eq!(tool_args(&cli), ["-F", "y"]);
         }
 
@@ -2112,7 +2210,7 @@ mod tests {
             // The hard requirement: `cgx <crate> --version` runs the tool with `--version` and must
             // NOT print cgx's own version.
             let cli = run(&["ripgrep", "--version"]);
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("ripgrep"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("ripgrep"));
             assert_eq!(tool_args(&cli), ["--version"]);
 
             let cli = run(&["ripgrep", "-V"]);
@@ -2122,21 +2220,21 @@ mod tests {
         #[test]
         fn explicit_dashdash_forwards_following_args() {
             let cli = run(&["ripgrep", "--", "--version"]);
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("ripgrep"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("ripgrep"));
             assert_eq!(tool_args(&cli), ["--version"]);
         }
 
         #[test]
         fn at_version_suffix_with_tool_version_flag() {
             let cli = run(&["eza@=0.23.1", "--version"]);
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("eza@=0.23.1"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("eza@=0.23.1"));
             assert_eq!(tool_args(&cli), ["--version"]);
         }
 
         #[test]
         fn cargo_subcommand_is_normalized_and_remaining_args_forwarded() {
             let cli = run(&["cargo", "deny", "--all"]);
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
             assert_eq!(tool_args(&cli), ["--all"]);
         }
 
@@ -2145,7 +2243,7 @@ mod tests {
             // `prefetch` (no dashes) is a crate name, not the `--prefetch` mode.
             let cli = run(&["prefetch"]);
             assert_matches!(&cli, Cli::Run { .. });
-            assert_eq!(cli.crate_invocation().crate_spec.as_deref(), Some("prefetch"));
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("prefetch"));
         }
     }
 
@@ -2155,20 +2253,20 @@ mod tests {
         #[test]
         fn test_http_timeout_cli_arg() {
             let cli = Cli::parse_from_test_args(["--http-timeout", "2m", "test-crate"]);
-            assert_eq!(cli.crate_invocation().http.http_timeout, Some("2m".to_string()));
+            assert_eq!(cli.crate_args().http.http_timeout, Some("2m".to_string()));
         }
 
         #[test]
         fn test_http_retries_cli_arg() {
             let cli = Cli::parse_from_test_args(["--http-retries", "5", "test-crate"]);
-            assert_eq!(cli.crate_invocation().http.http_retries, Some(5));
+            assert_eq!(cli.crate_args().http.http_retries, Some(5));
         }
 
         #[test]
         fn test_http_proxy_cli_arg() {
             let cli = Cli::parse_from_test_args(["--http-proxy", "socks5://localhost:1080", "test-crate"]);
             assert_eq!(
-                cli.crate_invocation().http.http_proxy,
+                cli.crate_args().http.http_proxy,
                 Some("socks5://localhost:1080".to_string())
             );
         }
@@ -2176,15 +2274,15 @@ mod tests {
         #[test]
         fn test_http_args_default_none() {
             let cli = Cli::parse_from_test_args(["test-crate"]);
-            assert_eq!(cli.crate_invocation().http.http_timeout, None);
-            assert_eq!(cli.crate_invocation().http.http_retries, None);
-            assert_eq!(cli.crate_invocation().http.http_proxy, None);
+            assert_eq!(cli.crate_args().http.http_timeout, None);
+            assert_eq!(cli.crate_args().http.http_retries, None);
+            assert_eq!(cli.crate_args().http.http_proxy, None);
         }
 
         #[test]
         fn test_http_args_after_crate_spec_are_binary_args() {
             let cli = Cli::parse_from_test_args(["test-crate", "--http-timeout", "5s"]);
-            assert_eq!(cli.crate_invocation().http.http_timeout, None);
+            assert_eq!(cli.crate_args().http.http_timeout, None);
             let tool_args: Vec<&str> = cli.tool_args().iter().map(|arg| arg.to_str().unwrap()).collect();
             assert_eq!(tool_args, ["--http-timeout", "5s"]);
         }

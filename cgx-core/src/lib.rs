@@ -45,6 +45,7 @@ pub struct Cgx {
     bin_resolver: Arc<dyn BinaryResolver>,
     downloader: Arc<dyn CrateDownloader>,
     builder: Arc<dyn CrateBuilder>,
+    reporter: messages::MessageReporter,
 }
 
 impl Cgx {
@@ -59,7 +60,7 @@ impl Cgx {
         let cache = Cache::new(config.clone(), reporter.clone());
         let git_client = git::GitClient::new(cache.clone(), reporter.clone(), config.http.clone());
 
-        let cargo_runner = Arc::new(cargo::find_cargo(reporter.clone())?);
+        let cargo_runner = Arc::new(cargo::create_cargo_runner(config.clone(), reporter.clone())?);
 
         let resolver = Arc::new(crate_resolver::create_resolver(
             config.clone(),
@@ -90,6 +91,7 @@ impl Cgx {
             bin_resolver,
             downloader,
             builder,
+            reporter,
         })
     }
 
@@ -108,45 +110,54 @@ impl Cgx {
         crate_spec: &CrateSpec,
         build_options: &BuildOptions,
     ) -> Result<std::path::PathBuf> {
-        tracing::debug!("Got crate spec: {:?}", crate_spec);
-
-        tracing::info!("Resolving crate...");
-        let resolved_crate = self.resolver.resolve(crate_spec)?;
-
-        tracing::info!(
-            "Resolved crate {}@{}",
-            resolved_crate.name,
-            resolved_crate.version
-        );
-
-        let downloaded_crate = self.downloader.download(resolved_crate)?;
-
-        tracing::debug!("Downloaded crate to cache: {:#?}", downloaded_crate);
+        let downloaded_crate = self.resolve_and_download_crate(crate_spec, build_options)?;
 
         // Try to resolve a pre-built binary, now with access to the downloaded source
         tracing::debug!("Attempting to resolve pre-built binary");
         if let Some(resolved_binary) = self.bin_resolver.resolve(&downloaded_crate, build_options)? {
+            let provider = resolved_binary.provider;
             tracing::info!(
                 "Found pre-built binary from {:?} at: {}",
-                resolved_binary.provider,
+                provider,
                 resolved_binary.path.display()
             );
+            self.reporter.report(|| {
+                messages::CgxMessage::crate_provenance_prebuilt(
+                    &downloaded_crate.resolved,
+                    &downloaded_crate.crate_path,
+                    build_options,
+                    provider,
+                    &resolved_binary.path,
+                )
+            });
             return Ok(resolved_binary.path);
         }
 
         // No pre-built binary available, fall back to building from source
         tracing::info!(
-            "Pre-built binary not found, excluded by config, or or disabled; building crate from source..."
+            "Pre-built binary not found, excluded by config, or disabled; building crate from source..."
         );
 
-        let bin_path = self.builder.build(&downloaded_crate, build_options)?;
+        let (bin_path, target_binary) = self.builder.build(&downloaded_crate, build_options)?;
 
         tracing::info!("Built crate binary at: {}", bin_path.display());
+        self.reporter.report(|| {
+            messages::CgxMessage::crate_provenance_built_from_source(
+                &downloaded_crate.resolved,
+                &downloaded_crate.crate_path,
+                build_options,
+                &bin_path,
+                target_binary,
+            )
+        });
 
         Ok(bin_path)
     }
 
     /// List the available targets (binaries and examples) in a crate.
+    ///
+    /// Downloads the crate source if it's not already cached, but does not attempt to build from
+    /// source or to find pre-built binaries.
     ///
     /// Returns a tuple of:
     /// - `String`: The crate name
@@ -159,10 +170,42 @@ impl Cgx {
         crate_spec: &CrateSpec,
         build_options: &BuildOptions,
     ) -> Result<(String, Option<Target>, Vec<Target>, Vec<Target>)> {
-        let resolved_crate = self.resolver.resolve(crate_spec)?;
-        let crate_name = resolved_crate.name.clone();
-        let downloaded_crate = self.downloader.download(resolved_crate)?;
+        let downloaded_crate = self.resolve_and_download_crate(crate_spec, build_options)?;
+        let crate_name = downloaded_crate.resolved.name.clone();
         let (default, bins, examples) = self.builder.list_targets(&downloaded_crate, build_options)?;
         Ok((crate_name, default, bins, examples))
+    }
+
+    /// Resolve and download a crate, producing a [`downloader::DownloadedCrate`].
+    ///
+    /// NOTE: This is downloading the crate source code, which must be done even if we eventually
+    /// end up selecting a prebuilt binary instead of building from source.
+    fn resolve_and_download_crate(
+        &self,
+        crate_spec: &CrateSpec,
+        build_options: &BuildOptions,
+    ) -> Result<downloader::DownloadedCrate> {
+        tracing::debug!("Got crate spec: {:?}", crate_spec);
+
+        tracing::info!("Resolving crate...");
+        let resolved_crate = self.resolver.resolve(crate_spec)?;
+        tracing::info!(
+            "Resolved crate {}@{}",
+            resolved_crate.name,
+            resolved_crate.version
+        );
+
+        let downloaded_crate = self.downloader.download(resolved_crate)?;
+        tracing::debug!("Downloaded crate to cache: {:#?}", downloaded_crate);
+
+        self.reporter.report(|| {
+            messages::CgxMessage::crate_plan(
+                &downloaded_crate.resolved,
+                &downloaded_crate.crate_path,
+                build_options,
+            )
+        });
+
+        Ok(downloaded_crate)
     }
 }

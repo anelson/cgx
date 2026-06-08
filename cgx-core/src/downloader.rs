@@ -393,7 +393,8 @@ mod tests {
     fn test_cargo_runner() -> impl CargoRunner {
         crate::logging::init_test_logging();
 
-        crate::cargo::find_cargo(crate::messages::MessageReporter::null()).unwrap()
+        crate::cargo::create_cargo_runner(Config::default(), crate::messages::MessageReporter::null())
+            .unwrap()
     }
 
     fn validate_downloaded_crate(downloaded: &DownloadedCrate) {

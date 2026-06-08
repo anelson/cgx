@@ -26,8 +26,8 @@ pub enum Error {
     InvalidUrl { url: String, source: url::ParseError },
 
     #[snafu(display(
-        "Conflicting version specifications: @{at_version} in crate name vs --version {flag_version}. \
-         Prefer using the @VERSION suffix in the crate name."
+        "Crate versions in the crate name ({at_version}) and the --crate-version flag ({flag_version}) are \
+         mutually exclusive; specify one or the other but not both"
     ))]
     ConflictingVersions {
         at_version: String,

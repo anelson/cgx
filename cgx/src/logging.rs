@@ -1,5 +1,6 @@
 use std::{io::IsTerminal, sync::OnceLock};
 
+use cgx_core::config::Verbosity;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload};
 
@@ -45,12 +46,12 @@ static RELOAD_HANDLE: OnceLock<ReloadHandle> = OnceLock::new();
 ///
 /// This function will panic if called more than once in the same process, as the
 /// global tracing subscriber can only be initialized once.
-pub(crate) fn init(verbose: u8) {
-    let (level, use_simple_format) = match verbose {
-        0 => (Level::WARN, true),
-        1 => (Level::INFO, false),
-        2 => (Level::DEBUG, false),
-        _ => (Level::TRACE, false),
+pub(crate) fn init(verbosity: Verbosity) {
+    let (level, use_simple_format) = match verbosity {
+        Verbosity::Normal => (Level::WARN, true),
+        Verbosity::Verbose => (Level::INFO, false),
+        Verbosity::VeryVerbose => (Level::DEBUG, false),
+        Verbosity::ExtremelyVerbose => (Level::TRACE, false),
     };
 
     // Build the filter by checking environment variables in priority order
@@ -59,7 +60,7 @@ pub(crate) fn init(verbose: u8) {
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| {
             // Neither env var set, use hard-coded default based on verbosity
-            if verbose == 0 {
+            if verbosity == Verbosity::Normal {
                 // For silent mode, only show WARN and ERROR
                 EnvFilter::new("warn")
             } else {
@@ -111,14 +112,14 @@ pub(crate) fn init(verbose: u8) {
 /// the config file. It respects the following priority order:
 /// 1. `CGX_LOG` environment variable (highest priority, checked at init time)
 /// 2. `RUST_LOG` environment variable (checked at init time)
-/// 3. CLI `-v` flags (if user specified verbosity, don't override)
+/// 3. CLI `-v` flags (if [`Config::verbosity`] is non-default, don't override)
 /// 4. `Config.log_level` field (applied by this function)
 /// 5. Hard-coded defaults (lowest priority, set at init time)
 ///
 /// # Arguments
 ///
-/// * `config` - The loaded configuration containing the optional `log_level` field
-/// * `args` - The CLI arguments to check if user explicitly set verbosity
+/// * `config` - The loaded configuration, carrying both the [`Config::verbosity`] level (to check
+///   whether the user requested verbosity via `-v`) and the optional `log_level` filter string
 ///
 /// # Log Level Format
 ///
@@ -130,9 +131,9 @@ pub(crate) fn init(verbose: u8) {
 /// - `"error"` - Errors only
 ///
 /// More complex filter syntax is also supported (e.g., `"cgx=debug,info"`).
-pub(crate) fn apply_config(config: &Config, verbose: u8) {
+pub(crate) fn apply_config(config: &Config) {
     // Don't override if user explicitly set verbosity via CLI
-    if verbose > 0 {
+    if config.verbosity != Verbosity::Normal {
         tracing::debug!("Not applying config log_level: CLI verbosity flag takes precedence");
         return;
     }

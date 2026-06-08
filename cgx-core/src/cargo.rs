@@ -12,42 +12,10 @@ use tracing::debug;
 use crate::{
     Result,
     builder::{BuildOptions, BuildTarget},
+    config::{Config, Verbosity},
     error,
     messages::{BuildMessage, MessageReporter},
 };
-
-/// Verbosity level for cargo build operations.
-///
-/// Maps to cargo's `-v` flags for controlling build output verbosity.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum CargoVerbosity {
-    /// Normal cargo output (no verbosity flags).
-    #[default]
-    Normal,
-
-    /// Verbose output (corresponds to `-v`).
-    Verbose,
-
-    /// Very verbose output (corresponds to `-vv`).
-    VeryVerbose,
-
-    /// Extremely verbose output including build.rs output (corresponds to `-vvv`).
-    ExtremelyVerbose,
-}
-
-impl CargoVerbosity {
-    /// Construct a [`CargoVerbosity`] from a verbosity counter.
-    ///
-    /// The counter typically comes from CLI arguments where `-v` can be repeated.
-    pub(crate) fn from_count(count: u8) -> Self {
-        match count {
-            0 => Self::Normal,
-            1 => Self::Verbose,
-            2 => Self::VeryVerbose,
-            _ => Self::ExtremelyVerbose,
-        }
-    }
-}
 
 /// Options for controlling cargo metadata invocation.
 #[derive(Clone, Debug, Default)]
@@ -156,7 +124,7 @@ pub(crate) trait CargoRunner: std::fmt::Debug + Send + Sync + 'static {
 }
 
 /// Locate cargo and construct a runner instance that will use it.
-pub(crate) fn find_cargo(reporter: MessageReporter) -> Result<impl CargoRunner> {
+pub(crate) fn create_cargo_runner(config: Config, reporter: MessageReporter) -> Result<impl CargoRunner> {
     // Locate cargo and rustup executables.
     //
     // Searches for cargo in priority order:
@@ -174,6 +142,7 @@ pub(crate) fn find_cargo(reporter: MessageReporter) -> Result<impl CargoRunner> 
         cargo_path,
         rustup_path,
         reporter,
+        verbosity: config.verbosity,
     })
 }
 
@@ -182,6 +151,7 @@ struct RealCargoRunner {
     cargo_path: PathBuf,
     rustup_path: Option<PathBuf>,
     reporter: MessageReporter,
+    verbosity: Verbosity,
 }
 
 impl CargoRunner for RealCargoRunner {
@@ -338,16 +308,16 @@ impl CargoRunner for RealCargoRunner {
             cmd.arg("--locked");
         }
 
-        // Verbosity flags
-        match options.cargo_verbosity {
-            CargoVerbosity::Normal => {}
-            CargoVerbosity::Verbose => {
+        // Translate the verbosity level to cargo's repeated `-v` flag.
+        match self.verbosity {
+            Verbosity::Normal => {}
+            Verbosity::Verbose => {
                 cmd.arg("-v");
             }
-            CargoVerbosity::VeryVerbose => {
+            Verbosity::VeryVerbose => {
                 cmd.arg("-vv");
             }
-            CargoVerbosity::ExtremelyVerbose => {
+            Verbosity::ExtremelyVerbose => {
                 cmd.arg("-vvv");
             }
         }
@@ -520,19 +490,19 @@ mod tests {
     }
 
     #[test]
-    fn find_cargo_succeeds() {
+    fn create_cargo_runner_succeeds() {
         crate::logging::init_test_logging();
 
         // This test verifies that we can locate cargo on the system.
         // This should always succeed since cargo is required to run the tests.
-        let _cargo = find_cargo(MessageReporter::null()).unwrap();
+        let _cargo = create_cargo_runner(Config::default(), MessageReporter::null()).unwrap();
     }
 
     #[test]
     fn metadata_reads_cgx_crate() {
         crate::logging::init_test_logging();
 
-        let cargo = find_cargo(MessageReporter::null()).unwrap();
+        let cargo = create_cargo_runner(Config::default(), MessageReporter::null()).unwrap();
         let cgx_root = cgx_project_root();
 
         let metadata = cargo
@@ -569,7 +539,7 @@ mod tests {
     fn build_compiles_cgx_in_tempdir() {
         crate::logging::init_test_logging();
 
-        let cargo = find_cargo(MessageReporter::null()).unwrap();
+        let cargo = create_cargo_runner(Config::default(), MessageReporter::null()).unwrap();
         let cgx_root = cgx_project_root();
         let temp_dir = tempfile::tempdir().unwrap();
 
@@ -608,7 +578,7 @@ mod tests {
     fn metadata_loads_all_testcases() {
         crate::logging::init_test_logging();
 
-        let cargo = find_cargo(MessageReporter::null()).unwrap();
+        let cargo = create_cargo_runner(Config::default(), MessageReporter::null()).unwrap();
 
         for testcase in CrateTestCase::all() {
             let result = cargo.metadata(testcase.path(), &CargoMetadataOptions::default());

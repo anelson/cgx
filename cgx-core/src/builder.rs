@@ -6,10 +6,10 @@ use snafu::ResultExt;
 use crate::{
     Result,
     cache::Cache,
-    cargo::{CargoMetadataOptions, CargoRunner, CargoVerbosity, Metadata},
-    cli::BuildOptionsArgs,
+    cargo::{CargoMetadataOptions, CargoRunner, Metadata},
     config::Config,
     crate_resolver::ResolvedSource,
+    cratespec::CrateSpec,
     downloader::DownloadedCrate,
     error,
 };
@@ -27,6 +27,40 @@ pub enum BuildTarget {
 
     /// A specific example target to build.
     Example(String),
+}
+
+/// Build-related overrides (presumed to come from CLI arguments) that are merged with config
+/// settings to produce final [`BuildOptions`] for building a crate.
+#[derive(Clone, Debug, Default)]
+pub struct BuildOverrides {
+    /// Features to activate
+    ///
+    /// `None` means `--features` was not given; `Some(vec![])` means it was given but empty
+    pub features: Option<Vec<String>>,
+
+    /// Activate all available features
+    pub all_features: bool,
+
+    /// Do not activate the `default` feature
+    pub no_default_features: bool,
+
+    /// Build profile
+    pub profile: Option<String>,
+
+    /// Target triple for cross-compilation
+    pub target: Option<String>,
+
+    /// Number of parallel jobs for compilation
+    pub jobs: Option<usize>,
+
+    /// Ignore `rust-version` specification in packages
+    pub ignore_rust_version: bool,
+
+    /// Which executable within the crate to build
+    pub target_selection: BuildTarget,
+
+    /// Rust toolchain override
+    pub toolchain: Option<String>,
 }
 
 /// Options that control how a crate is built.
@@ -49,6 +83,14 @@ pub enum BuildTarget {
 /// those are present here because they directly influence the command line passed to `cargo
 /// build`, although they get populated from the [`Config`] struct which reflects settings in the
 /// config files and any overrides of those settings that the user applied at the CLI.
+///
+/// Another way to reason about whether something should be in this struct or in [`Config`] is that
+/// this struct implements [`Hash`], and that hash is used a cache key for caching build artifacts.
+/// So if a field has a different value, should that invalidate any cached build artifacts and
+/// cause a rebuild?  If so, then it probably belongs here.  If not, then it probably belongs in
+/// [`Config`].  A good example of this is the `verbose` command, which literally translates into a
+/// `cargo` command but is NOT considered a build option, because why would we rebuild a crate just
+/// because the verbosity level is different?
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BuildOptions {
     /// Features to activate (corresponds to `--features`).
@@ -90,11 +132,6 @@ pub struct BuildOptions {
     ///
     /// When set, Cargo is run through `rustup run <toolchain>`.
     pub toolchain: Option<String>,
-
-    /// Verbosity level for cargo build output.
-    ///
-    /// Controls the `-v` flags passed to cargo build commands.
-    pub cargo_verbosity: CargoVerbosity,
 }
 
 impl Default for BuildOptions {
@@ -111,99 +148,85 @@ impl Default for BuildOptions {
             ignore_rust_version: false,
             build_target: BuildTarget::default(),
             toolchain: None,
-            cargo_verbosity: CargoVerbosity::default(),
         }
     }
 }
 
 impl BuildOptions {
-    /// Load build options from config and CLI args, with proper precedence.
+    /// Merge build options from config and already-translated CLI overrides, with proper
+    /// precedence.
     ///
     /// Config-handled settings (`locked`, `offline`, `toolchain`) come from [`Config`], which
-    /// has already processed CLI overrides like `--locked`, `--unlocked`, `--frozen`, `--offline`,
-    /// and `+toolchain`.
+    /// has already processed CLI overrides like `--locked`, `--unlocked`, `--frozen`, `--offline`.
     ///
-    /// Crate-specific settings (features, profile, target, etc.) come from [`BuildOptionsArgs`].
-    ///
-    /// The `verbose` parameter is passed separately because it controls both overall cgx
-    /// logging (via tracing) and cargo build verbosity (passed to `cargo build`).
-    pub fn load(config: &Config, args: &BuildOptionsArgs, verbose: u8) -> Result<Self> {
-        // Parse features from CLI string (space or comma separated)
-        let features = if let Some(features_str) = &args.features {
-            Self::parse_features(features_str)
-        } else {
-            Vec::new()
-        };
-
-        // Profile: CLI --debug maps to "dev", otherwise use explicit --profile value
-        let profile = if args.debug {
-            Some("dev".to_string())
-        } else {
-            args.profile.clone()
-        };
-
-        // Build target: --bin, --example, or default
-        let build_target = match (&args.bin, &args.example) {
-            (Some(_), Some(_)) => {
-                unreachable!("BUG: clap should enforce mutual exclusivity");
-            }
-            (Some(bin_name), None) => BuildTarget::Bin(bin_name.clone()),
-            (None, Some(example_name)) => BuildTarget::Example(example_name.clone()),
-            (None, None) => BuildTarget::default(),
-        };
-
+    /// Crate-specific settings (features, profile, target, etc.) come from [`BuildOverrides`],
+    /// which the CLI front-end has already produced from the raw arguments (tokenizing
+    /// features, folding `--debug`, resolving `--bin`/`--example`).
+    pub fn load(config: &Config, overrides: &BuildOverrides) -> Result<Self> {
         Ok(BuildOptions {
             // These come from the config settings, `Config` will already apply any CLI overrides
             locked: config.locked,
             offline: config.offline,
-            toolchain: config.toolchain.clone(),
 
-            // The rest of these come exclusively from CLI args
-            features,
-            all_features: args.all_features,
-            no_default_features: args.no_default_features,
-            profile,
-            target: args.target.clone(),
-            jobs: args.jobs,
-            ignore_rust_version: args.ignore_rust_version,
-            build_target,
-            cargo_verbosity: CargoVerbosity::from_count(verbose),
+            // This can be set in the config file, but it can be overridden on the CLI
+            toolchain: overrides.toolchain.clone().or_else(|| config.toolchain.clone()),
+
+            // The rest of these come exclusively from the CLI overrides
+            features: overrides.features.clone().unwrap_or_default(),
+            all_features: overrides.all_features,
+            no_default_features: overrides.no_default_features,
+            profile: overrides.profile.clone(),
+            target: overrides.target.clone(),
+            jobs: overrides.jobs,
+            ignore_rust_version: overrides.ignore_rust_version,
+            build_target: overrides.target_selection.clone(),
         })
     }
 
-    /// Load build options for a configured tool name.
+    /// Load the build options for a specific crate.
     ///
-    /// This starts with [`Self::load`] and then applies configured tool features when the CLI did
-    /// not provide `--features`.
-    pub fn load_for_tool_name(
+    /// This will respect the `[tools]` section in the cgx config TOML, if there is an entry for
+    /// this crate then the options specified for that crate will be applied unless they have been
+    /// overridden in `BuildOverrides`.
+    pub fn load_for_crate(
         config: &Config,
-        args: &BuildOptionsArgs,
-        verbose: u8,
-        tool_name: Option<&str>,
+        overrides: &BuildOverrides,
+        crate_spec: &CrateSpec,
     ) -> Result<Self> {
-        let mut options = Self::load(config, args, verbose)?;
+        // Load the standard build options from the CLI/config files, without any crate-specific
+        // options.
+        let mut options = Self::load(config, overrides)?;
 
-        if args.features.is_none() {
-            if let Some(features) = tool_name
-                .and_then(|name| config.tools.get(name))
-                .and_then(crate::config::ToolConfig::features)
-            {
-                options.features = features.to_vec();
+        // Look up the tool-specific options for this crate, if any, and apply them if they are not
+        // overridden by the build overrides from the CLI.
+        //
+        // At the moment the only option that can be specified in the `[tools]` section that has
+        // any bearing on building is the selected features.  So, if features haven't been explicitly
+        // overridden on the command line, but features were specified in the config for this crate,
+        // then use those features.
+        if let Some(crate_name) = crate_spec.configured_tool_name() {
+            if let Some(tool_config) = config.tools.get(crate_name) {
+                if overrides.features.is_none() {
+                    if let Some(features) = tool_config.features() {
+                        options.features = features.to_vec();
+                    }
+                }
             }
         }
 
         Ok(options)
     }
 
-    /// Parse a feature string into a vector of feature names.
+    /// The resolved Rust target triple this build targets: the explicit `--target`, or cgx's own
+    /// host triple ([`build_context::TARGET`]) when none was given.
     ///
-    /// Handles both comma-separated and space-separated features.
-    fn parse_features(features_str: &str) -> Vec<String> {
-        features_str
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect()
+    /// This matches how cgx resolves the platform everywhere else (pre-built binary lookup, cargo
+    /// metadata filtering, and the build cache), so it reliably names the triple the binary is for
+    /// even on a default build where cargo writes to `target/debug` rather than a triple subdir.
+    pub(crate) fn target_platform(&self) -> String {
+        self.target
+            .clone()
+            .unwrap_or_else(|| build_context::TARGET.to_string())
     }
 }
 
@@ -228,8 +251,10 @@ pub trait CrateBuilder {
     /// the local source tree.  So this may or may not actually compile anything,
     /// depending on the crate source, the state of the cache, and the config.
     ///
-    /// Returns the full path to the compiled binary on success.
-    fn build(&self, krate: &DownloadedCrate, options: &BuildOptions) -> Result<PathBuf>;
+    /// Returns the full path to the compiled binary and the concrete [`BuildTarget`] that was built
+    /// (a `DefaultBin` request is resolved to the actual `Bin`/`Example` here, even on a cache
+    /// hit).
+    fn build(&self, krate: &DownloadedCrate, options: &BuildOptions) -> Result<(PathBuf, BuildTarget)>;
 }
 
 pub(crate) fn create_builder(
@@ -264,7 +289,7 @@ impl CrateBuilder for RealCrateBuilder {
         Self::list_targets_internal(krate, &metadata)
     }
 
-    fn build(&self, krate: &DownloadedCrate, options: &BuildOptions) -> Result<PathBuf> {
+    fn build(&self, krate: &DownloadedCrate, options: &BuildOptions) -> Result<(PathBuf, BuildTarget)> {
         // Gather metadata about the crate in its current source form.
         // The act of building will re-gather the metadata after the build, but this is needed to
         // resolve target and package information before building.
@@ -284,6 +309,11 @@ impl CrateBuilder for RealCrateBuilder {
             Cow::Borrowed(options)
         };
 
+        // The build target (ie, which binary or example to run) is now known, whether resolved
+        // just above or supplied explicitly. Report it alongside the binary, including on a cache
+        // hit.
+        let built_target = options.build_target.clone();
+
         // Crates resolved from local sources are, by definition, local.  Not only does that mean
         // that they are on a local filesystem (and presumably fast to access), but it also means
         // that their source contents are mutable.  Even if we wanted to cache them, we would need
@@ -292,13 +322,15 @@ impl CrateBuilder for RealCrateBuilder {
         // from their sources, and never cached
         if matches!(krate.resolved.source, ResolvedSource::LocalDir { .. }) {
             let (binary_path, _sbom) = self.build_uncached(krate, options.as_ref(), &metadata)?;
-            return Ok(binary_path);
+            return Ok((binary_path, built_target));
         }
 
-        self.cache
+        let binary_path = self
+            .cache
             .get_or_build_binary(&krate.resolved, options.as_ref(), || {
                 self.build_uncached(krate, options.as_ref(), &metadata)
-            })
+            })?;
+        Ok((binary_path, built_target))
     }
 }
 
@@ -600,7 +632,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        cargo::find_cargo,
+        cargo::create_cargo_runner,
         crate_resolver::{ResolvedCrate, ResolvedSource},
         error::Error,
         testdata::CrateTestCase,
@@ -616,7 +648,8 @@ mod tests {
         fs::create_dir_all(&config.build_dir).unwrap();
 
         let cache = Cache::new(config.clone(), crate::messages::MessageReporter::null());
-        let cargo_runner = Arc::new(find_cargo(crate::messages::MessageReporter::null()).unwrap());
+        let cargo_runner =
+            Arc::new(create_cargo_runner(config.clone(), crate::messages::MessageReporter::null()).unwrap());
 
         let builder = RealCrateBuilder {
             config,
@@ -808,11 +841,12 @@ mod tests {
         #[test]
         fn builds_all_testcases_with_bins() {
             let (builder, _temp) = test_builder();
-            let cargo = find_cargo(crate::messages::MessageReporter::null()).unwrap();
+            let cargo_runner =
+                create_cargo_runner(Config::default(), crate::messages::MessageReporter::null()).unwrap();
 
             for tc in CrateTestCase::all() {
                 let metadata_opts = CargoMetadataOptions::default();
-                let metadata = cargo.metadata(tc.path(), &metadata_opts).unwrap();
+                let metadata = cargo_runner.metadata(tc.path(), &metadata_opts).unwrap();
 
                 let workspace_pkgs = metadata.workspace_packages();
                 let buildable_packages: Vec<_> = workspace_pkgs
@@ -846,7 +880,7 @@ mod tests {
 
                     let result = builder.build(&krate, &options);
 
-                    if let Ok(binary) = result {
+                    if let Ok((binary, _target)) = result {
                         assert!(binary.exists(), "Binary missing for {}/{}", tc.name, pkg.name);
 
                         let binary_name = binary.file_name().unwrap().to_str().unwrap();
@@ -908,7 +942,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
 
             assert!(binary.exists());
             assert!(binary.is_file());
@@ -940,7 +974,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, target) = builder.build(&krate, &options).unwrap();
             assert!(binary.exists());
             let binary_name = binary.file_name().unwrap().to_str().unwrap();
             assert_eq!(
@@ -949,6 +983,9 @@ mod tests {
                 "Should build bin1 or the crate's default binary, got: {}",
                 binary_name
             );
+
+            // The `DefaultBin` request is resolved to the concrete target that was built.
+            assert_eq!(target, BuildTarget::Bin("bin1".to_string()));
         }
 
         #[test]
@@ -969,7 +1006,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             assert!(binary.exists());
             let binary_name = binary.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary_name, expected_bin_name("bin2"));
@@ -1026,7 +1063,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             assert!(binary.exists());
 
             let binary_name = binary.file_name().unwrap().to_str().unwrap();
@@ -1082,7 +1119,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary1 = builder.build(&krate1, &options).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("timestamp"));
             let output1 = run_timestamp_binary(&binary1);
@@ -1097,7 +1134,7 @@ mod tests {
                 None,
             );
 
-            let binary2 = builder.build(&krate2, &options).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("timestamp"));
             let output2 = run_timestamp_binary(&binary2);
@@ -1122,7 +1159,7 @@ mod tests {
                 profile: Some("dev".to_string()),
                 ..Default::default()
             };
-            let binary1 = builder.build(&krate1, &options1).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options1).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("timestamp"));
             let output1 = run_timestamp_binary(&binary1);
@@ -1138,7 +1175,7 @@ mod tests {
                 profile: Some("release".to_string()),
                 ..Default::default()
             };
-            let binary2 = builder.build(&krate2, &options2).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options2).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("timestamp"));
             let output2 = run_timestamp_binary(&binary2);
@@ -1164,7 +1201,7 @@ mod tests {
                 target: None,
                 ..Default::default()
             };
-            let binary1 = builder.build(&krate1, &options1).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options1).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("simple-bin-no-deps"));
 
@@ -1180,7 +1217,7 @@ mod tests {
                 target: Some(build_context::TARGET.to_string()),
                 ..Default::default()
             };
-            let binary2 = builder.build(&krate2, &options2).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options2).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("simple-bin-no-deps"));
 
@@ -1209,7 +1246,7 @@ mod tests {
                 locked: true,
                 ..Default::default()
             };
-            let binary1 = builder.build(&krate1, &options1).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options1).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("stale-serde"));
             let sbom1 = read_sbom_for_binary(&binary1);
@@ -1232,7 +1269,7 @@ mod tests {
                 locked: false,
                 ..Default::default()
             };
-            let binary2 = builder.build(&krate2, &options2).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options2).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("stale-serde"));
             let sbom2 = read_sbom_for_binary(&binary2);
@@ -1266,7 +1303,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary1 = builder.build(&krate1, &options).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("stale-serde"));
 
@@ -1278,7 +1315,7 @@ mod tests {
                 None,
             );
 
-            let binary2 = builder.build(&krate2, &options).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("stale-serde"));
 
@@ -1301,7 +1338,7 @@ mod tests {
                 profile: Some("dev".to_string()),
                 ..Default::default()
             };
-            let binary1 = builder.build(&krate1, &options1).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options1).unwrap();
             let binary1_name = binary1.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary1_name, expected_bin_name("timestamp"));
             let sbom1 = read_sbom_for_binary(&binary1);
@@ -1320,7 +1357,7 @@ mod tests {
                 no_default_features: true,
                 ..Default::default()
             };
-            let binary2 = builder.build(&krate2, &options2).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options2).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("timestamp"));
             let sbom2 = read_sbom_for_binary(&binary2);
@@ -1351,7 +1388,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             let binary_name = binary.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary_name, expected_bin_name("timestamp"));
             let output = run_timestamp_binary(&binary);
@@ -1380,7 +1417,7 @@ mod tests {
             );
             let options = BuildOptions::default();
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             let sbom = read_sbom_for_binary(&binary);
 
             assert_eq!(
@@ -1409,7 +1446,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             let sbom = read_sbom_for_binary(&binary);
 
             assert_eq!(
@@ -1437,7 +1474,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
 
             assert!(!binary.starts_with(&builder.config.bin_dir));
             assert!(binary.starts_with(tc.path()));
@@ -1466,7 +1503,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary1 = builder.build(&krate1, &options).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options).unwrap();
 
             assert!(binary1.starts_with(&builder.config.bin_dir));
 
@@ -1483,7 +1520,7 @@ mod tests {
                 },
                 None,
             );
-            let binary2 = builder.build(&krate2, &options).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("simple-bin-no-deps"));
 
@@ -1508,7 +1545,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary1 = builder.build(&krate1, &options).unwrap();
+            let (binary1, _target) = builder.build(&krate1, &options).unwrap();
 
             assert!(binary1.starts_with(&builder.config.bin_dir));
 
@@ -1526,7 +1563,7 @@ mod tests {
                 },
                 None,
             );
-            let binary2 = builder.build(&krate2, &options).unwrap();
+            let (binary2, _target) = builder.build(&krate2, &options).unwrap();
             let binary2_name = binary2.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary2_name, expected_bin_name("simple-bin-no-deps"));
 
@@ -1554,7 +1591,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let binary = builder.build(&krate, &options).unwrap();
+            let (binary, _target) = builder.build(&krate, &options).unwrap();
             let binary_name = binary.file_name().unwrap().to_str().unwrap();
             assert_eq!(binary_name, expected_bin_name("proc-macro-dep"));
 
@@ -1592,10 +1629,8 @@ mod tests {
             #[test]
             fn empty_features_string() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", "", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", "", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.features.is_empty());
             }
@@ -1604,10 +1639,8 @@ mod tests {
             #[test]
             fn single_feature() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", "feat1", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", "feat1", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.features, vec!["feat1"]);
             }
@@ -1616,10 +1649,8 @@ mod tests {
             #[test]
             fn comma_separated_features() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", "feat1,feat2", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", "feat1,feat2", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1628,10 +1659,8 @@ mod tests {
             #[test]
             fn space_separated_features() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", "feat1 feat2", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", "feat1 feat2", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1640,10 +1669,8 @@ mod tests {
             #[test]
             fn mixed_separator_features() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", "feat1, feat2 feat3", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", "feat1, feat2 feat3", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2", "feat3"]);
             }
@@ -1652,10 +1679,8 @@ mod tests {
             #[test]
             fn whitespace_handling() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--features", " feat1 , feat2 ", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--features", " feat1 , feat2 ", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.features, vec!["feat1", "feat2"]);
             }
@@ -1664,10 +1689,8 @@ mod tests {
             #[test]
             fn no_features_flag() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.features.is_empty());
             }
@@ -1680,10 +1703,8 @@ mod tests {
             #[test]
             fn debug_flag_maps_to_dev() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--debug", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--debug", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.profile, Some("dev".to_string()));
             }
@@ -1692,10 +1713,8 @@ mod tests {
             #[test]
             fn explicit_profile() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--profile", "custom", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--profile", "custom", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.profile, Some("custom".to_string()));
             }
@@ -1704,10 +1723,8 @@ mod tests {
             #[test]
             fn no_profile_specified() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.profile, None);
             }
@@ -1720,10 +1737,8 @@ mod tests {
             #[test]
             fn default_bin_when_no_flags() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::DefaultBin);
             }
@@ -1732,10 +1747,8 @@ mod tests {
             #[test]
             fn explicit_bin() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--bin", "foo", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--bin", "foo", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::Bin("foo".to_string()));
             }
@@ -1744,10 +1757,8 @@ mod tests {
             #[test]
             fn explicit_example() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--example", "bar", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--example", "bar", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.build_target, BuildTarget::Example("bar".to_string()));
             }
@@ -1763,10 +1774,8 @@ mod tests {
             #[test]
             fn reads_default_locked_true() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.locked, "Should read locked=true from default Config");
                 assert!(!options.offline, "Should read offline=false from default Config");
@@ -1778,10 +1787,8 @@ mod tests {
                     locked: false,
                     ..Default::default()
                 };
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(!options.locked, "Should read locked=false from Config");
             }
@@ -1792,10 +1799,8 @@ mod tests {
                     offline: true,
                     ..Default::default()
                 };
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.offline, "Should read offline=true from Config");
             }
@@ -1807,10 +1812,8 @@ mod tests {
                     offline: true,
                     ..Default::default()
                 };
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(!options.locked, "Should read locked=false from Config");
                 assert!(options.offline, "Should read offline=true from Config");
@@ -1828,10 +1831,8 @@ mod tests {
             #[test]
             fn reads_default_none() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(
                     options.toolchain, None,
@@ -1845,10 +1846,8 @@ mod tests {
                     toolchain: Some("stable".to_string()),
                     ..Default::default()
                 };
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(
                     options.toolchain,
@@ -1863,10 +1862,8 @@ mod tests {
                     toolchain: Some("nightly".to_string()),
                     ..Default::default()
                 };
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(
                     options.toolchain,
@@ -1883,10 +1880,8 @@ mod tests {
             #[test]
             fn all_features() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--all-features", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--all-features", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.all_features);
             }
@@ -1895,10 +1890,8 @@ mod tests {
             #[test]
             fn no_default_features() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--no-default-features", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--no-default-features", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.no_default_features);
             }
@@ -1907,10 +1900,8 @@ mod tests {
             #[test]
             fn target() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--target", "x86_64-unknown-linux-gnu", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--target", "x86_64-unknown-linux-gnu", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.target, Some("x86_64-unknown-linux-gnu".to_string()));
             }
@@ -1919,10 +1910,8 @@ mod tests {
             #[test]
             fn jobs() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--jobs", "4", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--jobs", "4", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert_eq!(options.jobs, Some(4));
             }
@@ -1931,36 +1920,10 @@ mod tests {
             #[test]
             fn ignore_rust_version() {
                 let config = Config::default();
-                let args = Cli::parse_from_test_args(["--ignore-rust-version", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
+                let cli = Cli::parse_from_test_args(["--ignore-rust-version", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
                 assert!(options.ignore_rust_version);
-            }
-
-            /// Test that `-v` flags are converted to [`CargoVerbosity`].
-            #[test]
-            fn cargo_verbosity() {
-                let config = Config::default();
-
-                let args = Cli::parse_from_test_args(["tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
-                assert_eq!(options.cargo_verbosity, CargoVerbosity::Normal);
-
-                let args = Cli::parse_from_test_args(["-v", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
-                assert_eq!(options.cargo_verbosity, CargoVerbosity::Verbose);
-
-                let args = Cli::parse_from_test_args(["-vv", "tool"]);
-                let options =
-                    BuildOptions::load(&config, &args.crate_invocation().build_options, args.verbose())
-                        .unwrap();
-                assert_eq!(options.cargo_verbosity, CargoVerbosity::VeryVerbose);
             }
         }
     }
