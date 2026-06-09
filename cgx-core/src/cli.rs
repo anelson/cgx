@@ -2107,6 +2107,7 @@ mod tests {
             config.tools.insert(
                 "timestamp".to_string(),
                 ToolConfig::Detailed {
+                    default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
                     registry: None,
@@ -2140,6 +2141,7 @@ mod tests {
             config.tools.insert(
                 "timestamp".to_string(),
                 ToolConfig::Detailed {
+                    default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
                     registry: None,
@@ -2162,6 +2164,112 @@ mod tests {
             .unwrap();
 
             assert_eq!(options.features, vec!["gonkolator"]);
+        }
+
+        /// `default-features = false` in the `[tools]` config disables default features, the same
+        /// as passing `--no-default-features`.
+        #[test]
+        fn config_default_features_false_disables_defaults() {
+            let cli = Cli::parse_from_test_args(["timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: false,
+                    version: None,
+                    features: None,
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            assert!(options.no_default_features);
+        }
+
+        /// The default `default-features = true` (the same as omitting the key) leaves default
+        /// features enabled.
+        #[test]
+        fn config_default_features_true_keeps_defaults() {
+            let cli = Cli::parse_from_test_args(["timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: true,
+                    version: None,
+                    features: None,
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            assert!(!options.no_default_features);
+        }
+
+        /// Config `default-features` is independent of the feature list: overriding `--features` on
+        /// the CLI replaces the configured features but leaves the configured `default-features =
+        /// false` in effect.
+        #[test]
+        fn config_default_features_independent_of_cli_features() {
+            let cli = Cli::parse_from_test_args(["--features", "gonkolator", "timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: false,
+                    version: None,
+                    features: Some(vec!["frobnulator".to_string()]),
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            // CLI replaced the feature list, but the configured `default-features = false` still
+            // applies.
+            assert_eq!(options.features, vec!["gonkolator"]);
+            assert!(options.no_default_features);
         }
     }
 

@@ -289,6 +289,78 @@ eza = { version = "=0.23.1", features = ["a-config-only-feature"] }
 }
 
 #[test]
+fn config_default_features_are_honored() {
+    let mut cgx = Cgx::with_test_fs();
+
+    // `default-features = false` configured for a tool in `[tools]` must reach the resolved build
+    // plan as `no_default_features`. We assert on the `CratePlan` message via `--list-targets`
+    // (resolve + metadata, no compile) rather than running the tool.
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(
+            r#"
+[tools]
+eza = { version = "=0.23.1", default-features = false }
+"#,
+        )
+        .unwrap();
+
+    cgx.cmd.arg("--list-targets").with_json_messages().arg("eza");
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    assert.success();
+
+    let no_default_features = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.no_default_features),
+            _ => None,
+        })
+        .expect("expected a CratePlan message");
+
+    assert!(no_default_features);
+}
+
+#[test]
+fn config_default_features_and_cli_features_coexist() {
+    let mut cgx = Cgx::with_test_fs();
+
+    // Config `default-features` is independent of the feature list: passing `--features` on the CLI
+    // replaces the (here unset) configured features but leaves the configured `default-features =
+    // false` in effect, so the build plan carries both.
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(
+            r#"
+[tools]
+eza = { version = "=0.23.1", default-features = false }
+"#,
+        )
+        .unwrap();
+
+    cgx.cmd
+        .arg("--list-targets")
+        .arg("--features")
+        .arg("vendored-openssl")
+        .with_json_messages()
+        .arg("eza");
+    let (assert, messages) = cgx.cmd.assert_with_messages();
+    assert.success();
+
+    let options = messages
+        .iter()
+        .find_map(|message| match message {
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.clone()),
+            _ => None,
+        })
+        .expect("expected a CratePlan message");
+
+    assert!(options.no_default_features);
+    assert_eq!(options.features, vec!["vendored-openssl"]);
+}
+
+#[test]
 fn prefetch_single_tool_prepares_without_stdout() {
     let mut cgx = Cgx::with_test_fs();
 

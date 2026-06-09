@@ -618,6 +618,7 @@ mod tests {
         config.tools.insert(
             "ripgrep".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: Some("14.0".to_string()),
                 features: None,
                 registry: None,
@@ -658,6 +659,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
                 features: None,
@@ -700,6 +702,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 branch: None,
@@ -743,6 +746,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://github.com/owner/repo.git".to_string()),
                 tag: None,
@@ -786,6 +790,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://gitlab.com/owner/repo.git".to_string()),
                 tag: None,
@@ -829,6 +834,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 path: Some(PathBuf::from("/some/path")),
                 registry: None,
@@ -871,6 +877,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 branch: Some("develop".to_string()),
@@ -914,6 +921,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 tag: Some("v1.0.0".to_string()),
@@ -957,6 +965,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 rev: Some("abc123".to_string()),
@@ -1056,6 +1065,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 git: Some("https://github.com/owner/repo.git".to_string()),
                 registry: None,
@@ -1100,6 +1110,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
                 git: None,
@@ -1220,6 +1231,7 @@ mod tests {
             tools: [(
                 "my-tool".to_string(),
                 ToolConfig::Detailed {
+                    default_features: true,
                     version: Some("1.0".to_string()),
                     registry: Some("tool-registry".to_string()),
                     features: None,
@@ -1318,6 +1330,7 @@ mod tests {
         config.tools.insert(
             "my-tool".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: None,
                 features: Some(vec!["feat1".to_string(), "feat2".to_string()]),
                 registry: None,

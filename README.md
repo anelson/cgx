@@ -237,6 +237,9 @@ cargo-deny = "=0.17.0"
 # Detailed configuration with features
 taplo-cli = { version = "1.0", features = ["full"] }
 
+# Default features can be disabled, just like in a Cargo dependency
+sccache = { version = "0.8", default-features = false }
+
 # Git repository source
 my-tool = { git = "https://github.com/owner/repo.git", tag = "v1.0.0" }
 

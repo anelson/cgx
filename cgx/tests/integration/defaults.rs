@@ -1,11 +1,10 @@
 //! Tests that do not override any config settings and verify the default behavior of cgx
-
 use cgx::messages::{
     BuildCacheMessage, CrateResolutionMessage, Message, PrebuiltBinaryMessage, RunnerMessage, SourceMessage,
 };
 use predicates::prelude::*;
 
-use crate::utils::{Cgx, CommandExt};
+use crate::utils::{Cgx, CommandExt, assert_built_from_source, assert_prebuilt};
 
 /// Test running a crate that publishes pre-built binaries (eza).
 ///
@@ -19,8 +18,7 @@ use crate::utils::{Cgx, CommandExt};
 fn run_with_prebuilt_binary() {
     let mut cgx = Cgx::with_test_fs();
 
-    // First invocation should download eza pre-built binary
-    // Should NOT see "Compiling" since we're using a pre-built binary
+    // First invocation should download and run the eza pre-built binary
     cgx.cmd
         .arg("eza@=0.23.1")
         .arg("--version")
@@ -60,8 +58,7 @@ https://github.com/eza-community/eza
 fn run_without_prebuilt_binary() {
     let mut cgx = Cgx::with_test_fs();
 
-    // First invocation should build from source since cargo-expand doesn't publish binaries
-    // Should see "Compiling" in stderr
+    // First invocation should build from source since cargo-expand doesn't publish binaries.
     cgx.cmd
         .arg("cargo-expand@=1.0.88")
         .arg("--version")
@@ -109,6 +106,7 @@ fn messages_with_prebuilt_binary() {
         )),
         "Expected CrateResolution::CacheMiss on first run"
     );
+    assert_prebuilt(&messages);
 
     // Second invocation should hit all caches
     let mut cgx = cgx.reset();
@@ -183,6 +181,7 @@ fn messages_without_prebuilt_binary() {
             .any(|m| matches!(m, Message::BuildCache(BuildCacheMessage::CacheMiss { .. }))),
         "Expected BuildCache::CacheMiss on first run (building from source)"
     );
+    assert_built_from_source(&messages);
 
     // Second invocation should hit all caches
     let mut cgx = cgx.reset();

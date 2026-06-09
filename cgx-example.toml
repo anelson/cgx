@@ -82,12 +82,14 @@ binary_providers = [
 
 # `cgx` can invoke any binary crate on crates.io, it doesn't need to be listed
 # here, but listing a tool here can pin it to a specific version or customize
-# its source, registry, path, or features.
+# its source, registry, path, features, or default-features.
 #
 # Each entry has the same format as a dependency in Cargo.toml.
 [tools]
 ripgrep   = "*"
 taplo-cli = { version = "1.11.0", features = ["schema"] }
+# `default-features = false` builds the tool with `--no-default-features`.
+sccache = { version = "0.8", default-features = false }
 
 # Not all crates have intuitive names. You can specify aliases here.
 [aliases]

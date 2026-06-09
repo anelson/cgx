@@ -197,6 +197,15 @@ pub enum ToolConfig {
         version: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         features: Option<Vec<String>>,
+        /// Whether to enable the crate's default features, matching Cargo's `default-features`
+        /// dependency key. Defaults to `true`; set to `false` to build with
+        /// `--no-default-features`.
+        #[serde(
+            rename = "default-features",
+            default = "default_true",
+            skip_serializing_if = "is_true"
+        )]
+        default_features: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         registry: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,6 +229,32 @@ impl ToolConfig {
             ToolConfig::Detailed { features, .. } => features.as_deref(),
         }
     }
+
+    /// Return the configured `default-features` setting for this tool.
+    ///
+    /// `true` (the default) means the crate's default features are enabled; `false` means
+    /// building with default features disabled, equivalent to `--no-default-features`.
+    pub fn default_features(&self) -> bool {
+        match self {
+            ToolConfig::Version(_) => true,
+            ToolConfig::Detailed { default_features, .. } => *default_features,
+        }
+    }
+}
+
+/// Default for the `default-features` field of [`ToolConfig::Detailed`]; named because serde's
+/// `default` attribute requires a function path.
+fn default_true() -> bool {
+    true
+}
+
+/// Predicate for `skip_serializing_if` on the `default-features` field, so the default `true` is
+/// omitted from rendered config; named because serde's attribute requires a function path.
+///
+/// Yes, an `is_true(bool) -> bool` function is like a particularly stupid Daily WTF episode,
+/// but unfortunately it's necessary here.
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Intermediate structure for deserializing config files from TOML.
@@ -969,6 +1004,78 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_tools_default_features() {
+        // `default-features` (hyphenated, matching Cargo) is accepted and parsed.
+        let toml_content = r#"
+            [tools]
+            no-defaults = { version = "1.0", default-features = false }
+            with-defaults = { version = "1.0" }
+        "#;
+
+        let config: ConfigFile = toml::from_str(toml_content).unwrap();
+        let tools = config.tools.unwrap();
+
+        // Explicit `default-features = false` is captured.
+        assert!(!tools.get("no-defaults").unwrap().default_features());
+
+        // When the key is absent it defaults to `true`, matching Cargo's default.
+        assert!(tools.get("with-defaults").unwrap().default_features());
+
+        // The legacy underscore spelling is rejected; we accept only the hyphenated Cargo form.
+        let underscore = r#"
+            [tools]
+            nope = { version = "1.0", default_features = false }
+        "#;
+        assert_matches!(toml::from_str::<ConfigFile>(underscore), Err(_));
+    }
+
+    #[test]
+    fn test_default_features_round_trips_via_tools_toml() {
+        let mut config = Config::default();
+        config.tools.insert(
+            "no-defaults".to_string(),
+            ToolConfig::Detailed {
+                default_features: false,
+                version: Some("1.0".to_string()),
+                features: None,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            },
+        );
+        config.tools.insert(
+            "with-defaults".to_string(),
+            ToolConfig::Detailed {
+                default_features: true,
+                version: Some("1.0".to_string()),
+                features: None,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            },
+        );
+
+        let rendered = config.tools_toml().unwrap();
+
+        // `default-features = false` is rendered with the hyphenated Cargo key, while the default
+        // `true` is omitted entirely thanks to `skip_serializing_if`.
+        assert!(rendered.contains("default-features = false"));
+        assert!(!rendered.contains("default-features = true"));
+
+        // The setting survives a round-trip back through the parser.
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        let tools = parsed.tools.unwrap();
+        assert!(!tools.get("no-defaults").unwrap().default_features());
+        assert!(tools.get("with-defaults").unwrap().default_features());
+    }
+
+    #[test]
     fn test_deserialize_aliases() {
         let toml_content = r#"
             [aliases]
@@ -994,6 +1101,7 @@ mod tests {
         config.tools.insert(
             "beta".to_string(),
             ToolConfig::Detailed {
+                default_features: true,
                 version: Some("1.5".to_string()),
                 features: Some(vec!["frobnulator".to_string()]),
                 registry: None,

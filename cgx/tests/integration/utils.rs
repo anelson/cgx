@@ -1,7 +1,7 @@
 //! Utility functions to help run our CLI as part of a test
 use assert_cmd::{Command, assert::OutputAssertExt, cargo::cargo_bin_cmd};
 use assert_fs::{TempDir, prelude::*};
-use cgx::messages::Message;
+use cgx::messages::{CgxMessage, Message, Provenance};
 use serde_json::Deserializer;
 
 pub(crate) struct TestFs {
@@ -147,4 +147,37 @@ impl CommandExt for Command {
 
         (assert, messages)
     }
+}
+
+/// Assert that the emitted messages report the crate's binary was built from source.
+///
+/// Reads the authoritative [`CgxMessage::CrateProvenance`].
+pub(crate) fn assert_built_from_source(messages: &[Message]) {
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::BuiltFromSource { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting the binary was built from source, got: {messages:#?}"
+    );
+}
+
+/// Assert that the emitted messages report the crate's binary was obtained as a pre-built binary.
+///
+/// Reads the authoritative [`CgxMessage::CrateProvenance`].
+/// the absence of `Compiling` in stderr.
+pub(crate) fn assert_prebuilt(messages: &[Message]) {
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::Prebuilt { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting a pre-built binary, got: {messages:#?}"
+    );
 }

@@ -200,16 +200,20 @@ impl BuildOptions {
         // Look up the tool-specific options for this crate, if any, and apply them if they are not
         // overridden by the build overrides from the CLI.
         //
-        // At the moment the only option that can be specified in the `[tools]` section that has
-        // any bearing on building is the selected features.  So, if features haven't been explicitly
-        // overridden on the command line, but features were specified in the config for this crate,
-        // then use those features.
+        // The `[tools]` settings that bear on building are the selected features and
+        // `default-features`. If features haven't been explicitly overridden on the command line but
+        // were specified in the config for this crate, use those. `default-features = false` disables
+        // default features the same as `--no-default-features`.
         if let Some(crate_name) = crate_spec.configured_tool_name() {
             if let Some(tool_config) = config.tools.get(crate_name) {
                 if overrides.features.is_none() {
                     if let Some(features) = tool_config.features() {
                         options.features = features.to_vec();
                     }
+                }
+
+                if !tool_config.default_features() {
+                    options.no_default_features = true;
                 }
             }
         }
