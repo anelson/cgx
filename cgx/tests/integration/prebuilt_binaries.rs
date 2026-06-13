@@ -9,7 +9,10 @@ use cgx::messages::{
 };
 use cgx_core::config::BinaryProvider;
 
-use crate::utils::{Cgx, CommandExt, assert_built_from_source, assert_prebuilt};
+use crate::utils::{
+    Cgx, CommandExt, assert_built_from_source, assert_cached_source_build, assert_compiled_from_source,
+    assert_prebuilt,
+};
 
 /// Test that `--prebuilt-binary never` forces building from source even when binaries exist.
 #[test]
@@ -280,7 +283,7 @@ fn cache_flow_switching_modes() {
         )),
         "Expected PrebuiltBinaryMessage::PrebuiltBinariesDisabled on second run"
     );
-    assert_built_from_source(&messages);
+    assert_compiled_from_source(&messages);
 
     // Third run with defaults again - should use pre-built binary from cache (no network)
     let mut cgx = cgx.reset();
@@ -328,7 +331,7 @@ fn custom_features_uses_separate_cache() {
         )),
         "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization on first run"
     );
-    assert_built_from_source(&messages);
+    assert_compiled_from_source(&messages);
     assert!(
         messages
             .iter()
@@ -377,7 +380,7 @@ fn custom_features_uses_separate_cache() {
             .any(|m| matches!(m, Message::BuildCache(BuildCacheMessage::CacheHit { .. }))),
         "Expected BuildCacheMessage::CacheHit on third run (reusing build from first run)"
     );
-    assert_built_from_source(&messages);
+    assert_cached_source_build(&messages);
 }
 
 /// Test that negative binary resolution results are cached.

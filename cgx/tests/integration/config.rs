@@ -537,20 +537,46 @@ e = "eza"
         "expected list-tools JSON message for configured alias"
     );
 
+    // Now the ultimate test of the TOML output by `--list-tools: The round-trip test.
+    //
+    // Feed the rendered TOML back into a fully isolated `cgx` (the same `with_test_fs`
+    // isolation as the rest of the suite, so a host `/etc/cgx.toml` cannot contaminate the result)
+    // and confirm the tool and alias survive re-rendering. Verify via the structured messages, not
+    // substring matches.
     let rendered_toml = String::from_utf8(output).unwrap();
-    let verify_cwd = assert_fs::TempDir::with_prefix("cgx-list-tools-verify-").unwrap();
-    let verify_home = assert_fs::TempDir::with_prefix("cgx-list-tools-home-").unwrap();
-    verify_cwd.child("cgx.toml").write_str(&rendered_toml).unwrap();
 
-    let mut verify = Cgx::find();
+    let mut verify = Cgx::with_test_fs();
     verify
-        .cmd
-        .current_dir(verify_cwd.path())
-        .env("HOME", verify_home.path())
-        .env("XDG_CONFIG_HOME", verify_home.path().join("config"))
-        .arg("--list-tools")
-        .assert()
+        .test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(&rendered_toml)
+        .unwrap();
+
+    verify.cmd.arg("--list-tools").with_json_messages();
+    let (assert, messages) = verify.cmd.assert_with_messages();
+    assert
         .success()
-        .stdout(predicates::str::contains("eza"))
-        .stdout(predicates::str::contains("e"));
+        .stdout(predicates::str::contains("[tools]"))
+        .stdout(predicates::str::contains("[aliases]"));
+
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::ListTool { name, .. }) if name == "eza"
+            )
+        }),
+        "expected the re-rendered config to still list the configured tool"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Runner(RunnerMessage::ListAlias { name, target })
+                    if name == "e" && target == "eza"
+            )
+        }),
+        "expected the re-rendered config to still list the configured alias"
+    );
 }

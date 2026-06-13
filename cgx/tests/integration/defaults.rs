@@ -4,7 +4,7 @@ use cgx::messages::{
 };
 use predicates::prelude::*;
 
-use crate::utils::{Cgx, CommandExt, assert_built_from_source, assert_prebuilt};
+use crate::utils::{Cgx, CommandExt, assert_compiled_from_source, assert_prebuilt};
 
 /// Test running a crate that publishes pre-built binaries (eza).
 ///
@@ -181,7 +181,7 @@ fn messages_without_prebuilt_binary() {
             .any(|m| matches!(m, Message::BuildCache(BuildCacheMessage::CacheMiss { .. }))),
         "Expected BuildCache::CacheMiss on first run (building from source)"
     );
-    assert_built_from_source(&messages);
+    assert_compiled_from_source(&messages);
 
     // Second invocation should hit all caches
     let mut cgx = cgx.reset();
