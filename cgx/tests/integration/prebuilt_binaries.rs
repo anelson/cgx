@@ -81,6 +81,38 @@ fn always_mode_fails_without_binary() {
         .failure();
 }
 
+/// Test that `--prebuilt-binary always` fails fast when build options disqualify prebuilt
+/// binaries, and does NOT fall back to building from source.
+#[test]
+fn always_mode_fails_when_build_options_disqualify() {
+    let mut cgx = Cgx::with_test_fs();
+
+    // A custom profile disqualifies prebuilt binaries, which is not compatible with `always` mode,
+    // so this should error without attempting to build from source.
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("--prebuilt-binary")
+        .arg("always")
+        .arg("--profile")
+        .arg("dev")
+        .arg("eza@=0.23.1")
+        .arg("--version")
+        .assert_with_messages();
+
+    assert
+        .failure()
+        .stderr(predicates::str::contains("custom profile specified"));
+
+    // The invocation must fail before any source build starts.
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "expected the invocation to fail without starting a build"
+    );
+}
+
 /// Test that custom features disqualify pre-built binary usage.
 #[test]
 fn custom_features_disqualifies() {

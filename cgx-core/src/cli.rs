@@ -275,12 +275,25 @@ impl CrateArgs {
     pub fn crate_request(&self) -> crate::Result<CrateRequest> {
         // Split the CLI-only `name@version` convention into name and version-suffix string.
         let (name, at_version) = match &self.crate_spec {
-            Some(spec) => match spec.split_once('@') {
-                Some((name, version)) => (Some(name.to_string()), Some(version.to_string())),
-                None => (Some(spec.clone()), None),
-            },
+            Some(spec) => {
+                let (name, at_version) = match spec.split_once('@') {
+                    Some((name, version)) => (name.to_string(), Some(version.to_string())),
+                    None => (spec.clone(), None),
+                };
+                if name.is_empty() {
+                    return crate::error::MissingCrateNameSnafu { spec: spec.clone() }.fail();
+                }
+                (Some(name), at_version)
+            }
             None => (None, None),
         };
+
+        // `cgx cargo <subcommand>` is normalized to the `cargo-<subcommand>` plugin crate during
+        // invocation splitting, so a crate spec still named `cargo` means the user is trying to
+        // run cargo itself, which cgx cannot do.
+        if name.as_deref() == Some("cargo") {
+            return crate::error::CargoNotRunnableSnafu.fail();
+        }
 
         // Users can either specify a semver version req with the `name@version` syntax in the
         // crate name, or they can specify the version with `--crate-version`, but they cannot
@@ -402,6 +415,7 @@ impl PrefetchAll {
             http_proxy: self.http.http_proxy.clone(),
             offline: self.offline,
             refresh: self.refresh,
+            verbosity: Verbosity::from_count(self.reporting.verbose),
             ..self.config.to_config_overrides()
         }
     }
@@ -784,9 +798,24 @@ impl RawCli {
         }
 
         let crate_spec = parts.remove(0).to_string_lossy().into_owned();
-        let (crate_spec, mut tool_args) = if crate_spec == "cargo" && !parts.is_empty() {
-            let subcommand = parts.remove(0);
-            (format!("cargo-{}", subcommand.to_string_lossy()), parts)
+        let (crate_spec, mut tool_args) = if crate_spec == "cargo" {
+            // A `--` may also separate `cargo` from its subcommand; drop it before deciding
+            // whether a subcommand follows.
+            if matches!(parts.first().and_then(|arg| arg.to_str()), Some("--")) {
+                parts.remove(0);
+            }
+            // Glue only a plausible subcommand name into the `cargo-<subcommand>` plugin crate
+            // name. A flag (or nothing) leaves the spec as bare `cargo`, which
+            // [`CrateArgs::crate_request`] rejects as unrunnable.
+            if parts
+                .first()
+                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'))
+            {
+                let subcommand = parts.remove(0);
+                (format!("cargo-{}", subcommand.to_string_lossy()), parts)
+            } else {
+                (crate_spec, parts)
+            }
         } else {
             (crate_spec, parts)
         };
@@ -932,6 +961,7 @@ impl RawCli {
             Self::ensure_no_crate_args(&tool_args, "--list-targets")?;
             Ok(Cli::ListTargets(crate_args))
         } else if no_exec {
+            Self::ensure_no_crate_args(&tool_args, "--no-exec")?;
             Ok(Cli::NoExec(crate_args))
         } else {
             Ok(Cli::Run {
@@ -1190,6 +1220,18 @@ mod tests {
         }
 
         #[test]
+        fn test_at_version_without_crate_name() {
+            let result = parse_cratespec_from_args(&["@1.0"]);
+            assert_matches!(result, Err(crate::error::Error::MissingCrateName { .. }));
+        }
+
+        #[test]
+        fn test_empty_crate_spec() {
+            let result = parse_cratespec_from_args(&[""]);
+            assert_matches!(result, Err(crate::error::Error::MissingCrateName { .. }));
+        }
+
+        #[test]
         fn test_cargo_subcommand() {
             let cr = parse_cratespec_from_args(&["cargo", "deny"]).unwrap();
             assert_matches!(
@@ -1206,6 +1248,24 @@ mod tests {
                 CrateSpec::CratesIo { ref name, version: Some(ref v) }
                 if name == "cargo-deny" && v == &semver::VersionReq::parse("1").unwrap()
             );
+        }
+
+        #[test]
+        fn test_cargo_without_subcommand() {
+            let result = parse_cratespec_from_args(&["cargo"]);
+            assert_matches!(result, Err(crate::error::Error::CargoNotRunnable));
+        }
+
+        #[test]
+        fn test_cargo_with_flag_argument() {
+            let result = parse_cratespec_from_args(&["cargo", "--help"]);
+            assert_matches!(result, Err(crate::error::Error::CargoNotRunnable));
+        }
+
+        #[test]
+        fn test_cargo_with_version() {
+            let result = parse_cratespec_from_args(&["cargo@1.0"]);
+            assert_matches!(result, Err(crate::error::Error::CargoNotRunnable));
         }
 
         #[test]
@@ -1671,6 +1731,19 @@ mod tests {
             assert_eq!(opts.features, vec!["foo", "bar"]);
         }
 
+        /// An explicit empty `--features` value (which cargo itself accepts) is an empty feature
+        /// list, distinct from the flag being absent entirely.
+        #[test]
+        fn empty_features_value_is_distinct_from_absent_flag() {
+            for empty in ["", ","] {
+                let cli = Cli::parse_from_test_args(["--features", empty, "ripgrep"]);
+                assert_eq!(cli.crate_args().to_build_overrides().features, Some(vec![]));
+            }
+
+            let cli = Cli::parse_from_test_args(["ripgrep"]);
+            assert_eq!(cli.crate_args().to_build_overrides().features, None);
+        }
+
         #[test]
         fn test_all_features() {
             let opts = parse_build_options_from_args(&["--all-features", "ripgrep"]).unwrap();
@@ -1944,6 +2017,17 @@ mod tests {
         }
 
         #[test]
+        fn no_exec_rejects_trailing_args() {
+            for args in [
+                vec!["--no-exec", "timestamp", "--help"],
+                vec!["--no-exec", "timestamp", "--", "--help"],
+            ] {
+                let result = Cli::try_parse_from_test_args(args);
+                assert_matches!(result, Err(_));
+            }
+        }
+
+        #[test]
         fn prefetch_rejects_no_exec() {
             let result = Cli::try_parse_from_test_args(["--prefetch", "--no-exec", "timestamp"]);
             assert_matches!(result, Err(_));
@@ -2021,6 +2105,18 @@ mod tests {
             let config = Config::load_from_dir(temp.path(), &overrides).unwrap();
             assert!(config.offline);
             assert!(config.refresh);
+        }
+
+        #[test]
+        fn prefetch_all_verbosity_reaches_config_overrides() {
+            let cli = Cli::parse_from_test_args(["--prefetch-all", "-vv"]);
+            let Cli::PrefetchAll(prefetch_all) = &cli else {
+                panic!("expected a prefetch-all command");
+            };
+            assert_eq!(
+                prefetch_all.to_config_overrides().verbosity,
+                Verbosity::VeryVerbose
+            );
         }
 
         #[test]
@@ -2166,6 +2262,41 @@ mod tests {
             assert_eq!(options.features, vec!["gonkolator"]);
         }
 
+        /// An explicit empty `--features` value (accepted by cargo as "no features") is still an
+        /// explicit CLI override, so configured `[tools]` features are not applied.
+        #[test]
+        fn empty_cli_features_override_config_features() {
+            let cli = Cli::parse_from_test_args(["--features", "", "timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: true,
+                    version: None,
+                    features: Some(vec!["frobnulator".to_string()]),
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(options.features, Vec::<String>::new());
+            assert!(!options.all_features);
+        }
+
         /// `default-features = false` in the `[tools]` config disables default features, the same
         /// as passing `--no-default-features`.
         #[test]
@@ -2271,6 +2402,114 @@ mod tests {
             assert_eq!(options.features, vec!["gonkolator"]);
             assert!(options.no_default_features);
         }
+
+        /// With `--all-features`, configured `[tools]` features and `default-features` are
+        /// overridden (cargo is invoked with `--all-features` alone), so the loaded options are
+        /// identical to those of a tool with no config entry and the two builds can share a cache
+        /// entry.
+        ///
+        /// This test simply verifies that the `--all-features` flag sufficiently overrides the
+        /// [`tools`] config that the resulting `BuildOptions` has the same hash as it does when
+        /// there is not `[tools]` entry for the crate.
+        #[test]
+        fn all_features_yields_same_options_as_unconfigured_tool() {
+            let cli = Cli::parse_from_test_args(["--all-features", "timestamp"]);
+            let mut configured = Config::default();
+            configured.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: false,
+                    version: None,
+                    features: Some(vec!["frobnulator".to_string()]),
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+            let spec = CrateSpec::CratesIo {
+                name: "timestamp".to_string(),
+                version: None,
+            };
+
+            let overrides = cli.crate_args().to_build_overrides();
+            let with_config = BuildOptions::load_for_crate(&configured, &overrides, &spec).unwrap();
+            let without_config = BuildOptions::load_for_crate(&Config::default(), &overrides, &spec).unwrap();
+
+            assert_eq!(with_config, without_config);
+        }
+
+        /// `--all-features` supersedes a configured `[tools]` feature list, which cannot affect a
+        /// build that already enables every feature.
+        #[test]
+        fn all_features_leaves_config_features_unapplied() {
+            let cli = Cli::parse_from_test_args(["--all-features", "timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: true,
+                    version: None,
+                    features: Some(vec!["frobnulator".to_string()]),
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            assert!(options.all_features);
+            assert_eq!(options.features, Vec::<String>::new());
+        }
+
+        /// `--all-features` supersedes configured `default-features = false`, which has no effect
+        /// when every feature is enabled anyway.
+        #[test]
+        fn all_features_leaves_config_default_features_unapplied() {
+            let cli = Cli::parse_from_test_args(["--all-features", "timestamp"]);
+            let mut config = Config::default();
+            config.tools.insert(
+                "timestamp".to_string(),
+                ToolConfig::Detailed {
+                    default_features: false,
+                    version: None,
+                    features: None,
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: None,
+                },
+            );
+
+            let options = BuildOptions::load_for_crate(
+                &config,
+                &cli.crate_args().to_build_overrides(),
+                &CrateSpec::CratesIo {
+                    name: "timestamp".to_string(),
+                    version: None,
+                },
+            )
+            .unwrap();
+
+            assert!(options.all_features);
+            assert!(!options.no_default_features);
+        }
     }
 
     mod run_invocation {
@@ -2344,6 +2583,33 @@ mod tests {
             let cli = run(&["cargo", "deny", "--all"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
             assert_eq!(tool_args(&cli), ["--all"]);
+        }
+
+        /// A `--` separator between `cargo` and the subcommand is permitted; the subcommand is
+        /// still normalized into the plugin crate name.
+        #[test]
+        fn cargo_separator_then_subcommand_is_normalized() {
+            let cli = run(&["cargo", "--", "deny"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(tool_args(&cli), Vec::<String>::new());
+        }
+
+        /// A flag after `cargo` is not a subcommand name; it stays a tool argument for the
+        /// (unrunnable) `cargo` crate spec rather than being glued into the crate name.
+        #[test]
+        fn cargo_followed_by_flag_keeps_flag_as_tool_arg() {
+            let cli = run(&["cargo", "--help"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo"));
+            assert_eq!(tool_args(&cli), ["--help"]);
+        }
+
+        /// The `--` separator between the cargo subcommand and the tool's own flags is dropped,
+        /// matching the behavior for ordinary crate specs.
+        #[test]
+        fn cargo_subcommand_separator_then_flags_forwards_flags() {
+            let cli = run(&["cargo", "deny", "--", "--flag"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(tool_args(&cli), ["--flag"]);
         }
 
         #[test]

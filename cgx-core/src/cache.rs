@@ -17,7 +17,7 @@ use crate::{
     Result,
     bin_resolver::ResolvedBinary,
     builder::{BuildOptions, BuildTarget},
-    config::{Config, UsePrebuiltBinaries},
+    config::Config,
     crate_resolver::{ResolvedCrate, ResolvedSource},
     cratespec::{CrateSpec, Forge, RegistrySource},
     downloader::DownloadedCrate,
@@ -203,14 +203,6 @@ impl Cache {
     where
         F: FnOnce() -> Result<Option<ResolvedBinary>>,
     {
-        // Check if prebuilt binaries are disabled entirely (before cache lookup)
-        if self.inner.config.prebuilt_binaries.use_prebuilt_binaries == UsePrebuiltBinaries::Never {
-            self.inner
-                .reporter
-                .report(PrebuiltBinaryMessage::prebuilt_binaries_disabled);
-            return Ok(None);
-        }
-
         // Check cache unless refresh mode is enabled
         let use_cache = !self.inner.config.refresh;
 

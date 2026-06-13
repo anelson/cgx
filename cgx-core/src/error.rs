@@ -10,6 +10,9 @@ pub enum Error {
     #[snafu(display("Crate name is required"))]
     MissingCrateParameter,
 
+    #[snafu(display("Missing crate name in crate spec '{spec}'"))]
+    MissingCrateName { spec: String },
+
     #[snafu(display("Repository format must be 'owner/repo', got '{repo}'"))]
     InvalidRepoFormat { repo: String },
 
@@ -33,6 +36,13 @@ pub enum Error {
         at_version: String,
         flag_version: String,
     },
+
+    #[snafu(display(
+        "cgx cannot run cargo itself, and pinning a cargo version is not supported. To run a cargo \
+         subcommand through cgx, use `cgx cargo <subcommand>` (e.g. `cgx cargo deny`) or the plugin crate \
+         name directly (e.g. `cgx cargo-deny`)"
+    ))]
+    CargoNotRunnable,
 
     // Resolution errors
     #[snafu(display("Crate '{name}' not found in registry"))]
@@ -212,6 +222,16 @@ pub enum Error {
          '{name}' version '{version}'"
     ))]
     PrebuiltBinaryRequired { name: String, version: String },
+
+    #[snafu(display(
+        "Prebuilt binary required (--prebuilt-binary always) but {reason}, which requires building crate \
+         '{name}' version '{version}' from source"
+    ))]
+    PrebuiltBinaryDisqualified {
+        name: String,
+        version: String,
+        reason: String,
+    },
 
     #[snafu(display(
         "Checksum verification failed for downloaded binary: expected {expected}, got {actual}"

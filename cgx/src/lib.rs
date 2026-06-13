@@ -1,7 +1,10 @@
 pub mod logging;
 mod reporter;
 
-use std::{collections::BTreeSet, ffi::OsString};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+};
 
 /// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
 ///
@@ -181,21 +184,24 @@ fn prepare_prefetch_all(
     prefetch_all: &PrefetchAll,
 ) -> Result<Command> {
     let cgx = cgx_core::Cgx::new(config.clone(), reporter_thread.message_reporter().clone())?;
-    let invocations = configured_invocations(config);
+    let tools = configured_tools(config);
     let reporter = reporter_thread.message_reporter();
     let mut failures = Vec::new();
 
-    for invocation in invocations {
-        reporter.report(|| messages::RunnerMessage::prefetch_all_started(&invocation));
+    for tool in tools {
+        reporter.report(|| messages::RunnerMessage::prefetch_all_started(&tool.name, &tool.aliases));
 
-        let result = prefetch_invocation(&cgx, config, prefetch_all, &invocation);
+        let result = prefetch_tool(&cgx, config, prefetch_all, &tool);
         match result {
             Ok(bin_path) => {
-                reporter.report(|| messages::RunnerMessage::prefetch_all_completed(&invocation, &bin_path));
+                reporter.report(|| {
+                    messages::RunnerMessage::prefetch_all_completed(&tool.name, &tool.aliases, &bin_path)
+                });
             }
             Err(err) => {
-                reporter.report(|| messages::RunnerMessage::prefetch_all_failed(&invocation, &err));
-                failures.push(format!("{}: {}", invocation, err));
+                reporter
+                    .report(|| messages::RunnerMessage::prefetch_all_failed(&tool.name, &tool.aliases, &err));
+                failures.push(format!("{}: {}", tool.name, err));
             }
         }
     }
@@ -207,24 +213,53 @@ fn prepare_prefetch_all(
     }
 }
 
-fn configured_invocations(config: &Config) -> Vec<String> {
-    config
-        .tools
-        .keys()
-        .chain(config.aliases.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>()
+/// One distinct tool referenced by the configuration: the alias-resolved tool name plus the
+/// configured names that map to it. `--prefetch-all` prefetches each of these exactly once.
+#[derive(Debug, PartialEq, Eq)]
+struct ConfiguredTool {
+    /// The alias-resolved tool name, reported as `tool` in the prefetch-all messages.
+    name: String,
+    /// The other configured names that resolve to this tool, sorted, excluding the name itself.
+    aliases: Vec<String>,
+    /// The configured name to load the crate spec with. Any grouped name loads the same crate,
+    /// and using a configured name (rather than the resolved one) keeps [`CrateSpec::load`]'s
+    /// single-step alias resolution identical to a direct `cgx <name>` invocation.
+    request: String,
+}
+
+/// Group every configured tool and alias by the tool it resolves to, applying the same
+/// single-step alias resolution as [`CrateSpec::load`].
+fn configured_tools(config: &Config) -> Vec<ConfiguredTool> {
+    let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for name in config.tools.keys().chain(config.aliases.keys()) {
+        let resolved = config.aliases.get(name).unwrap_or(name);
+        groups.entry(resolved.clone()).or_default().insert(name.clone());
+    }
+
+    groups
         .into_iter()
+        .map(|(name, members)| {
+            let request = members.first().cloned().unwrap();
+            let aliases = members.into_iter().filter(|member| *member != name).collect();
+            ConfiguredTool {
+                name,
+                aliases,
+                request,
+            }
+        })
         .collect()
 }
 
-fn prefetch_invocation(
+fn prefetch_tool(
     cgx: &cgx_core::Cgx,
     config: &Config,
     prefetch_all: &PrefetchAll,
-    tool_name: &str,
+    configured_tool: &ConfiguredTool,
 ) -> Result<std::path::PathBuf> {
-    let crate_spec = CrateSpec::load(config, &CrateRequest::for_configured_tool(tool_name))?;
+    let crate_spec = CrateSpec::load(
+        config,
+        &CrateRequest::for_configured_tool(&configured_tool.request),
+    )?;
     let build_options =
         BuildOptions::load_for_crate(config, &prefetch_all.to_build_overrides(), &crate_spec)?;
 
@@ -326,4 +361,93 @@ fn prepare_list_targets(
         bins,
         examples,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use cgx_core::config::ToolConfig;
+
+    use super::*;
+
+    fn config_with(tools: &[&str], aliases: &[(&str, &str)]) -> Config {
+        let mut config = Config::default();
+        for &tool in tools {
+            config
+                .tools
+                .insert(tool.to_string(), ToolConfig::Version("*".to_string()));
+        }
+        for &(name, target) in aliases {
+            config.aliases.insert(name.to_string(), target.to_string());
+        }
+        config
+    }
+
+    #[test]
+    fn tool_with_alias_yields_single_entry() {
+        let config = config_with(&["eza"], &[("e", "eza")]);
+        assert_eq!(
+            configured_tools(&config),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string()],
+                request: "e".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn alias_to_unconfigured_crate_yields_its_target_tool() {
+        let config = config_with(&[], &[("x", "ripgrep")]);
+        assert_eq!(
+            configured_tools(&config),
+            [ConfiguredTool {
+                name: "ripgrep".to_string(),
+                aliases: vec!["x".to_string()],
+                request: "x".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn multiple_aliases_group_under_one_tool() {
+        let config = config_with(&["eza"], &[("e", "eza"), ("ez", "eza")]);
+        assert_eq!(
+            configured_tools(&config),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string(), "ez".to_string()],
+                request: "e".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn tools_are_deterministically_ordered() {
+        let config = config_with(&["zoxide", "eza"], &[("a", "zoxide")]);
+        let names: Vec<_> = configured_tools(&config)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, ["eza", "zoxide"]);
+    }
+
+    #[test]
+    fn independent_tools_remain_separate() {
+        let config = config_with(&["eza", "ripgrep"], &[]);
+        assert_eq!(
+            configured_tools(&config),
+            [
+                ConfiguredTool {
+                    name: "eza".to_string(),
+                    aliases: Vec::new(),
+                    request: "eza".to_string(),
+                },
+                ConfiguredTool {
+                    name: "ripgrep".to_string(),
+                    aliases: Vec::new(),
+                    request: "ripgrep".to_string(),
+                },
+            ]
+        );
+    }
 }

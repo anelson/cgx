@@ -204,16 +204,21 @@ impl BuildOptions {
         // `default-features`. If features haven't been explicitly overridden on the command line but
         // were specified in the config for this crate, use those. `default-features = false` disables
         // default features the same as `--no-default-features`.
-        if let Some(crate_name) = crate_spec.configured_tool_name() {
-            if let Some(tool_config) = config.tools.get(crate_name) {
-                if overrides.features.is_none() {
-                    if let Some(features) = tool_config.features() {
-                        options.features = features.to_vec();
+        //
+        // Under `--all-features` neither setting is applied: cargo is invoked with `--all-features`
+        // alone, so they could not affect the build and would only perturb the build-cache key.
+        if !options.all_features {
+            if let Some(crate_name) = crate_spec.configured_tool_name() {
+                if let Some(tool_config) = config.tools.get(crate_name) {
+                    if overrides.features.is_none() {
+                        if let Some(features) = tool_config.features() {
+                            options.features = features.to_vec();
+                        }
                     }
-                }
 
-                if !tool_config.default_features() {
-                    options.no_default_features = true;
+                    if !tool_config.default_features() {
+                        options.no_default_features = true;
+                    }
                 }
             }
         }

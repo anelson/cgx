@@ -48,6 +48,10 @@ pub(crate) struct CargoMetadataOptions {
     /// Require Cargo.lock is up to date.
     /// Corresponds to `--locked` flag.
     pub locked: bool,
+
+    /// Rust toolchain override to query metadata with (e.g., "nightly", "1.70.0", "stable").
+    /// When set, `cargo metadata` is run using the specified toolchain.
+    pub toolchain: Option<String>,
 }
 
 impl From<&BuildOptions> for CargoMetadataOptions {
@@ -60,6 +64,7 @@ impl From<&BuildOptions> for CargoMetadataOptions {
             no_default_features: opts.no_default_features,
             offline: opts.offline,
             locked: opts.locked,
+            toolchain: opts.toolchain.clone(),
         }
     }
 }
@@ -154,8 +159,13 @@ struct RealCargoRunner {
     verbosity: Verbosity,
 }
 
-impl CargoRunner for RealCargoRunner {
-    fn metadata(&self, source_dir: &Path, options: &CargoMetadataOptions) -> Result<Metadata> {
+impl RealCargoRunner {
+    /// Construct the complete `cargo metadata` command for the given options.
+    ///
+    /// When [`CargoMetadataOptions::toolchain`] is set, the command is routed through
+    /// `rustup run <toolchain> cargo`.  This is the same technique used for `cargo build`
+    /// elsewhere in this module.
+    fn metadata_command(&self, source_dir: &Path, options: &CargoMetadataOptions) -> Result<Command> {
         let mut cmd = cargo_metadata::MetadataCommand::new();
         cmd.cargo_path(&self.cargo_path).current_dir(source_dir);
 
@@ -212,8 +222,55 @@ impl CargoRunner for RealCargoRunner {
             cmd.other_options(other_args);
         }
 
-        cmd.exec().with_context(|_| error::CargoMetadataSnafu {
-            cargo_path: self.cargo_path.clone(),
+        // If no toolchain is specified then we're done, otherwise we need to construct a `rustup`
+        // invocation to set the toolchain.
+        let inner = cmd.cargo_command();
+        let Some(toolchain) = &options.toolchain else {
+            return Ok(inner);
+        };
+
+        let rustup_path = self
+            .rustup_path
+            .as_ref()
+            .with_context(|| error::RustupNotFoundSnafu {
+                toolchain: toolchain.clone(),
+            })?;
+
+        // The rendered cargo command's working directory does not transfer to the wrapping
+        // command, so set it again.
+        let mut wrapped = Command::new(rustup_path);
+        wrapped.args(["run", toolchain, "cargo"]);
+        wrapped.args(inner.get_args());
+        wrapped.current_dir(source_dir);
+        Ok(wrapped)
+    }
+
+    /// Run a fully constructed `cargo metadata` command and parse its output.
+    ///
+    /// Mirrors [`cargo_metadata::MetadataCommand::exec`], which cannot be used directly because the
+    /// command may be wrapped in `rustup run`.
+    fn run_metadata_command(cmd: &mut Command) -> std::result::Result<Metadata, cargo_metadata::Error> {
+        let output = cmd.output()?;
+        if !output.status.success() {
+            return Err(cargo_metadata::Error::CargoMetadata {
+                stderr: String::from_utf8(output.stderr)?,
+            });
+        }
+        let stdout = std::str::from_utf8(&output.stdout)?
+            .lines()
+            .find(|line| line.starts_with('{'))
+            .ok_or(cargo_metadata::Error::NoJson)?;
+        cargo_metadata::MetadataCommand::parse(stdout)
+    }
+}
+
+impl CargoRunner for RealCargoRunner {
+    fn metadata(&self, source_dir: &Path, options: &CargoMetadataOptions) -> Result<Metadata> {
+        let mut cmd = self.metadata_command(source_dir, options)?;
+        let program = PathBuf::from(cmd.get_program());
+
+        Self::run_metadata_command(&mut cmd).with_context(|_| error::CargoMetadataSnafu {
+            cargo_path: program,
             source_dir: source_dir.to_path_buf(),
         })
     }
@@ -477,6 +534,8 @@ fn find_executable(name: &str, env_var: &str) -> Result<PathBuf> {
 /// all various scenarios, but it's better than nothing.
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+
     use super::*;
     use crate::{builder::BuildTarget, testdata::CrateTestCase};
 
@@ -571,6 +630,99 @@ mod tests {
             file_name == "cgx" || file_name == "cgx.exe",
             "Binary should be named cgx or cgx.exe, got {}",
             file_name
+        );
+    }
+
+    #[test]
+    fn metadata_command_uses_cargo_directly_without_toolchain() {
+        let cargo = RealCargoRunner {
+            cargo_path: PathBuf::from("/fake/cargo"),
+            rustup_path: None,
+            reporter: MessageReporter::null(),
+            verbosity: Verbosity::Normal,
+        };
+
+        let cmd = cargo
+            .metadata_command(Path::new("/src"), &CargoMetadataOptions::default())
+            .unwrap();
+
+        assert_eq!(cmd.get_program().to_string_lossy(), "/fake/cargo");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[..3], ["metadata", "--format-version", "1"]);
+        assert!(!args.contains(&"run".to_string()), "args: {args:?}");
+    }
+
+    #[test]
+    fn metadata_command_wraps_cargo_with_rustup_for_toolchain() {
+        let cargo = RealCargoRunner {
+            cargo_path: PathBuf::from("/fake/cargo"),
+            rustup_path: Some(PathBuf::from("/fake/rustup")),
+            reporter: MessageReporter::null(),
+            verbosity: Verbosity::Normal,
+        };
+
+        let cmd = cargo
+            .metadata_command(
+                Path::new("/src"),
+                &CargoMetadataOptions {
+                    locked: true,
+                    toolchain: Some("nightly".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(cmd.get_program().to_string_lossy(), "/fake/rustup");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[..6],
+            ["run", "nightly", "cargo", "metadata", "--format-version", "1"]
+        );
+        assert!(args.contains(&"--locked".to_string()), "args: {args:?}");
+    }
+
+    #[test]
+    fn build_options_toolchain_carries_into_metadata_options() {
+        let build_options = BuildOptions {
+            toolchain: Some("nightly".to_string()),
+            ..Default::default()
+        };
+
+        let metadata_options = CargoMetadataOptions::from(&build_options);
+        assert_eq!(metadata_options.toolchain.as_deref(), Some("nightly"));
+    }
+
+    /// Metadata queries follow the same toolchain contract as builds: a requested toolchain
+    /// requires rustup, rather than being silently resolved with the default cargo.
+    #[test]
+    fn metadata_with_toolchain_requires_rustup() {
+        crate::logging::init_test_logging();
+
+        let cargo = RealCargoRunner {
+            cargo_path: find_executable("cargo", "CARGO").unwrap(),
+            rustup_path: None,
+            reporter: MessageReporter::null(),
+            verbosity: Verbosity::Normal,
+        };
+
+        let result = cargo.metadata(
+            &cgx_project_root(),
+            &CargoMetadataOptions {
+                no_deps: true,
+                toolchain: Some("nightly".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert_matches!(
+            result,
+            Err(error::Error::RustupNotFound { ref toolchain }) if toolchain == "nightly"
         );
     }
 

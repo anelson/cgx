@@ -387,7 +387,7 @@ fn prefetch_single_tool_prepares_without_stdout() {
 }
 
 #[test]
-fn prefetch_all_covers_tools_and_alias_invocations() {
+fn prefetch_all_prefetches_each_configured_tool_once() {
     let mut cgx = Cgx::with_test_fs();
 
     cgx.test_fs()
@@ -409,25 +409,35 @@ e = "eza"
 
     assert.success().stdout(predicates::str::is_empty());
 
-    assert!(
-        messages.iter().any(|message| {
-            matches!(
-                message,
-                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "eza"
-            )
-        }),
-        "expected prefetch-all completion for configured tool"
+    // The tool and its alias resolve to the same crate, so there is exactly one prefetch, reported
+    // under the tool name with the alias listed alongside it.
+    let completions: Vec<_> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Runner(RunnerMessage::PrefetchAllCompleted { tool, aliases, .. }) => {
+                Some((tool.clone(), aliases.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completions,
+        [("eza".to_string(), vec!["e".to_string()])],
+        "expected exactly one prefetch-all completion, reporting the tool with its alias"
     );
+
     assert!(
-        messages.iter().any(|message| {
+        !messages.iter().any(|message| {
             matches!(
                 message,
-                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "e"
+                Message::Runner(
+                    RunnerMessage::PrefetchAllStarted { tool, .. }
+                        | RunnerMessage::PrefetchAllCompleted { tool, .. }
+                        | RunnerMessage::PrefetchAllFailed { tool, .. }
+                ) if tool == "e"
             )
         }),
-        "expected prefetch-all completion for alias invocation"
+        "expected no prefetch-all messages under the alias name"
     );
 }
 
@@ -460,8 +470,8 @@ eza = "=0.23.1"
         messages.iter().any(|message| {
             matches!(
                 message,
-                Message::Runner(RunnerMessage::PrefetchAllFailed { invocation, .. })
-                    if invocation == "aaa_bad"
+                Message::Runner(RunnerMessage::PrefetchAllFailed { tool, .. })
+                    if tool == "aaa_bad"
             )
         }),
         "expected prefetch-all failure for bad tool"
@@ -470,8 +480,8 @@ eza = "=0.23.1"
         messages.iter().any(|message| {
             matches!(
                 message,
-                Message::Runner(RunnerMessage::PrefetchAllCompleted { invocation, .. })
-                    if invocation == "eza"
+                Message::Runner(RunnerMessage::PrefetchAllCompleted { tool, .. })
+                    if tool == "eza"
             )
         }),
         "expected prefetch-all to continue after a failure"
