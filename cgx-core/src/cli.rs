@@ -832,7 +832,8 @@ impl RawCli {
 
     /// Validate the raw parse and render it into a typed [`Cli`] command.
     ///
-    /// This is the single place semantic rules live: the mode arg-group already guarantees at most
+    /// This is the single location where advanced CLI validation (which `clap` is not expressive
+    /// enough to represent/enforce itself) happens: the mode arg-group already guarantees at most
     /// one mode flag, and here we enforce which other flags each mode permits, whether a crate is
     /// required or forbidden, and whether trailing tool arguments are allowed.
     ///
@@ -863,18 +864,16 @@ impl RawCli {
 
         if prefetch_all {
             let mode = "--prefetch-all";
-            Self::ensure_no_crate(&crate_spec, &tool_args, mode)?;
-            if source.is_present() {
-                return Err(Self::forbidden(mode, "source selectors"));
-            }
-            if prebuilt.is_present() {
-                return Err(Self::forbidden(mode, "--prebuilt-binary options"));
-            }
+            Self::ensure_config_mode_common(
+                mode,
+                &crate_spec,
+                &tool_args,
+                &source,
+                &prebuilt,
+                &crate_version,
+            )?;
             if cargo.locked || cargo.frozen || cargo.unlocked {
                 return Err(Self::forbidden(mode, "--locked/--frozen/--unlocked"));
-            }
-            if crate_version.is_some() {
-                return Err(Self::forbidden(mode, "--crate-version"));
             }
             if build_options.has_compilation_options() {
                 return Err(Self::forbidden(mode, "build/compilation options"));
@@ -893,18 +892,21 @@ impl RawCli {
 
         if list_tools {
             let mode = "--list-tools";
-            Self::ensure_no_crate(&crate_spec, &tool_args, mode)?;
-            if source.is_present() {
-                return Err(Self::forbidden(mode, "source selectors"));
-            }
-            if prebuilt.is_present() {
-                return Err(Self::forbidden(mode, "--prebuilt-binary options"));
-            }
+            Self::ensure_config_mode_common(
+                mode,
+                &crate_spec,
+                &tool_args,
+                &source,
+                &prebuilt,
+                &crate_version,
+            )?;
+
+            // `--list-tools` is purely local: it only reads the merged config, never resolving,
+            // downloading, or building. It therefore additionally forbids everything network- or
+            // toolchain-related (offline/refresh, --http-*, +toolchain) that `--prefetch-all`
+            // legitimately permits.
             if cargo.locked || cargo.frozen || cargo.unlocked || cargo.offline || cargo.refresh {
                 return Err(Self::forbidden(mode, "cargo behavior flags"));
-            }
-            if crate_version.is_some() {
-                return Err(Self::forbidden(mode, "--crate-version"));
             }
             if build_options.is_present() {
                 return Err(Self::forbidden(mode, "build options"));
@@ -977,6 +979,31 @@ impl RawCli {
             ErrorKind::ArgumentConflict,
             format!("{what} cannot be used with {mode}\n"),
         )
+    }
+
+    /// Run the flag guards shared by the config-driven modes (`--prefetch-all` and `--list-tools`):
+    /// they accept no crate or trailing arguments, no source selectors, no `--prebuilt-binary`
+    /// options, and no `--crate-version`. Each mode then layers its own additional, intentionally
+    /// differing guards on top of these.
+    fn ensure_config_mode_common(
+        mode: &str,
+        crate_spec: &Option<String>,
+        tool_args: &[OsString],
+        source: &SourceArgs,
+        prebuilt: &PrebuiltBinaryArgs,
+        crate_version: &Option<String>,
+    ) -> Result<(), clap::Error> {
+        Self::ensure_no_crate(crate_spec, tool_args, mode)?;
+        if source.is_present() {
+            return Err(Self::forbidden(mode, "source selectors"));
+        }
+        if prebuilt.is_present() {
+            return Err(Self::forbidden(mode, "--prebuilt-binary options"));
+        }
+        if crate_version.is_some() {
+            return Err(Self::forbidden(mode, "--crate-version"));
+        }
+        Ok(())
     }
 
     /// Reject a crate spec or trailing arguments for the config-level commands that take neither.
@@ -1141,7 +1168,7 @@ mod tests {
     use crate::{
         Result,
         builder::{BuildOptions, BuildTarget},
-        config::{Config, ToolConfig},
+        config::{Config, ToolConfig, ToolConfigDetailed},
         cratespec::{CrateSpec, Forge, RegistrySource},
         git::GitSelector,
     };
@@ -2202,7 +2229,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2212,7 +2239,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2236,7 +2263,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2246,7 +2273,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2270,7 +2297,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2280,7 +2307,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2305,7 +2332,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: false,
                     version: None,
                     features: None,
@@ -2315,7 +2342,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2339,7 +2366,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: None,
                     features: None,
@@ -2349,7 +2376,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2374,7 +2401,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: false,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2384,7 +2411,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2417,7 +2444,7 @@ mod tests {
             let mut configured = Config::default();
             configured.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: false,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2427,7 +2454,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
             let spec = CrateSpec::CratesIo {
                 name: "timestamp".to_string(),
@@ -2449,7 +2476,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: None,
                     features: Some(vec!["frobnulator".to_string()]),
@@ -2459,7 +2486,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(
@@ -2484,7 +2511,7 @@ mod tests {
             let mut config = Config::default();
             config.tools.insert(
                 "timestamp".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: false,
                     version: None,
                     features: None,
@@ -2494,7 +2521,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             );
 
             let options = BuildOptions::load_for_crate(

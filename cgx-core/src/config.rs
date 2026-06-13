@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,7 +10,10 @@ use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, MapAccess, Visitor, value::MapAccessDeserializer},
+};
 use snafu::ResultExt;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr, VariantNames};
 
@@ -186,39 +190,84 @@ pub struct HttpConfigFile {
 ///
 /// This can be a simple version string like `"1.0"` or a more complex specification
 /// with version, features, registry, git repo, etc.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, untagged)]
+///
+/// Serialization uses serde's `untagged` representation (a bare string or a bare table).
+/// Deserialization is hand-written (see the [`Deserialize`] impl) rather than derived
+/// `untagged` so that a typo'd or mistyped key in a detailed table produces a precise error naming
+/// the offending field, instead of the opaque `data did not match any variant` that `untagged`
+/// derive emits.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
 pub enum ToolConfig {
     /// Simple version specification (e.g., "1.0", "*")
     Version(String),
     /// Detailed configuration with version, features, registry, etc.
-    Detailed {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        version: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        features: Option<Vec<String>>,
-        /// Whether to enable the crate's default features, matching Cargo's `default-features`
-        /// dependency key. Defaults to `true`; set to `false` to build with
-        /// `--no-default-features`.
-        #[serde(
-            rename = "default-features",
-            default = "default_true",
-            skip_serializing_if = "is_true"
-        )]
-        default_features: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        registry: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tag: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rev: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<PathBuf>,
-    },
+    Detailed(ToolConfigDetailed),
+}
+
+/// The detailed (table) form of a [`ToolConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfigDetailed {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
+    /// Whether to enable the crate's default features, matching Cargo's `default-features`
+    /// dependency key. Defaults to `true`; set to `false` to build with `--no-default-features`.
+    #[serde(
+        rename = "default-features",
+        default = "default_true",
+        skip_serializing_if = "is_true"
+    )]
+    pub default_features: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+impl<'de> Deserialize<'de> for ToolConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct ToolConfigVisitor;
+
+        impl<'de> Visitor<'de> for ToolConfigVisitor {
+            type Value = ToolConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a version string or a detailed tool table")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ToolConfig::Version(value.to_string()))
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                Ok(ToolConfig::Detailed(ToolConfigDetailed::deserialize(
+                    MapAccessDeserializer::new(map),
+                )?))
+            }
+        }
+
+        deserializer.deserialize_any(ToolConfigVisitor)
+    }
 }
 
 impl ToolConfig {
@@ -226,7 +275,7 @@ impl ToolConfig {
     pub fn features(&self) -> Option<&[String]> {
         match self {
             ToolConfig::Version(_) => None,
-            ToolConfig::Detailed { features, .. } => features.as_deref(),
+            ToolConfig::Detailed(ToolConfigDetailed { features, .. }) => features.as_deref(),
         }
     }
 
@@ -237,15 +286,9 @@ impl ToolConfig {
     pub fn default_features(&self) -> bool {
         match self {
             ToolConfig::Version(_) => true,
-            ToolConfig::Detailed { default_features, .. } => *default_features,
+            ToolConfig::Detailed(ToolConfigDetailed { default_features, .. }) => *default_features,
         }
     }
-}
-
-/// Default for the `default-features` field of [`ToolConfig::Detailed`]; named because serde's
-/// `default` attribute requires a function path.
-fn default_true() -> bool {
-    true
 }
 
 /// Predicate for `skip_serializing_if` on the `default-features` field, so the default `true` is
@@ -255,6 +298,15 @@ fn default_true() -> bool {
 /// but unfortunately it's necessary here.
 fn is_true(value: &bool) -> bool {
     *value
+}
+
+/// Default for the `default-features` field of [`ToolConfig::Detailed`]; named because serde's
+/// `default` attribute requires a function path.
+///
+/// This maybe even dumber than [`is_true`], but again this needs to be in a form of a function not
+/// a constant so here we are.
+fn default_true() -> bool {
+    true
 }
 
 /// Intermediate structure for deserializing config files from TOML.
@@ -544,6 +596,17 @@ pub struct ConfigOverrides {
     pub verbosity: Verbosity,
 }
 
+/// One distinct tool referenced in the config TOML `[tools]` and possibly also `[aliases]`
+/// sections
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConfiguredTool {
+    /// The crate name as it appeared in the `[tools]` section
+    pub(crate) name: String,
+    /// The aliases that resolve to this tool (from the `[aliases]` section), sorted, excluding the
+    /// name itself.
+    pub(crate) aliases: Vec<String>,
+}
+
 impl Config {
     /// Load the configuration, honoring config files and command line arguments.
     ///
@@ -561,39 +624,91 @@ impl Config {
     }
 
     /// Render the merged configured tools and aliases as deterministic TOML.
+    ///
+    /// Both the `[tools]` and `[aliases]` headers are always present (even when empty), so the
+    /// output is a stable template a user can copy and edit. Each section's presence is decided
+    /// from the data (whether the map is empty), not by scanning the serializer's output.
     pub fn tools_toml(&self) -> Result<String> {
         #[derive(Serialize)]
-        struct ToolsToml {
-            tools: BTreeMap<String, ToolConfig>,
-            aliases: BTreeMap<String, String>,
+        struct ToolsSection<'a> {
+            tools: BTreeMap<&'a String, &'a ToolConfig>,
+        }
+        #[derive(Serialize)]
+        struct AliasesSection<'a> {
+            aliases: BTreeMap<&'a String, &'a String>,
         }
 
-        let tools = self
-            .tools
-            .iter()
-            .map(|(name, config)| (name.clone(), config.clone()))
-            .collect();
-        let aliases = self
-            .aliases
-            .iter()
-            .map(|(name, target)| (name.clone(), target.clone()))
-            .collect();
-
-        let mut rendered = toml::to_string_pretty(&ToolsToml { tools, aliases })
-            .context(crate::error::TomlSerializeSnafu)?;
-
-        if !rendered.lines().any(|line| line.trim() == "[tools]") {
-            rendered = format!("[tools]\n\n{}", rendered);
-        }
-
-        if !rendered.lines().any(|line| line.trim() == "[aliases]") {
-            if !rendered.ends_with('\n') {
-                rendered.push('\n');
+        /// Guarantee that a serialized section starts with its bare `[section]` header.
+        ///
+        /// `toml` only emits the bare `[tools]`/`[aliases]` line when a section has at least one
+        /// scalar entry; a section whose entries are all subtables (only detailed tool tables)
+        /// would otherwise start at `[tools.<name>]`. Prepending keeps the section visible and the
+        /// output a stable, editable template, without depending on how the serializer orders or
+        /// omits empty tables.
+        fn ensure_section_header(section: &str, body: String) -> String {
+            let header = format!("[{section}]");
+            if body.starts_with(&header) {
+                body
+            } else {
+                format!("{header}\n{body}")
             }
-            rendered.push_str("\n[aliases]\n");
         }
 
-        Ok(rendered)
+        let tools = if self.tools.is_empty() {
+            "[tools]\n".to_string()
+        } else {
+            let body = toml::to_string_pretty(&ToolsSection {
+                tools: self.sorted_tools(),
+            })
+            .context(crate::error::TomlSerializeSnafu)?;
+            ensure_section_header("tools", body)
+        };
+
+        let aliases = if self.aliases.is_empty() {
+            "[aliases]\n".to_string()
+        } else {
+            let body = toml::to_string_pretty(&AliasesSection {
+                aliases: self.sorted_aliases(),
+            })
+            .context(crate::error::TomlSerializeSnafu)?;
+            ensure_section_header("aliases", body)
+        };
+
+        Ok(format!("{tools}\n{aliases}"))
+    }
+
+    /// The configured tools in deterministic (key-sorted) order.
+    ///
+    /// The single source of ordering for both [`Config::tools_toml`] and `--list-tools` message
+    /// emission.
+    pub(crate) fn sorted_tools(&self) -> BTreeMap<&String, &ToolConfig> {
+        self.tools.iter().collect()
+    }
+
+    /// The configured aliases in deterministic (key-sorted) order.
+    pub(crate) fn sorted_aliases(&self) -> BTreeMap<&String, &String> {
+        self.aliases.iter().collect()
+    }
+
+    /// Group every configured tool and alias by the tool it resolves to, applying the same
+    /// single-step alias resolution as [`crate::cratespec::CrateSpec::load`].
+    ///
+    /// Each distinct resolved crate appears once, so `--prefetch-all` prefetches it a single time
+    /// regardless of how many aliases point at it.
+    pub(crate) fn configured_tools(&self) -> Vec<ConfiguredTool> {
+        let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for name in self.tools.keys().chain(self.aliases.keys()) {
+            let resolved = self.aliases.get(name).unwrap_or(name);
+            groups.entry(resolved.clone()).or_default().insert(name.clone());
+        }
+
+        groups
+            .into_iter()
+            .map(|(name, members)| {
+                let aliases = members.into_iter().filter(|member| *member != name).collect();
+                ConfiguredTool { name, aliases }
+            })
+            .collect()
     }
 
     /// Load config from the CLI args and a specified directory which may or may not contain config
@@ -627,7 +742,9 @@ impl Config {
             config_file.offline.unwrap_or(false)
         };
 
-        // toolchain: CLI > config
+        // The toolchain comes only from the config file here. The CLI `+toolchain` token is
+        // applied later as a `BuildOverride`, not a `ConfigOverride` (`ConfigOverrides` has no
+        // toolchain field), so there is no CLI value to consider at this point.
         let toolchain = config_file.toolchain;
 
         // Determine config_dir based on override precedence
@@ -993,9 +1110,9 @@ mod tests {
         let tools = config.tools.unwrap();
 
         match tools.get("taplo-cli") {
-            Some(ToolConfig::Detailed {
+            Some(ToolConfig::Detailed(ToolConfigDetailed {
                 version, features, ..
-            }) => {
+            })) => {
                 assert_eq!(*version, Some("1.11.0".to_string()));
                 assert_eq!(*features, Some(vec!["schema".to_string()]));
             }
@@ -1034,7 +1151,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "no-defaults".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: false,
                 version: Some("1.0".to_string()),
                 features: None,
@@ -1044,11 +1161,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
         config.tools.insert(
             "with-defaults".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("1.0".to_string()),
                 features: None,
@@ -1058,7 +1175,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let rendered = config.tools_toml().unwrap();
@@ -1100,7 +1217,7 @@ mod tests {
             .insert("alpha".to_string(), ToolConfig::Version("1".to_string()));
         config.tools.insert(
             "beta".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("1.5".to_string()),
                 features: Some(vec!["frobnulator".to_string()]),
@@ -1110,7 +1227,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
         config.aliases.insert("zz".to_string(), "zeta".to_string());
         config.aliases.insert("aa".to_string(), "alpha".to_string());
@@ -1123,11 +1240,11 @@ mod tests {
         assert_eq!(tools.get("zeta"), Some(&ToolConfig::Version("2".to_string())));
         assert_matches!(
             tools.get("beta"),
-            Some(ToolConfig::Detailed {
+            Some(ToolConfig::Detailed(ToolConfigDetailed {
                 version: Some(version),
                 features: Some(features),
                 ..
-            }) if version == "1.5" && features == &vec!["frobnulator".to_string()]
+            })) if version == "1.5" && features == &vec!["frobnulator".to_string()]
         );
 
         let aliases = parsed.aliases.unwrap();
@@ -1136,6 +1253,188 @@ mod tests {
 
         assert!(rendered.find("alpha").unwrap() < rendered.find("zeta").unwrap());
         assert!(rendered.find("aa").unwrap() < rendered.find("zz").unwrap());
+    }
+
+    fn config_with(tools: &[&str], aliases: &[(&str, &str)]) -> Config {
+        let mut config = Config::default();
+        for &tool in tools {
+            config
+                .tools
+                .insert(tool.to_string(), ToolConfig::Version("*".to_string()));
+        }
+        for &(name, target) in aliases {
+            config.aliases.insert(name.to_string(), target.to_string());
+        }
+        config
+    }
+
+    #[test]
+    fn configured_tools_groups_alias_with_its_tool() {
+        let config = config_with(&["eza"], &[("e", "eza")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_alias_to_unconfigured_crate_yields_its_target() {
+        let config = config_with(&[], &[("x", "ripgrep")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "ripgrep".to_string(),
+                aliases: vec!["x".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_groups_multiple_aliases_under_one_tool() {
+        let config = config_with(&["eza"], &[("e", "eza"), ("ez", "eza")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string(), "ez".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_are_deterministically_ordered() {
+        let config = config_with(&["zoxide", "eza"], &[("a", "zoxide")]);
+        let names: Vec<_> = config
+            .configured_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, ["eza", "zoxide"]);
+    }
+
+    #[test]
+    fn configured_tools_keep_independent_tools_separate() {
+        let config = config_with(&["eza", "ripgrep"], &[]);
+        assert_eq!(
+            config.configured_tools(),
+            [
+                ConfiguredTool {
+                    name: "eza".to_string(),
+                    aliases: Vec::new(),
+                },
+                ConfiguredTool {
+                    name: "ripgrep".to_string(),
+                    aliases: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tools_toml_empty_config_still_renders_both_headers() {
+        let rendered = Config::default().tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"), "missing [tools] in:\n{rendered}");
+        assert!(
+            rendered.contains("[aliases]"),
+            "missing [aliases] in:\n{rendered}"
+        );
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap_or_default().is_empty());
+        assert!(parsed.aliases.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn tools_toml_tools_only_still_renders_aliases_header() {
+        let config = config_with(&["ripgrep"], &[]);
+        let rendered = config.tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"));
+        assert!(rendered.contains("[aliases]"));
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap().contains_key("ripgrep"));
+    }
+
+    #[test]
+    fn tools_toml_aliases_only_still_renders_tools_header() {
+        let config = config_with(&[], &[("rg", "ripgrep")]);
+        let rendered = config.tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"));
+        assert!(rendered.contains("[aliases]"));
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert_eq!(parsed.aliases.unwrap().get("rg"), Some(&"ripgrep".to_string()));
+    }
+
+    #[test]
+    fn tools_toml_all_detailed_entries_still_render_bare_tools_header() {
+        let mut config = Config::default();
+        config.tools.insert(
+            "only-detailed".to_string(),
+            ToolConfig::Detailed(ToolConfigDetailed {
+                version: Some("1.0".to_string()),
+                features: Some(vec!["x".to_string()]),
+                default_features: true,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            }),
+        );
+
+        let rendered = config.tools_toml().unwrap();
+
+        // Even when every tool is a subtable (`[tools.only-detailed]`), the bare `[tools]` header
+        // is present so the section is always visible and the output is a stable template.
+        assert!(
+            rendered.lines().any(|line| line.trim() == "[tools]"),
+            "missing bare [tools] header in:\n{rendered}"
+        );
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap().contains_key("only-detailed"));
+    }
+
+    #[test]
+    fn tool_config_unknown_key_error_names_the_field() {
+        let toml_content = r#"
+            [tools]
+            ripgrep = { versio = "14" }
+        "#;
+        let error = toml::from_str::<ConfigFile>(toml_content)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("versio"),
+            "error did not name the bad key:\n{error}"
+        );
+        assert!(
+            !error.contains("did not match any variant"),
+            "error was the opaque untagged message:\n{error}"
+        );
+    }
+
+    #[test]
+    fn tool_config_type_mismatch_error_is_precise() {
+        let toml_content = r#"
+            [tools]
+            ripgrep = { default-features = "false" }
+        "#;
+        let error = toml::from_str::<ConfigFile>(toml_content)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("boolean"),
+            "error did not describe the expected type:\n{error}"
+        );
+        assert!(
+            !error.contains("did not match any variant"),
+            "error was the opaque untagged message:\n{error}"
+        );
     }
 
     #[test]
@@ -1447,11 +1746,11 @@ mod tests {
             let taplo_tool = config.tools.get("taplo-cli").unwrap();
             assert_matches!(
                 taplo_tool,
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     version: Some(v),
                     features: Some(f),
                     ..
-                } if v == "1.11.0" && f == &vec!["schema".to_string()]
+                }) if v == "1.11.0" && f == &vec!["schema".to_string()]
             );
         }
 

@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{
     Result,
-    config::{Config, ToolConfig},
+    config::{Config, ToolConfig, ToolConfigDetailed},
     error,
     git::GitSelector,
 };
@@ -81,9 +81,15 @@ impl CrateRequest {
     /// Build a request for a tool specified in the `cgx` config `[tools]` section, identified by
     /// its name in that table.
     pub fn for_configured_tool(name: &str) -> Self {
-        // TODO: This will leave all fields but `name` at their defaults; how can we be sure that's
-        // what's actually set in the `[tools]` config section?  Don't we need to look up the tool
-        // config entry and refer to that?
+        // Only `name` is set; `source`, `version`, and `git_ref` are intentionally left at their
+        // defaults. That is sufficient because [`CrateSpec::load`] will resolve this request with
+        // a default `source` by looking up the crate name in the  `[tools]` config section and
+        // applying its configured source and version — exactly the way a bare `cgx <name>`
+        // invocation resolves. Pre-filling those fields here would duplicate that lookup.
+        //
+        // Of course that assumes that the caller is already certain that `name` appears in the
+        // `[tools]` config section, but if that assumption doesn't hold it's a bug in the caller
+        // not here.
         Self {
             name: Some(name.to_string()),
             ..Self::default()
@@ -207,10 +213,11 @@ impl CrateSpec {
                     .tools
                     .get(tool_name)
                     .and_then(|tool_config| match tool_config {
-                        ToolConfig::Version(v) | ToolConfig::Detailed { version: Some(v), .. } => {
+                        ToolConfig::Version(v)
+                        | ToolConfig::Detailed(ToolConfigDetailed { version: Some(v), .. }) => {
                             VersionReq::parse(v).ok()
                         }
-                        ToolConfig::Detailed { version: None, .. } => None,
+                        ToolConfig::Detailed(ToolConfigDetailed { version: None, .. }) => None,
                     })
             } else {
                 None
@@ -309,13 +316,13 @@ impl CrateSpec {
                 if let Some(tool_name) = name {
                     if let Some(tool_config) = config.tools.get(tool_name) {
                         match tool_config {
-                            ToolConfig::Detailed {
+                            ToolConfig::Detailed(ToolConfigDetailed {
                                 git: Some(git_url),
                                 branch,
                                 tag,
                                 rev,
                                 ..
-                            } => {
+                            }) => {
                                 // Tool config specifies git source
                                 let selector = match (branch.as_ref(), tag.as_ref(), rev.as_ref()) {
                                     (Some(b), None, None) => GitSelector::Branch(b.clone()),
@@ -340,9 +347,9 @@ impl CrateSpec {
                                     });
                                 }
                             }
-                            ToolConfig::Detailed {
+                            ToolConfig::Detailed(ToolConfigDetailed {
                                 registry: Some(reg), ..
-                            } => {
+                            }) => {
                                 // Tool config specifies registry
                                 let name = name.context(error::MissingCrateParameterSnafu)?;
                                 return Ok(CrateSpec::Registry {
@@ -351,7 +358,7 @@ impl CrateSpec {
                                     version,
                                 });
                             }
-                            ToolConfig::Detailed { path: Some(p), .. } => {
+                            ToolConfig::Detailed(ToolConfigDetailed { path: Some(p), .. }) => {
                                 // Tool config specifies local path
                                 return Ok(CrateSpec::LocalDir {
                                     path: p.clone(),
@@ -545,7 +552,7 @@ mod tests {
     use super::*;
     use crate::{
         cli::Cli,
-        config::{Config, ToolConfig},
+        config::{Config, ToolConfig, ToolConfigDetailed},
     };
 
     /// Test that config aliases are resolved before processing the crate spec.
@@ -617,7 +624,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "ripgrep".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("14.0".to_string()),
                 features: None,
@@ -627,7 +634,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["ripgrep"]);
@@ -658,7 +665,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
@@ -668,7 +675,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -701,7 +708,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
@@ -711,7 +718,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -745,7 +752,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://github.com/owner/repo.git".to_string()),
@@ -755,7 +762,7 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -789,7 +796,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://gitlab.com/owner/repo.git".to_string()),
@@ -799,7 +806,7 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -833,7 +840,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 path: Some(PathBuf::from("/some/path")),
@@ -843,7 +850,7 @@ mod tests {
                 branch: None,
                 tag: None,
                 rev: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -876,7 +883,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
@@ -886,7 +893,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -920,7 +927,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
@@ -930,7 +937,7 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -964,7 +971,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
@@ -974,7 +981,7 @@ mod tests {
                 branch: None,
                 tag: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);
@@ -1064,7 +1071,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("1.0".to_string()),
                 git: Some("https://github.com/owner/repo.git".to_string()),
@@ -1074,7 +1081,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["--registry", "other-registry", "my-tool"]);
@@ -1109,7 +1116,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
@@ -1119,7 +1126,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["--git", "https://example.com/repo.git", "my-tool"]);
@@ -1230,7 +1237,7 @@ mod tests {
             default_registry: Some("default-registry".to_string()),
             tools: [(
                 "my-tool".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     default_features: true,
                     version: Some("1.0".to_string()),
                     registry: Some("tool-registry".to_string()),
@@ -1240,7 +1247,7 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             )]
             .into_iter()
             .collect(),
@@ -1329,7 +1336,7 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
                 default_features: true,
                 version: None,
                 features: Some(vec!["feat1".to_string(), "feat2".to_string()]),
@@ -1339,7 +1346,7 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
         let cli = Cli::parse_from_test_args(["my-tool"]);

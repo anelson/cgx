@@ -170,8 +170,8 @@ pub(crate) fn assert_built_from_source(messages: &[Message]) {
 /// Assert that the emitted messages report the crate's binary was compiled from source *during this
 /// run*, meaning that it performed a fresh `cargo` build, rather than serving from cache.
 ///
-/// Checks both that a [`BuildMessage::Started`] was emitted (cargo actually ran; it is emitted only on
-/// a build-cache miss) and that the [`CgxMessage::CrateProvenance`] message reports a source
+/// Checks both that a [`BuildMessage::Started`] was emitted (cargo actually ran; it is emitted only
+/// on a build-cache miss) and that the [`CgxMessage::CrateProvenance`] message reports a source
 /// build.
 pub(crate) fn assert_compiled_from_source(messages: &[Message]) {
     assert!(
@@ -196,8 +196,9 @@ pub(crate) fn assert_compiled_from_source(messages: &[Message]) {
 /// build cache *without* recompiling.
 ///
 /// Checks that a [`BuildCacheMessage::CacheHit`] was emitted, that no [`BuildMessage::Started`] was
-/// emitted (cargo did not run this time), and that the authoritative [`CgxMessage::CrateProvenance`]
-/// reports a source build. Use this when a test's point is "this run reused a cached source build".
+/// emitted (cargo did not run this time), and that the authoritative
+/// [`CgxMessage::CrateProvenance`] reports a source build. Use this when a test's point is "this
+/// run reused a cached source build".
 pub(crate) fn assert_cached_source_build(messages: &[Message]) {
     assert!(
         messages
@@ -209,7 +210,8 @@ pub(crate) fn assert_cached_source_build(messages: &[Message]) {
         !messages
             .iter()
             .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "expected NO BuildMessage::Started message (binary should be served from cache, not recompiled), got: {messages:#?}"
+        "expected NO BuildMessage::Started message (binary should be served from cache, not recompiled), \
+         got: {messages:#?}"
     );
     assert!(
         messages.iter().any(|m| matches!(
