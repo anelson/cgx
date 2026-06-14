@@ -3,13 +3,16 @@
 //! These tests explicitly set --prebuilt-binary flags to test non-default behavior,
 //! disqualification scenarios, cache interactions, and config overrides.
 
+use assert_fs::prelude::*;
 use cgx::messages::{
     BuildCacheMessage, BuildMessage, CrateResolutionMessage, Message, PrebuiltBinaryMessage, SourceMessage,
 };
 use cgx_core::config::BinaryProvider;
-use predicates::prelude::*;
 
-use crate::utils::{Cgx, CommandExt};
+use crate::utils::{
+    Cgx, CommandExt, assert_built_from_source, assert_cached_source_build, assert_compiled_from_source,
+    assert_prebuilt,
+};
 
 /// Test that `--prebuilt-binary never` forces building from source even when binaries exist.
 #[test]
@@ -26,12 +29,9 @@ fn never_mode_forces_source_build() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stdout(predicates::str::contains("eza"))
-        .stderr(predicates::str::contains("Compiling"));
+    assert.success().stdout(predicates::str::contains("eza"));
 
-    // Verify prebuilt binaries were disabled
+    // Verify prebuilt binaries were disabled and the binary was built from source.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -39,14 +39,7 @@ fn never_mode_forces_source_build() {
         )),
         "Expected PrebuiltBinaryMessage::PrebuiltBinariesDisabled"
     );
-
-    // Verify build was initiated
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started"
-    );
+    assert_built_from_source(&messages);
 }
 
 /// Test that `--prebuilt-binary always` succeeds when a binary is available.
@@ -64,26 +57,16 @@ fn always_mode_succeeds_with_available_binary() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stdout(predicates::str::contains("eza"))
-        .stderr(predicates::str::contains("Compiling").not());
+    assert.success().stdout(predicates::str::contains("eza"));
 
-    // Verify prebuilt binary was resolved
+    // Verify a prebuilt binary was resolved and that the binary came from it (no source build).
     assert!(
         messages
             .iter()
             .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
         "Expected PrebuiltBinaryMessage::Resolved"
     );
-
-    // Verify no build was initiated
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when using prebuilt binary"
-    );
+    assert_prebuilt(&messages);
 }
 
 /// Test that `--prebuilt-binary always` fails when no binary is available.
@@ -101,6 +84,38 @@ fn always_mode_fails_without_binary() {
         .failure();
 }
 
+/// Test that `--prebuilt-binary always` fails fast when build options disqualify prebuilt
+/// binaries, and does NOT fall back to building from source.
+#[test]
+fn always_mode_fails_when_build_options_disqualify() {
+    let mut cgx = Cgx::with_test_fs();
+
+    // A custom profile disqualifies prebuilt binaries, which is not compatible with `always` mode,
+    // so this should error without attempting to build from source.
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("--prebuilt-binary")
+        .arg("always")
+        .arg("--profile")
+        .arg("dev")
+        .arg("eza@=0.23.1")
+        .arg("--version")
+        .assert_with_messages();
+
+    assert
+        .failure()
+        .stderr(predicates::str::contains("custom profile specified"));
+
+    // The invocation must fail before any source build starts.
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "expected the invocation to fail without starting a build"
+    );
+}
+
 /// Test that custom features disqualify pre-built binary usage.
 #[test]
 fn custom_features_disqualifies() {
@@ -116,9 +131,9 @@ fn custom_features_disqualifies() {
         .assert_with_messages();
 
     // Should build from source due to custom features
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
-    // Verify disqualification message
+    // Verify disqualification and that the binary was built from source.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -126,14 +141,7 @@ fn custom_features_disqualifies() {
         )),
         "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization"
     );
-
-    // Verify build was initiated
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started"
-    );
+    assert_built_from_source(&messages);
 }
 
 /// Test that `--all-features` disqualifies pre-built binary usage.
@@ -150,9 +158,9 @@ fn all_features_disqualifies() {
         .assert_with_messages();
 
     // Should build from source due to --all-features
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
-    // Verify disqualification message
+    // Verify disqualification and that the binary was built from source.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -160,14 +168,7 @@ fn all_features_disqualifies() {
         )),
         "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization"
     );
-
-    // Verify build was initiated
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started"
-    );
+    assert_built_from_source(&messages);
 }
 
 /// Test that `--no-default-features` disqualifies pre-built binary usage.
@@ -184,9 +185,47 @@ fn no_default_features_disqualifies() {
         .assert_with_messages();
 
     // Should build from source due to --no-default-features
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
-    // Verify disqualification message
+    // Verify disqualification and that the binary was built from source.
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::DisqualifiedDueToCustomization { .. })
+        )),
+        "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization"
+    );
+    assert_built_from_source(&messages);
+}
+
+/// Test that `default-features = false` configured for a tool in `[tools]` disqualifies pre-built
+/// binary usage, the same as the `--no-default-features` CLI flag.
+#[test]
+fn config_default_features_false_disqualifies() {
+    let mut cgx = Cgx::with_test_fs();
+
+    cgx.test_fs()
+        .cwd
+        .child("cgx.toml")
+        .write_str(
+            r#"
+[tools]
+eza = { version = "=0.23.1", default-features = false }
+"#,
+        )
+        .unwrap();
+
+    // No CLI feature flags; just use the configred `[tools]` options
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("eza")
+        .arg("--version")
+        .assert_with_messages();
+
+    assert.success();
+
+    // The configured `default-features = false` disqualifies the pre-built binary...
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -195,13 +234,8 @@ fn no_default_features_disqualifies() {
         "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization"
     );
 
-    // Verify build was initiated
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started"
-    );
+    // ...so the binary is built from source.
+    assert_built_from_source(&messages);
 }
 
 /// Test cache flow: default (binary) → never (source) → default (binary from cache).
@@ -217,23 +251,16 @@ fn cache_flow_switching_modes() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stderr(predicates::str::contains("Compiling").not());
+    assert.success();
 
-    // Verify prebuilt binary was resolved
+    // Verify a prebuilt binary was resolved and used (no source build) on the first run.
     assert!(
         messages
             .iter()
             .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
         "Expected PrebuiltBinaryMessage::Resolved on first run"
     );
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started on first run (using prebuilt binary)"
-    );
+    assert_prebuilt(&messages);
 
     // Second run with --prebuilt-binary never - should build from source
     let mut cgx = cgx.reset();
@@ -246,9 +273,9 @@ fn cache_flow_switching_modes() {
         .arg("--version")
         .assert_with_messages();
 
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
-    // Verify prebuilt binaries were disabled and build was initiated
+    // Verify prebuilt binaries were disabled and the binary was built from source on the second run.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -256,12 +283,7 @@ fn cache_flow_switching_modes() {
         )),
         "Expected PrebuiltBinaryMessage::PrebuiltBinariesDisabled on second run"
     );
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started on second run"
-    );
+    assert_compiled_from_source(&messages);
 
     // Third run with defaults again - should use pre-built binary from cache (no network)
     let mut cgx = cgx.reset();
@@ -274,19 +296,14 @@ fn cache_flow_switching_modes() {
 
     assert.success().stderr(predicates::str::is_empty());
 
-    // Verify we hit the binary resolution cache
+    // Verify we hit the binary resolution cache and reused the prebuilt binary on the third run.
     assert!(
         messages
             .iter()
             .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheHit { .. }))),
         "Expected PrebuiltBinaryMessage::CacheHit on third run"
     );
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started on third run (using cached prebuilt binary)"
-    );
+    assert_prebuilt(&messages);
 }
 
 /// Test that custom features and default settings use different cache entries.
@@ -304,9 +321,9 @@ fn custom_features_uses_separate_cache() {
         .arg("--version")
         .assert_with_messages();
 
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
-    // Verify disqualification and source build
+    // Verify disqualification, a source build, and a build-cache miss on the first run.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -314,12 +331,7 @@ fn custom_features_uses_separate_cache() {
         )),
         "Expected PrebuiltBinaryMessage::DisqualifiedDueToCustomization on first run"
     );
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started on first run"
-    );
+    assert_compiled_from_source(&messages);
     assert!(
         messages
             .iter()
@@ -336,23 +348,17 @@ fn custom_features_uses_separate_cache() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stderr(predicates::str::contains("Compiling").not());
+    assert.success();
 
-    // Verify prebuilt binary was resolved (proves different cache entry from source build)
+    // Verify a prebuilt binary was resolved and used on the second run (proves a different cache
+    // entry from the first run's source build).
     assert!(
         messages
             .iter()
             .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
         "Expected PrebuiltBinaryMessage::Resolved on second run (different cache entry from first run)"
     );
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started on second run (using prebuilt binary)"
-    );
+    assert_prebuilt(&messages);
 
     // Third run with custom features again - should use cached build from first run
     let mut cgx = cgx.reset();
@@ -367,19 +373,14 @@ fn custom_features_uses_separate_cache() {
 
     assert.success().stderr(predicates::str::is_empty());
 
-    // Verify we hit the compiled binary cache (from first run with custom features)
+    // Verify we hit the compiled binary cache from the first run (still a source-built binary).
     assert!(
         messages
             .iter()
             .any(|m| matches!(m, Message::BuildCache(BuildCacheMessage::CacheHit { .. }))),
         "Expected BuildCacheMessage::CacheHit on third run (reusing build from first run)"
     );
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started on third run (using cached build)"
-    );
+    assert_cached_source_build(&messages);
 }
 
 /// Test that negative binary resolution results are cached.
@@ -550,10 +551,7 @@ fn github_provider_resolves_binary() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stdout(predicates::str::contains("eza"))
-        .stderr(predicates::str::contains("Compiling").not());
+    assert.success().stdout(predicates::str::contains("eza"));
 
     let providers: Vec<_> = messages
         .iter()
@@ -703,10 +701,7 @@ fn quickinstall_provider_resolves_binary() {
         .arg("--version")
         .assert_with_messages();
 
-    assert
-        .success()
-        .stdout(predicates::str::contains("eza"))
-        .stderr(predicates::str::contains("Compiling").not());
+    assert.success().stdout(predicates::str::contains("eza"));
 
     let providers: Vec<_> = messages
         .iter()
@@ -774,7 +769,7 @@ fn gitlab_provider_reports_no_binary_for_github_crate() {
         .arg("--version")
         .assert_with_messages();
 
-    assert.success().stderr(predicates::str::contains("Compiling"));
+    assert.success();
 
     let providers: Vec<_> = messages
         .iter()

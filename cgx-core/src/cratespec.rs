@@ -7,11 +7,95 @@ use url::Url;
 
 use crate::{
     Result,
-    cli::CliArgs,
-    config::{Config, ToolConfig},
+    config::{Config, ToolConfig, ToolConfigDetailed},
     error,
     git::GitSelector,
 };
+
+/// The source from which to obtain a crate.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Source {
+    /// No explicit source selector; resolve via config if present, ultimately defaulting to
+    /// crates.io absent explicit config override.
+    #[default]
+    Default,
+    /// `--git <URL>`
+    Git { url: String },
+    /// `--registry <NAME>`
+    Registry { name: String },
+    /// `--index <URL>`
+    Index { url: String },
+    /// `--path <PATH>`
+    Path { path: PathBuf },
+    /// `--github <owner/repo>`, with optional `--github-url`
+    GitHub {
+        repo: String,
+        custom_url: Option<String>,
+    },
+    /// `--gitlab <owner/repo>`, with optional `--gitlab-url`
+    GitLab {
+        repo: String,
+        custom_url: Option<String>,
+    },
+}
+
+impl Source {
+    /// True for git-backed sources, the only sources a non-default [`GitSelector`] may accompany.
+    pub fn is_git(&self) -> bool {
+        matches!(
+            self,
+            Source::Git { .. } | Source::GitHub { .. } | Source::GitLab { .. }
+        )
+    }
+
+    /// True when a crate name can be discovered from the source itself, making an explicit crate
+    /// name optional.
+    pub fn allows_crate_discovery(&self) -> bool {
+        matches!(
+            self,
+            Source::Git { .. } | Source::GitHub { .. } | Source::GitLab { .. } | Source::Path { .. }
+        )
+    }
+}
+
+/// A request to resolve a single crate.
+///
+/// This is the cratespec-layer input to [`CrateSpec::load`].
+#[derive(Clone, Debug, Default)]
+pub struct CrateRequest {
+    /// The crate name, or `None` when it is discoverable from the source (e.g. `--git`/`--path`).
+    pub name: Option<String>,
+
+    /// The requested version requirement as a raw string, parsed into a [`VersionReq`] by
+    /// [`CrateSpec::load`]. `None` selects the latest version (or a config-pinned one).
+    pub version: Option<String>,
+
+    /// Where to obtain the crate.
+    pub source: Source,
+
+    /// Which git ref to use, for git-backed sources.
+    pub git_ref: GitSelector,
+}
+
+impl CrateRequest {
+    /// Build a request for a tool specified in the `cgx` config `[tools]` section, identified by
+    /// its name in that table.
+    pub fn for_configured_tool(name: &str) -> Self {
+        // Only `name` is set; `source`, `version`, and `git_ref` are intentionally left at their
+        // defaults. That is sufficient because [`CrateSpec::load`] will resolve this request with
+        // a default `source` by looking up the crate name in the  `[tools]` config section and
+        // applying its configured source and version — exactly the way a bare `cgx <name>`
+        // invocation resolves. Pre-filling those fields here would duplicate that lookup.
+        //
+        // Of course that assumes that the caller is already certain that `name` appears in the
+        // `[tools]` config section, but if that assumption doesn't hold it's a bug in the caller
+        // not here.
+        Self {
+            name: Some(name.to_string()),
+            ..Self::default()
+        }
+    }
+}
 
 /// A specification of a crate that the user wants to execute.
 ///
@@ -95,7 +179,7 @@ pub enum CrateSpec {
 }
 
 impl CrateSpec {
-    /// Load a crate spec from the command line, respecting config-based overrides.
+    /// Resolve a [`CrateRequest`] into a [`CrateSpec`], respecting config-based overrides.
     ///
     /// This method applies config-based transformations and overrides:
     /// 1. Alias resolution: Maps short names to full crate names (e.g., `rg` → `ripgrep`)
@@ -103,73 +187,37 @@ impl CrateSpec {
     /// 3. Default registry: Uses config's default registry when no registry specified
     ///
     /// Priority order for version selection:
-    /// 1. CLI `--version` flag (highest)
-    /// 2. `@version` suffix in crate name
-    /// 3. Config tool pinning
-    /// 4. Latest version (lowest)
-    pub fn load(config: &Config, args: &CliArgs) -> Result<Self> {
-        // Parse the base crate spec from CLI args, including special cargo handling
-        let (name, at_version) = if let Some(crate_spec) = &args.crate_spec {
-            if crate_spec == "cargo" && !args.args.is_empty() {
-                // Special case: `cgx cargo deny` -> crate name is `cargo-deny`
-                let subcommand = &args.args[0];
-                let (subcommand_name, subcommand_version) = Self::parse_crate_name_and_version(subcommand)?;
-                let cargo_crate_name = format!("cargo-{}", subcommand_name);
-                (Some(cargo_crate_name), subcommand_version)
-            } else {
-                let (n, v) = Self::parse_crate_name_and_version(crate_spec)?;
-                (Some(n), v)
-            }
-        } else {
-            (None, None)
-        };
-
-        // Apply alias resolution from config
-        let name = name.map(|n| config.aliases.get(&n).cloned().unwrap_or(n));
-
-        // Reconcile version from @version syntax and --version flag
-        let flag_version = args
-            .version
+    /// 1. The user's explicitly specified version requirement in [`CrateRequest::version`]
+    /// 2. Config tool pinning
+    /// 3. Current/latest version of the crate at whatever source is being used
+    pub fn load(config: &Config, req: &CrateRequest) -> Result<Self> {
+        // Apply alias resolution from config.
+        let name = req
+            .name
             .as_ref()
-            .filter(|v| !v.is_empty())
-            .map(|s| s.as_str());
+            .map(|name| config.aliases.get(name).unwrap_or(name));
 
-        let cli_version = match (at_version.as_deref(), flag_version) {
-            (Some(at_ver), Some(flag_ver)) => {
-                if at_ver != flag_ver {
-                    return error::ConflictingVersionsSnafu {
-                        at_version: at_ver,
-                        flag_version: flag_ver,
-                    }
-                    .fail();
-                }
-                Some(
-                    VersionReq::parse(at_ver)
-                        .with_context(|_| error::InvalidVersionReqSnafu { version: at_ver })?,
-                )
-            }
-            (Some(at_ver), None) => Some(
-                VersionReq::parse(at_ver)
-                    .with_context(|_| error::InvalidVersionReqSnafu { version: at_ver })?,
-            ),
-            (None, Some(flag_ver)) => Some(
-                VersionReq::parse(flag_ver)
-                    .with_context(|_| error::InvalidVersionReqSnafu { version: flag_ver })?,
-            ),
-            (None, None) => None,
-        };
+        // Parse the reconciled CLI version requirement, if any. The `@VERSION` / `--crate-version`
+        // reconciliation already happened during CLI translation; this is the single place a CLI
+        // version string is turned into a `VersionReq`, shared with config tool pinning below.
+        let cli_version = req
+            .version
+            .as_deref()
+            .map(|v| VersionReq::parse(v).with_context(|_| error::InvalidVersionReqSnafu { version: v }))
+            .transpose()?;
 
         // Apply tool pinning from config if no CLI version specified
         let version = if cli_version.is_none() {
-            if let Some(ref tool_name) = name {
+            if let Some(tool_name) = name {
                 config
                     .tools
                     .get(tool_name)
                     .and_then(|tool_config| match tool_config {
-                        ToolConfig::Version(v) | ToolConfig::Detailed { version: Some(v), .. } => {
+                        ToolConfig::Version(v)
+                        | ToolConfig::Detailed(ToolConfigDetailed { version: Some(v), .. }) => {
                             VersionReq::parse(v).ok()
                         }
-                        ToolConfig::Detailed { version: None, .. } => None,
+                        ToolConfig::Detailed(ToolConfigDetailed { version: None, .. }) => None,
                     })
             } else {
                 None
@@ -178,188 +226,191 @@ impl CrateSpec {
             cli_version
         };
 
-        // Construct GitSelector from CLI flags
-        let git_selector = match (&args.branch, &args.tag, &args.rev) {
-            (Some(branch), None, None) => GitSelector::Branch(branch.clone()),
-            (None, Some(tag), None) => GitSelector::Tag(tag.clone()),
-            (None, None, Some(rev)) => GitSelector::Commit(rev.clone()),
-            (None, None, None) => GitSelector::DefaultBranch,
-            _ => unreachable!("BUG: clap should enforce mutual exclusivity"),
-        };
+        let git_selector = req.git_ref.clone();
 
-        let is_git_source = args.git.is_some() || args.github.is_some() || args.gitlab.is_some();
-
-        if !matches!(git_selector, GitSelector::DefaultBranch) && !is_git_source {
+        if !matches!(git_selector, GitSelector::DefaultBranch) && !req.source.is_git() {
             return error::GitSelectorWithoutGitSourceSnafu.fail();
         }
 
-        // Construct the appropriate CrateSpec variant based on source flags
-        if let Some(git_url) = &args.git {
-            if let Some(forge) = Forge::try_parse_from_url(git_url) {
-                Ok(CrateSpec::Forge {
-                    forge,
-                    selector: git_selector.clone(),
-                    name,
-                    version,
-                })
-            } else {
-                Ok(CrateSpec::Git {
-                    repo: git_url.clone(),
-                    selector: git_selector.clone(),
-                    name,
+        // Construct the appropriate CrateSpec variant based on the resolved source.
+        match &req.source {
+            Source::Git { url } => {
+                if let Some(forge) = Forge::try_parse_from_url(url) {
+                    Ok(CrateSpec::Forge {
+                        forge,
+                        selector: git_selector,
+                        name: name.cloned(),
+                        version,
+                    })
+                } else {
+                    Ok(CrateSpec::Git {
+                        repo: url.clone(),
+                        selector: git_selector,
+                        name: name.cloned(),
+                        version,
+                    })
+                }
+            }
+            Source::Registry { name: registry } => {
+                let name = name.context(error::MissingCrateParameterSnafu)?;
+                Ok(CrateSpec::Registry {
+                    source: RegistrySource::Named(registry.clone()),
+                    name: name.clone(),
                     version,
                 })
             }
-        } else if let Some(registry) = &args.registry {
-            let name = name.context(error::MissingCrateParameterSnafu)?;
-            Ok(CrateSpec::Registry {
-                source: RegistrySource::Named(registry.clone()),
-                name,
-                version,
-            })
-        } else if let Some(index_str) = &args.index {
-            let name = name.context(error::MissingCrateParameterSnafu)?;
-            let index_url =
-                Url::parse(index_str).with_context(|_| error::InvalidUrlSnafu { url: index_str })?;
-            Ok(CrateSpec::Registry {
-                source: RegistrySource::IndexUrl(index_url),
-                name,
-                version,
-            })
-        } else if let Some(path) = &args.path {
-            Ok(CrateSpec::LocalDir {
+            Source::Index { url } => {
+                let name = name.context(error::MissingCrateParameterSnafu)?;
+                let index_url = Url::parse(url).with_context(|_| error::InvalidUrlSnafu { url })?;
+                Ok(CrateSpec::Registry {
+                    source: RegistrySource::IndexUrl(index_url),
+                    name: name.clone(),
+                    version,
+                })
+            }
+            Source::Path { path } => Ok(CrateSpec::LocalDir {
                 path: path.clone(),
-                name,
+                name: name.cloned(),
                 version,
-            })
-        } else if let Some(github_repo) = &args.github {
-            let (owner, repo) = Self::parse_owner_repo(github_repo)?;
-            let custom_url = if let Some(url_str) = &args.github_url {
-                Some(Url::parse(url_str).with_context(|_| error::InvalidUrlSnafu { url: url_str })?)
-            } else {
-                None
-            };
-            Ok(CrateSpec::Forge {
-                forge: Forge::GitHub {
-                    custom_url,
-                    owner,
-                    repo,
-                },
-                selector: git_selector.clone(),
-                name,
-                version,
-            })
-        } else if let Some(gitlab_repo) = &args.gitlab {
-            let (owner, repo) = Self::parse_owner_repo(gitlab_repo)?;
-            let custom_url = if let Some(url_str) = &args.gitlab_url {
-                Some(Url::parse(url_str).with_context(|_| error::InvalidUrlSnafu { url: url_str })?)
-            } else {
-                None
-            };
-            Ok(CrateSpec::Forge {
-                forge: Forge::GitLab {
-                    custom_url,
-                    owner,
-                    repo,
-                },
-                selector: git_selector.clone(),
-                name,
-                version,
-            })
-        } else {
-            // No CLI source flags - check tool config, then default_registry, then crates.io
+            }),
+            Source::GitHub { repo, custom_url } => {
+                let (owner, repo) = Self::parse_owner_repo(repo)?;
+                let custom_url = if let Some(url_str) = custom_url {
+                    Some(Url::parse(url_str).with_context(|_| error::InvalidUrlSnafu { url: url_str })?)
+                } else {
+                    None
+                };
+                Ok(CrateSpec::Forge {
+                    forge: Forge::GitHub {
+                        custom_url,
+                        owner,
+                        repo,
+                    },
+                    selector: git_selector,
+                    name: name.cloned(),
+                    version,
+                })
+            }
+            Source::GitLab { repo, custom_url } => {
+                let (owner, repo) = Self::parse_owner_repo(repo)?;
+                let custom_url = if let Some(url_str) = custom_url {
+                    Some(Url::parse(url_str).with_context(|_| error::InvalidUrlSnafu { url: url_str })?)
+                } else {
+                    None
+                };
+                Ok(CrateSpec::Forge {
+                    forge: Forge::GitLab {
+                        custom_url,
+                        owner,
+                        repo,
+                    },
+                    selector: git_selector,
+                    name: name.cloned(),
+                    version,
+                })
+            }
+            Source::Default => {
+                // No CLI source flag - check tool config, then default_registry, then crates.io.
 
-            // First check if tool config specifies a source
-            if let Some(ref tool_name) = name {
-                if let Some(tool_config) = config.tools.get(tool_name) {
-                    match tool_config {
-                        ToolConfig::Detailed {
-                            git: Some(git_url),
-                            branch,
-                            tag,
-                            rev,
-                            ..
-                        } => {
-                            // Tool config specifies git source
-                            let selector = match (branch.as_ref(), tag.as_ref(), rev.as_ref()) {
-                                (Some(b), None, None) => GitSelector::Branch(b.clone()),
-                                (None, Some(t), None) => GitSelector::Tag(t.clone()),
-                                (None, None, Some(r)) => GitSelector::Commit(r.clone()),
-                                _ => GitSelector::DefaultBranch,
-                            };
+                // First check if tool config specifies a source
+                if let Some(tool_name) = name {
+                    if let Some(tool_config) = config.tools.get(tool_name) {
+                        match tool_config {
+                            ToolConfig::Detailed(ToolConfigDetailed {
+                                git: Some(git_url),
+                                branch,
+                                tag,
+                                rev,
+                                ..
+                            }) => {
+                                // Tool config specifies git source
+                                let selector = match (branch.as_ref(), tag.as_ref(), rev.as_ref()) {
+                                    (Some(b), None, None) => GitSelector::Branch(b.clone()),
+                                    (None, Some(t), None) => GitSelector::Tag(t.clone()),
+                                    (None, None, Some(r)) => GitSelector::Commit(r.clone()),
+                                    _ => GitSelector::DefaultBranch,
+                                };
 
-                            if let Some(forge) = Forge::try_parse_from_url(git_url) {
-                                return Ok(CrateSpec::Forge {
-                                    forge,
-                                    selector,
-                                    name,
-                                    version,
-                                });
-                            } else {
-                                return Ok(CrateSpec::Git {
-                                    repo: git_url.clone(),
-                                    selector,
-                                    name,
+                                if let Some(forge) = Forge::try_parse_from_url(git_url) {
+                                    return Ok(CrateSpec::Forge {
+                                        forge,
+                                        selector,
+                                        name: name.cloned(),
+                                        version,
+                                    });
+                                } else {
+                                    return Ok(CrateSpec::Git {
+                                        repo: git_url.clone(),
+                                        selector,
+                                        name: name.cloned(),
+                                        version,
+                                    });
+                                }
+                            }
+                            ToolConfig::Detailed(ToolConfigDetailed {
+                                registry: Some(reg), ..
+                            }) => {
+                                // Tool config specifies registry
+                                let name = name.context(error::MissingCrateParameterSnafu)?;
+                                return Ok(CrateSpec::Registry {
+                                    source: RegistrySource::Named(reg.clone()),
+                                    name: name.clone(),
                                     version,
                                 });
                             }
-                        }
-                        ToolConfig::Detailed {
-                            registry: Some(reg), ..
-                        } => {
-                            // Tool config specifies registry
-                            let name = name.context(error::MissingCrateParameterSnafu)?;
-                            return Ok(CrateSpec::Registry {
-                                source: RegistrySource::Named(reg.clone()),
-                                name,
-                                version,
-                            });
-                        }
-                        ToolConfig::Detailed { path: Some(p), .. } => {
-                            // Tool config specifies local path
-                            return Ok(CrateSpec::LocalDir {
-                                path: p.clone(),
-                                name,
-                                version,
-                            });
-                        }
-                        _ => {
-                            // Tool config doesn't specify source - fall through to defaults
+                            ToolConfig::Detailed(ToolConfigDetailed { path: Some(p), .. }) => {
+                                // Tool config specifies local path
+                                return Ok(CrateSpec::LocalDir {
+                                    path: p.clone(),
+                                    name: name.cloned(),
+                                    version,
+                                });
+                            }
+                            _ => {
+                                // Tool config doesn't specify source - fall through to defaults
+                            }
                         }
                     }
                 }
-            }
 
-            // No tool config source - use default_registry or crates.io
+                // At this point all of the configurations in which an explicit crate name is
+                // optional have been eliminated, so we require a crate name.
+                let name = name.context(error::MissingCrateParameterSnafu)?;
 
-            // At this point all of the possible configurations in which an explicit crate name is
-            // optional have been eliminated, so we require a crate name.
-            let name = name.context(error::MissingCrateParameterSnafu)?;
-
-            if let Some(ref default_registry) = config.default_registry {
-                // Use config's default registry
-                Ok(CrateSpec::Registry {
-                    source: RegistrySource::Named(default_registry.clone()),
-                    name,
-                    version,
-                })
-            } else {
-                // Use crates.io
-                Ok(CrateSpec::CratesIo { name, version })
+                if let Some(ref default_registry) = config.default_registry {
+                    // Use config's default registry
+                    Ok(CrateSpec::Registry {
+                        source: RegistrySource::Named(default_registry.clone()),
+                        name: name.clone(),
+                        version,
+                    })
+                } else {
+                    // Use crates.io
+                    Ok(CrateSpec::CratesIo {
+                        name: name.clone(),
+                        version,
+                    })
+                }
             }
         }
     }
 
-    /// Parse a crate name that may include an @version suffix.
+    /// Get the crate name used for looking up the crate in the `[tools]` TOML section,
+    /// if one is known.
     ///
-    /// Examples:
-    /// - `"ripgrep"` → `("ripgrep", None)`
-    /// - `"ripgrep@14"` → `("ripgrep", Some("14"))`
-    fn parse_crate_name_and_version(spec: &str) -> Result<(String, Option<String>)> {
-        if let Some((name, version)) = spec.split_once('@') {
-            Ok((name.to_string(), Some(version.to_string())))
-        } else {
-            Ok((spec.to_string(), None))
+    /// Not all `CrateSpec` variants have a known crate name; for those variants, unfortunatelly,
+    /// the contents of the `[tools]` section cannot be used to configure them, and this method
+    /// returns `None`.
+    pub fn configured_tool_name(&self) -> Option<&str> {
+        match self {
+            CrateSpec::CratesIo { name, .. }
+            | CrateSpec::Registry { name, .. }
+            | CrateSpec::Git { name: Some(name), .. }
+            | CrateSpec::Forge { name: Some(name), .. }
+            | CrateSpec::LocalDir { name: Some(name), .. } => Some(name.as_str()),
+            CrateSpec::Git { name: None, .. }
+            | CrateSpec::Forge { name: None, .. }
+            | CrateSpec::LocalDir { name: None, .. } => None,
         }
     }
 
@@ -373,26 +424,6 @@ impl CrateSpec {
         } else {
             error::InvalidRepoFormatSnafu { repo: repo_str }.fail()
         }
-    }
-
-    /// Get the arguments that should be passed to the executed binary.
-    ///
-    /// For the special case of `cgx cargo <subcommand>`, the first argument is consumed
-    /// as part of the crate spec (to form `cargo-<subcommand>`), so we skip it.
-    /// Otherwise, all trailing args are passed to the binary.
-    pub fn get_binary_args(args: &CliArgs) -> Vec<std::ffi::OsString> {
-        let skip = if args.crate_spec.as_deref() == Some("cargo") && !args.args.is_empty() {
-            // Skip the first arg (the cargo subcommand name)
-            1
-        } else {
-            0
-        };
-
-        args.args
-            .iter()
-            .skip(skip)
-            .map(std::ffi::OsString::from)
-            .collect()
     }
 }
 
@@ -520,8 +551,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        cli::CliArgs,
-        config::{Config, ToolConfig},
+        cli::Cli,
+        config::{Config, ToolConfig, ToolConfigDetailed},
     };
 
     /// Test that config aliases are resolved before processing the crate spec.
@@ -540,8 +571,8 @@ mod tests {
         let mut config = Config::default();
         config.aliases.insert("rg".to_string(), "ripgrep".to_string());
 
-        let args = CliArgs::parse_from_test_args(["rg"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["rg"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -567,8 +598,8 @@ mod tests {
             .tools
             .insert("ripgrep".to_string(), ToolConfig::Version("14.0".to_string()));
 
-        let args = CliArgs::parse_from_test_args(["ripgrep"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["ripgrep"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -593,7 +624,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "ripgrep".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: Some("14.0".to_string()),
                 features: None,
                 registry: None,
@@ -602,11 +634,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["ripgrep"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["ripgrep"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -633,7 +665,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
                 features: None,
@@ -642,11 +675,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -675,7 +708,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 branch: None,
@@ -684,11 +718,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -718,7 +752,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://github.com/owner/repo.git".to_string()),
                 tag: None,
@@ -727,11 +762,11 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -761,7 +796,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://gitlab.com/owner/repo.git".to_string()),
                 tag: None,
@@ -770,11 +806,11 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -804,7 +840,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 path: Some(PathBuf::from("/some/path")),
                 registry: None,
@@ -813,11 +850,11 @@ mod tests {
                 branch: None,
                 tag: None,
                 rev: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -846,7 +883,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 branch: Some("develop".to_string()),
@@ -855,11 +893,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -889,7 +927,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 tag: Some("v1.0.0".to_string()),
@@ -898,11 +937,11 @@ mod tests {
                 branch: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -932,7 +971,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 git: Some("https://example.com/repo.git".to_string()),
                 rev: Some("abc123".to_string()),
@@ -941,11 +981,11 @@ mod tests {
                 branch: None,
                 tag: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -976,8 +1016,8 @@ mod tests {
             .tools
             .insert("ripgrep".to_string(), ToolConfig::Version("14.0".to_string()));
 
-        let args = CliArgs::parse_from_test_args(["--version", "13.0", "ripgrep"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["--crate-version", "13.0", "ripgrep"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1004,8 +1044,8 @@ mod tests {
             .tools
             .insert("ripgrep".to_string(), ToolConfig::Version("14.0".to_string()));
 
-        let args = CliArgs::parse_from_test_args(["ripgrep@13.0"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["ripgrep@13.0"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1031,7 +1071,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 git: Some("https://github.com/owner/repo.git".to_string()),
                 registry: None,
@@ -1040,11 +1081,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["--registry", "other-registry", "my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["--registry", "other-registry", "my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1075,7 +1116,8 @@ mod tests {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: Some("1.0".to_string()),
                 registry: Some("my-registry".to_string()),
                 git: None,
@@ -1084,11 +1126,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["--git", "https://example.com/repo.git", "my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["--git", "https://example.com/repo.git", "my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1126,8 +1168,8 @@ mod tests {
             .tools
             .insert("ripgrep".to_string(), ToolConfig::Version("14.0".to_string()));
 
-        let args = CliArgs::parse_from_test_args(["rg"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["rg"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1161,8 +1203,8 @@ mod tests {
             ..Default::default()
         };
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1195,7 +1237,8 @@ mod tests {
             default_registry: Some("default-registry".to_string()),
             tools: [(
                 "my-tool".to_string(),
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
+                    default_features: true,
                     version: Some("1.0".to_string()),
                     registry: Some("tool-registry".to_string()),
                     features: None,
@@ -1204,15 +1247,15 @@ mod tests {
                     tag: None,
                     rev: None,
                     path: None,
-                },
+                }),
             )]
             .into_iter()
             .collect(),
             ..Default::default()
         };
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,
@@ -1287,13 +1330,14 @@ mod tests {
     /// Command: `cgx my-tool`
     ///
     /// Expected: Produces [`CrateSpec::CratesIo`] (the default).
-    /// Features affect [`crate::cli::BuildOptions`], not [`CrateSpec`].
+    /// Features affect [`crate::builder::BuildOptions`], not [`CrateSpec`].
     #[test]
     fn test_tool_with_only_features() {
         let mut config = Config::default();
         config.tools.insert(
             "my-tool".to_string(),
-            ToolConfig::Detailed {
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
                 version: None,
                 features: Some(vec!["feat1".to_string(), "feat2".to_string()]),
                 registry: None,
@@ -1302,11 +1346,11 @@ mod tests {
                 tag: None,
                 rev: None,
                 path: None,
-            },
+            }),
         );
 
-        let args = CliArgs::parse_from_test_args(["my-tool"]);
-        let spec = CrateSpec::load(&config, &args).unwrap();
+        let cli = Cli::parse_from_test_args(["my-tool"]);
+        let spec = CrateSpec::load(&config, &cli.crate_args().crate_request().unwrap()).unwrap();
 
         assert_matches!(
             spec,

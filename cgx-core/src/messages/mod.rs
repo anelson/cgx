@@ -1,5 +1,6 @@
 pub mod build;
 pub mod build_cache;
+pub mod cgx;
 pub mod crate_resolution;
 pub mod git;
 pub mod prebuilt_binary;
@@ -10,6 +11,7 @@ use std::sync::mpsc;
 
 pub use build::BuildMessage;
 pub use build_cache::BuildCacheMessage;
+pub use cgx::{CgxMessage, Provenance};
 pub use crate_resolution::CrateResolutionMessage;
 pub use git::GitMessage;
 pub use prebuilt_binary::PrebuiltBinaryMessage;
@@ -34,6 +36,7 @@ pub enum Message {
     Git(GitMessage),
     Build(BuildMessage),
     Runner(RunnerMessage),
+    Cgx(CgxMessage),
 }
 
 /// A reporter for diagnostic messages.

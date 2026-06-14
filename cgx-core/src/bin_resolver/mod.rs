@@ -60,8 +60,9 @@ pub(crate) fn create_resolver(
     reporter: crate::messages::MessageReporter,
     http_client: HttpClient,
 ) -> impl BinaryResolver {
+    let mode = config.prebuilt_binaries.use_prebuilt_binaries;
     let inner = DefaultBinaryResolver::new(config, reporter.clone(), http_client);
-    CachingResolver::new(inner, cache, reporter)
+    CachingResolver::new(inner, cache, reporter, mode)
 }
 
 struct DefaultBinaryResolver {
@@ -285,14 +286,6 @@ impl BinaryResolver for DefaultBinaryResolver {
             }
         }
 
-        if self.config.prebuilt_binaries.use_prebuilt_binaries == UsePrebuiltBinaries::Always {
-            return error::PrebuiltBinaryRequiredSnafu {
-                name: resolved.name.clone(),
-                version: resolved.version.to_string(),
-            }
-            .fail();
-        }
-
         self.reporter.report(|| {
             PrebuiltBinaryMessage::no_binary_found(
                 resolved,
@@ -308,14 +301,21 @@ struct CachingResolver<R: BinaryResolver> {
     inner: R,
     cache: Cache,
     reporter: crate::messages::MessageReporter,
+    mode: UsePrebuiltBinaries,
 }
 
 impl<R: BinaryResolver> CachingResolver<R> {
-    fn new(inner: R, cache: Cache, reporter: crate::messages::MessageReporter) -> Self {
+    fn new(
+        inner: R,
+        cache: Cache,
+        reporter: crate::messages::MessageReporter,
+        mode: UsePrebuiltBinaries,
+    ) -> Self {
         Self {
             inner,
             cache,
             reporter,
+            mode,
         }
     }
 }
@@ -326,21 +326,56 @@ impl<R: BinaryResolver> BinaryResolver for CachingResolver<R> {
         krate: &DownloadedCrate,
         build_options: &BuildOptions,
     ) -> Result<Option<ResolvedBinary>> {
-        // Check build options disqualification BEFORE touching cache
+        // This layer owns the use-prebuilt-binaries mode policy. Every path that can decline to
+        // produce a binary is decided here, so `always` mode cannot be bypassed by a
+        // disqualification short-circuit or by a cached negative result.
+        if self.mode == UsePrebuiltBinaries::Never {
+            self.reporter
+                .report(PrebuiltBinaryMessage::prebuilt_binaries_disabled);
+            return Ok(None);
+        }
+
+        // Check build options disqualification BEFORE touching cache: the binary cache is keyed
+        // on the resolved crate alone, so a cached binary must not be served to a build whose
+        // options prohibit prebuilt binaries.
         if let Some(reason) = is_disqualified(build_options) {
+            if self.mode == UsePrebuiltBinaries::Always {
+                return error::PrebuiltBinaryDisqualifiedSnafu {
+                    name: krate.resolved.name.clone(),
+                    version: krate.resolved.version.to_string(),
+                    reason,
+                }
+                .fail();
+            }
             self.reporter
                 .report(|| PrebuiltBinaryMessage::disqualified_due_to_customization(reason));
             return Ok(None);
         }
 
-        // Delegate to cache (which handles Never mode and caching), keyed on the resolved crate
-        self.cache
-            .get_or_resolve_binary(&krate.resolved, || self.inner.resolve(krate, build_options))
+        let result = self
+            .cache
+            .get_or_resolve_binary(&krate.resolved, || self.inner.resolve(krate, build_options))?;
+
+        if result.is_none() && self.mode == UsePrebuiltBinaries::Always {
+            return error::PrebuiltBinaryRequiredSnafu {
+                name: krate.resolved.name.clone(),
+                version: krate.resolved.version.to_string(),
+            }
+            .fail();
+        }
+
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, path::PathBuf, rc::Rc};
+
+    use assert_matches::assert_matches;
+    use semver::Version;
+    use tempfile::TempDir;
+
     use super::*;
     use crate::builder::{BuildOptions, BuildTarget};
 
@@ -419,5 +454,176 @@ mod tests {
         let mut options = BuildOptions::default();
         options.toolchain = Some("nightly".to_string());
         assert_eq!(is_disqualified(&options), Some("custom toolchain specified"));
+    }
+
+    /// A [`BinaryResolver`] standing in for the provider-backed inner resolver, returning a
+    /// canned result and counting how often it is consulted.
+    struct StubResolver {
+        result: Option<ResolvedBinary>,
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl BinaryResolver for StubResolver {
+        fn resolve(
+            &self,
+            _krate: &DownloadedCrate,
+            _build_options: &BuildOptions,
+        ) -> Result<Option<ResolvedBinary>> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.result.clone())
+        }
+    }
+
+    fn test_cache() -> (Cache, TempDir) {
+        crate::logging::init_test_logging();
+
+        let (temp_dir, config) = crate::config::create_test_env();
+        (
+            Cache::new(config, crate::messages::MessageReporter::null()),
+            temp_dir,
+        )
+    }
+
+    fn stub_caching_resolver(
+        cache: Cache,
+        mode: UsePrebuiltBinaries,
+        result: Option<ResolvedBinary>,
+    ) -> (CachingResolver<StubResolver>, Rc<Cell<usize>>) {
+        let calls = Rc::new(Cell::new(0));
+        let stub = StubResolver {
+            result,
+            calls: calls.clone(),
+        };
+        let resolver = CachingResolver::new(stub, cache, crate::messages::MessageReporter::null(), mode);
+        (resolver, calls)
+    }
+
+    fn test_downloaded_crate() -> DownloadedCrate {
+        DownloadedCrate {
+            resolved: ResolvedCrate {
+                name: "serde".to_string(),
+                version: Version::parse("1.0.0").unwrap(),
+                source: ResolvedSource::CratesIo,
+            },
+            crate_path: PathBuf::from("/nonexistent"),
+        }
+    }
+
+    fn test_resolved_binary() -> ResolvedBinary {
+        ResolvedBinary {
+            krate: test_downloaded_crate().resolved,
+            provider: BinaryProvider::GithubReleases,
+            path: PathBuf::from("/fake/bin/serde"),
+        }
+    }
+
+    /// In `always` mode, build options that disqualify the use of prebuilt binaries fail the binary
+    /// resolution because the user demanded a prebuilt binary, and yet the build options would
+    /// force a source build.
+    #[test]
+    fn always_mode_rejects_disqualifying_build_options() {
+        let (cache, _temp) = test_cache();
+        let (resolver, calls) = stub_caching_resolver(cache, UsePrebuiltBinaries::Always, None);
+        let options = BuildOptions {
+            // Set a a custom profile which will disqualify the use of prebuilt binaries
+            profile: Some("dev".to_string()),
+            ..Default::default()
+        };
+
+        let result = resolver.resolve(&test_downloaded_crate(), &options);
+
+        // Prebuilt binaries can't be used because a `profile` is set, but the
+        // `UsePrebuiltBinaries::Always` mode requires a prebuilt binary, so attempting to resolve
+        // this is an error.
+        assert_matches!(
+            result,
+            Err(error::Error::PrebuiltBinaryDisqualified { ref name, ref reason, .. })
+                if name == "serde" && reason.contains("profile")
+        );
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// In `auto` mode, disqualifying build options skip prebuilt binaries so the crate falls
+    /// back to a source build.
+    #[test]
+    fn auto_mode_skips_prebuilt_for_disqualifying_build_options() {
+        let (cache, _temp) = test_cache();
+        let (resolver, calls) = stub_caching_resolver(cache, UsePrebuiltBinaries::Auto, None);
+        let options = BuildOptions {
+            profile: Some("dev".to_string()),
+            ..Default::default()
+        };
+
+        let result = resolver.resolve(&test_downloaded_crate(), &options).unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// In `always` mode a missing prebuilt binary is an error rather than a silent reversion to
+    /// building from source.
+    #[test]
+    fn always_mode_errors_when_no_provider_has_binary() {
+        let (cache, _temp) = test_cache();
+        let (resolver, calls) = stub_caching_resolver(cache, UsePrebuiltBinaries::Always, None);
+
+        let result = resolver.resolve(&test_downloaded_crate(), &BuildOptions::default());
+
+        assert_matches!(
+            result,
+            Err(error::Error::PrebuiltBinaryRequired { ref name, .. }) if name == "serde"
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// `always` mode applies to cached negative results too: a previous run's "no binary
+    /// available" answer fails the invocation instead of silently building from source.
+    #[test]
+    fn always_mode_errors_on_cached_negative_result() {
+        let (cache, _temp) = test_cache();
+
+        let (auto_resolver, auto_calls) =
+            stub_caching_resolver(cache.clone(), UsePrebuiltBinaries::Auto, None);
+        assert_matches!(
+            auto_resolver.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(None)
+        );
+        assert_eq!(auto_calls.get(), 1);
+
+        let (always_resolver, always_calls) = stub_caching_resolver(cache, UsePrebuiltBinaries::Always, None);
+        let result = always_resolver.resolve(&test_downloaded_crate(), &BuildOptions::default());
+
+        assert_matches!(result, Err(error::Error::PrebuiltBinaryRequired { .. }));
+        assert_eq!(always_calls.get(), 0);
+    }
+
+    /// In `never` mode the cache and providers are not consulted at all.
+    #[test]
+    fn never_mode_returns_none_without_consulting_providers() {
+        let (cache, _temp) = test_cache();
+        let (resolver, calls) =
+            stub_caching_resolver(cache, UsePrebuiltBinaries::Never, Some(test_resolved_binary()));
+
+        let result = resolver
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// A binary the providers resolve passes through unchanged in `always` mode.
+    #[test]
+    fn resolved_binary_passes_through_in_always_mode() {
+        let (cache, _temp) = test_cache();
+        let binary = test_resolved_binary();
+        let (resolver, _calls) =
+            stub_caching_resolver(cache, UsePrebuiltBinaries::Always, Some(binary.clone()));
+
+        let result = resolver
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap();
+
+        assert_eq!(result, Some(binary));
     }
 }

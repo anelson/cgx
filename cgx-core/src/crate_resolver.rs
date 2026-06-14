@@ -429,7 +429,7 @@ mod tests {
         let resolver = DefaultCrateResolver::new(
             config.clone(),
             git_client,
-            Arc::new(crate::cargo::find_cargo(reporter).unwrap()),
+            Arc::new(crate::cargo::create_cargo_runner(config.clone(), reporter).unwrap()),
             http_client,
         );
         (CachingResolver::new(resolver, cache), temp_dir)

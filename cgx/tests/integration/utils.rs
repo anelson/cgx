@@ -1,7 +1,7 @@
 //! Utility functions to help run our CLI as part of a test
 use assert_cmd::{Command, assert::OutputAssertExt, cargo::cargo_bin_cmd};
 use assert_fs::{TempDir, prelude::*};
-use cgx::messages::Message;
+use cgx::messages::{BuildCacheMessage, BuildMessage, CgxMessage, Message, Provenance};
 use serde_json::Deserializer;
 
 pub(crate) struct TestFs {
@@ -147,4 +147,96 @@ impl CommandExt for Command {
 
         (assert, messages)
     }
+}
+
+/// Assert that the emitted messages report the crate's binary was built from source.
+///
+/// This is cache-agnostic: it reads only the [`CgxMessage::CrateProvenance`] message and does
+/// not distinguish a fresh compile from a build-cache hit. Use [`assert_compiled_from_source`] or
+/// [`assert_cached_source_build`] to assert one or the other of those cases specifically.
+pub(crate) fn assert_built_from_source(messages: &[Message]) {
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::BuiltFromSource { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting the binary was built from source, got: {messages:#?}"
+    );
+}
+
+/// Assert that the emitted messages report the crate's binary was compiled from source *during this
+/// run*, meaning that it performed a fresh `cargo` build, rather than serving from cache.
+///
+/// Checks both that a [`BuildMessage::Started`] was emitted (cargo actually ran; it is emitted only
+/// on a build-cache miss) and that the [`CgxMessage::CrateProvenance`] message reports a source
+/// build.
+pub(crate) fn assert_compiled_from_source(messages: &[Message]) {
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "expected a BuildMessage::Started message (a fresh cargo compile), got: {messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::BuiltFromSource { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting the binary was built from source, got: {messages:#?}"
+    );
+}
+
+/// Assert that the emitted messages report the crate's binary was a source build served from the
+/// build cache *without* recompiling.
+///
+/// Checks that a [`BuildCacheMessage::CacheHit`] was emitted, that no [`BuildMessage::Started`] was
+/// emitted (cargo did not run this time), and that the authoritative
+/// [`CgxMessage::CrateProvenance`] reports a source build. Use this when a test's point is "this
+/// run reused a cached source build".
+pub(crate) fn assert_cached_source_build(messages: &[Message]) {
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::BuildCache(BuildCacheMessage::CacheHit { .. }))),
+        "expected a BuildCacheMessage::CacheHit message, got: {messages:#?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "expected NO BuildMessage::Started message (binary should be served from cache, not recompiled), \
+         got: {messages:#?}"
+    );
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::BuiltFromSource { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting the binary was built from source, got: {messages:#?}"
+    );
+}
+
+/// Assert that the emitted messages report the crate's binary was obtained as a pre-built binary.
+///
+/// Reads the authoritative [`CgxMessage::CrateProvenance`].
+pub(crate) fn assert_prebuilt(messages: &[Message]) {
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Cgx(CgxMessage::CrateProvenance {
+                provenance: Provenance::Prebuilt { .. },
+                ..
+            })
+        )),
+        "expected a CrateProvenance message reporting a pre-built binary, got: {messages:#?}"
+    );
 }

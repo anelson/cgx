@@ -121,8 +121,13 @@ cgx ripgrep@=14.1.1
 You can also pass the version requirement as a `cgx` option before the crate name:
 
 ```sh
-cgx --version 14 ripgrep
+cgx --crate-version 14 ripgrep
 ```
+
+> **NOTE:** `cgx --version` (or `cgx -V`) prints the version of `cgx` itself. To specify the semver version requirement
+> for the crate that you are running, use the `@VERSION` suffix or the `--crate-version` option shown above. A
+> `--version` placed _after_ the crate name is forwarded to the tool (e.g. `cgx ripgrep --version`
+> runs `ripgrep --version`).
 
 ## Sources
 
@@ -181,6 +186,30 @@ cgx --refresh ripgrep
 `--no-exec` prints the resolved executable path to stdout. `--list-targets` lists the crate's binary and example targets
 without building or executing them.
 
+## Prefetching Crates
+
+You can prepare crates ahead of time so later runs are fast and work offline:
+
+```sh
+# Prepare a single crate (download or build) without running it; prints nothing
+cgx --prefetch ripgrep
+
+# Prefetch every tool and alias configured across your cgx.toml files
+cgx --prefetch-all
+```
+
+To see what tools and aliases are configured (and thus would be prefetched with `--prefetch-all`), you can run:
+
+```sh
+# List the tools and aliases configured across all cgx.toml files
+cgx --list-tools
+```
+
+`--prefetch` is equivalent to `--no-exec` but prints nothing on success; once a crate is prefetched it is guaranteed to
+be runnable later without network access and without building froms ource (as long as you don't change build options,
+features, or toolchain). `--prefetch-all` is a convenience shortcut equivalent to running `--prefetch` for each
+configured tool and alias.
+
 ## Configuration Files
 
 One of the handy features of tools like `uvx` and `npx` is that you can pin or customize tools in your workspace. `cgx`
@@ -208,6 +237,9 @@ cargo-deny = "=0.17.0"
 # Detailed configuration with features
 taplo-cli = { version = "1.0", features = ["full"] }
 
+# Default features can be disabled, just like in a Cargo dependency
+sccache = { version = "0.8", default-features = false }
+
 # Git repository source
 my-tool = { git = "https://github.com/owner/repo.git", tag = "v1.0.0" }
 
@@ -229,6 +261,8 @@ Config files are loaded and merged in order of precedence, with later sources ov
 
 Use `--config-file <FILE>` to read only one config file and bypass the normal search. See
 [`cgx-example.toml`](cgx-example.toml) for a more comprehensive example.
+
+You can use `cgx --list-tools` to see the final merged configuration of tools and aliases that `cgx` will use, after applying all config files and CLI options.
 
 ## Prebuilt Binaries
 

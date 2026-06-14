@@ -10,6 +10,9 @@ pub enum Error {
     #[snafu(display("Crate name is required"))]
     MissingCrateParameter,
 
+    #[snafu(display("Missing crate name in crate spec '{spec}'"))]
+    MissingCrateName { spec: String },
+
     #[snafu(display("Repository format must be 'owner/repo', got '{repo}'"))]
     InvalidRepoFormat { repo: String },
 
@@ -26,13 +29,20 @@ pub enum Error {
     InvalidUrl { url: String, source: url::ParseError },
 
     #[snafu(display(
-        "Conflicting version specifications: @{at_version} in crate name vs --version {flag_version}. \
-         Prefer using the @VERSION suffix in the crate name."
+        "Crate versions in the crate name ({at_version}) and the --crate-version flag ({flag_version}) are \
+         mutually exclusive; specify one or the other but not both"
     ))]
     ConflictingVersions {
         at_version: String,
         flag_version: String,
     },
+
+    #[snafu(display(
+        "cgx cannot run cargo itself, and pinning a cargo version is not supported. To run a cargo \
+         subcommand through cgx, use `cgx cargo <subcommand>` (e.g. `cgx cargo deny`) or the plugin crate \
+         name directly (e.g. `cgx cargo-deny`)"
+    ))]
+    CargoNotRunnable,
 
     // Resolution errors
     #[snafu(display("Crate '{name}' not found in registry"))]
@@ -136,6 +146,9 @@ pub enum Error {
     #[snafu(display("JSON serialization error: {source}"))]
     Json { source: serde_json::Error },
 
+    #[snafu(display("TOML serialization error: {source}"))]
+    TomlSerialize { source: toml::ser::Error },
+
     #[snafu(display("Cannot download '{name}' v{version}: network required but offline mode enabled"))]
     OfflineMode { name: String, version: String },
 
@@ -211,6 +224,16 @@ pub enum Error {
     PrebuiltBinaryRequired { name: String, version: String },
 
     #[snafu(display(
+        "Prebuilt binary required (--prebuilt-binary always) but {reason}, which requires building crate \
+         '{name}' version '{version}' from source"
+    ))]
+    PrebuiltBinaryDisqualified {
+        name: String,
+        version: String,
+        reason: String,
+    },
+
+    #[snafu(display(
         "Checksum verification failed for downloaded binary: expected {expected}, got {actual}"
     ))]
     ChecksumMismatch { expected: String, actual: String },
@@ -257,6 +280,13 @@ pub enum Error {
 
     #[snafu(display("HTTP {status} from {url}"))]
     HttpStatus { url: String, status: u16 },
+
+    #[snafu(display(
+        "Failed to prefetch {} configured tool(s): {}",
+        failures.len(),
+        failures.join("; ")
+    ))]
+    PrefetchAllFailed { failures: Vec<String> },
 
     #[snafu(display("Invalid HTTP timeout duration '{value}': {source}"))]
     InvalidHttpTimeout {

@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,11 +10,14 @@ use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, MapAccess, Visitor, value::MapAccessDeserializer},
+};
 use snafu::ResultExt;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr, VariantNames};
 
-use crate::{Result, cli::CliArgs};
+use crate::Result;
 
 const DEFAULT_RESOLVE_CACHE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -186,30 +190,123 @@ pub struct HttpConfigFile {
 ///
 /// This can be a simple version string like `"1.0"` or a more complex specification
 /// with version, features, registry, git repo, etc.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, untagged)]
+///
+/// Serialization uses serde's `untagged` representation (a bare string or a bare table).
+/// Deserialization is hand-written (see the [`Deserialize`] impl) rather than derived
+/// `untagged` so that a typo'd or mistyped key in a detailed table produces a precise error naming
+/// the offending field, instead of the opaque `data did not match any variant` that `untagged`
+/// derive emits.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
 pub enum ToolConfig {
     /// Simple version specification (e.g., "1.0", "*")
     Version(String),
     /// Detailed configuration with version, features, registry, etc.
-    Detailed {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        version: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        features: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        registry: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tag: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rev: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        path: Option<PathBuf>,
-    },
+    Detailed(ToolConfigDetailed),
+}
+
+/// The detailed (table) form of a [`ToolConfig`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolConfigDetailed {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
+    /// Whether to enable the crate's default features, matching Cargo's `default-features`
+    /// dependency key. Defaults to `true`; set to `false` to build with `--no-default-features`.
+    #[serde(
+        rename = "default-features",
+        default = "default_true",
+        skip_serializing_if = "is_true"
+    )]
+    pub default_features: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+impl<'de> Deserialize<'de> for ToolConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        struct ToolConfigVisitor;
+
+        impl<'de> Visitor<'de> for ToolConfigVisitor {
+            type Value = ToolConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a version string or a detailed tool table")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ToolConfig::Version(value.to_string()))
+            }
+
+            fn visit_map<M>(self, map: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                Ok(ToolConfig::Detailed(ToolConfigDetailed::deserialize(
+                    MapAccessDeserializer::new(map),
+                )?))
+            }
+        }
+
+        deserializer.deserialize_any(ToolConfigVisitor)
+    }
+}
+
+impl ToolConfig {
+    /// Return configured features for a [`ToolConfig::Detailed`] tool.
+    pub fn features(&self) -> Option<&[String]> {
+        match self {
+            ToolConfig::Version(_) => None,
+            ToolConfig::Detailed(ToolConfigDetailed { features, .. }) => features.as_deref(),
+        }
+    }
+
+    /// Return the configured `default-features` setting for this tool.
+    ///
+    /// `true` (the default) means the crate's default features are enabled; `false` means
+    /// building with default features disabled, equivalent to `--no-default-features`.
+    pub fn default_features(&self) -> bool {
+        match self {
+            ToolConfig::Version(_) => true,
+            ToolConfig::Detailed(ToolConfigDetailed { default_features, .. }) => *default_features,
+        }
+    }
+}
+
+/// Predicate for `skip_serializing_if` on the `default-features` field, so the default `true` is
+/// omitted from rendered config; named because serde's attribute requires a function path.
+///
+/// Yes, an `is_true(bool) -> bool` function is like a particularly stupid Daily WTF episode,
+/// but unfortunately it's necessary here.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// Default for the `default-features` field of [`ToolConfig::Detailed`]; named because serde's
+/// `default` attribute requires a function path.
+///
+/// This maybe even dumber than [`is_true`], but again this needs to be in a form of a function not
+/// a constant so here we are.
+fn default_true() -> bool {
+    true
 }
 
 /// Intermediate structure for deserializing config files from TOML.
@@ -319,7 +416,6 @@ where
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Directory where config files are stored
-    #[allow(dead_code)]
     pub config_dir: PathBuf,
 
     /// The cache directory where various levels of cache are located
@@ -346,8 +442,13 @@ pub struct Config {
     /// Rust toolchain to use for building (e.g., "nightly", "1.70.0", "stable")
     pub toolchain: Option<String>,
 
-    /// Logging verbosity level (e.g., "info", "debug", "trace")
+    /// Logging filter expression from the config file (e.g., "info", "debug", "cgx=debug,info").
     pub log_level: Option<String>,
+
+    /// Logging/build verbosity from the repeated `-v` CLI flag.
+    ///
+    /// The single source from which both the tracing level and cargo's `-v` count are derived.
+    pub verbosity: Verbosity,
 
     /// Default registry to use instead of crates.io when no registry is explicitly specified
     pub default_registry: Option<String>,
@@ -384,6 +485,7 @@ impl Default for Config {
             refresh: false,
             toolchain: None,
             log_level: None,
+            verbosity: Verbosity::default(),
             default_registry: None,
             prebuilt_binaries: PrebuiltBinariesConfig::default(),
             http: HttpConfig::default(),
@@ -391,6 +493,118 @@ impl Default for Config {
             aliases: HashMap::default(),
         }
     }
+}
+
+/// How the lockfile should be treated, collapsed from the mutually-exclusive
+/// `--locked`/`--frozen`/`--unlocked` command-line flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LockMode {
+    /// No lockfile flag was given; fall back to the config-file setting (default locked).
+    #[default]
+    Default,
+    /// `--locked`: honor `Cargo.lock`.
+    Locked,
+    /// `--frozen`: equivalent to `--locked` plus `--offline`.
+    Frozen,
+    /// `--unlocked`: ignore `Cargo.lock` and resolve dependencies fresh.
+    Unlocked,
+}
+
+/// Logging/build verbosity
+///
+/// Represents both how verbose `cgx`'s own log output should be, and also how verbose the `cargo
+/// build` output should be.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Verbosity {
+    /// Default: warnings and errors only (no `-v`).
+    #[default]
+    Normal,
+    /// `-v`: informational logging; one `-v` to cargo.
+    Verbose,
+    /// `-vv`: debug logging; two `-v`s to cargo.
+    VeryVerbose,
+    /// `-vvv` or more: trace logging; three `-v`s to cargo.
+    ExtremelyVerbose,
+}
+
+impl Verbosity {
+    /// Construct a [`Verbosity`] from the repeated-`-v` counter (clap's `ArgAction::Count`).
+    pub fn from_count(count: u8) -> Self {
+        match count {
+            0 => Self::Normal,
+            1 => Self::Verbose,
+            2 => Self::VeryVerbose,
+            _ => Self::ExtremelyVerbose,
+        }
+    }
+}
+
+/// Configuration overrides supplied on the command line.
+///
+/// This is the config-layer input to [`Config::load`]: it carries the subset of parsed arguments
+/// that influence configuration loading.  This is meant to be populated from the CLI arguments,
+/// without coupling this layer to the actual CLI or `clap`.
+#[derive(Clone, Debug, Default)]
+pub struct ConfigOverrides {
+    /// Read configuration from this TOML file only, bypassing the usual search paths
+    /// (`--config-file`).
+    pub config_file: Option<PathBuf>,
+
+    /// Override the system config directory location (`--system-config-dir`).
+    pub system_config_dir: Option<PathBuf>,
+
+    /// Override the base application directory (`--app-dir`).
+    pub app_dir: Option<PathBuf>,
+
+    /// Override the user config directory location (`--user-config-dir`).
+    pub user_config_dir: Option<PathBuf>,
+
+    /// HTTP request timeout as a raw string (e.g. `"30s"`, `"2m"`), parsed by [`Config`]
+    /// (`--http-timeout`).
+    pub http_timeout: Option<String>,
+
+    /// Maximum number of retries for transient HTTP failures (`--http-retries`).
+    pub http_retries: Option<usize>,
+
+    /// HTTP or SOCKS5 proxy URL for all HTTP requests (`--http-proxy`).
+    pub http_proxy: Option<String>,
+
+    /// How the lockfile should be treated (`--locked`/`--frozen`/`--unlocked`).
+    pub lockfile: LockMode,
+
+    /// Run without accessing the network (`--offline`); combines with [`Self::lockfile`].
+    pub offline: bool,
+
+    /// Force refresh of all cached data for this crate (`--refresh`).
+    pub refresh: bool,
+
+    /// Control use of pre-built binaries: never, always, or auto (`--prebuilt-binary`).
+    pub prebuilt_binary: Option<UsePrebuiltBinaries>,
+
+    /// Override the binary providers to check for pre-built binaries (`--prebuilt-binary-sources`).
+    pub prebuilt_binary_sources: Option<Vec<BinaryProvider>>,
+
+    /// Disable checksum verification when downloading pre-built binaries
+    /// (`--prebuilt-binary-no-verify-checksums`).
+    pub prebuilt_binary_no_verify_checksums: bool,
+
+    /// Disable signature verification when downloading pre-built binaries
+    /// (`--prebuilt-binary-no-verify-signatures`).
+    pub prebuilt_binary_no_verify_signatures: bool,
+
+    /// Logging/build verbosity from the repeated `-v` flag.
+    pub verbosity: Verbosity,
+}
+
+/// One distinct tool referenced in the config TOML `[tools]` and possibly also `[aliases]`
+/// sections
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConfiguredTool {
+    /// The crate name as it appeared in the `[tools]` section
+    pub(crate) name: String,
+    /// The aliases that resolve to this tool (from the `[aliases]` section), sorted, excluding the
+    /// name itself.
+    pub(crate) aliases: Vec<String>,
 }
 
 impl Config {
@@ -403,21 +617,109 @@ impl Config {
     /// 3. User config file
     /// 4. Directory hierarchy config files (from root to current directory)
     /// 5. Command-line arguments (highest priority)
-    pub fn load(args: &CliArgs) -> Result<Self> {
+    pub fn load(overrides: &ConfigOverrides) -> Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        Self::load_from_dir(&cwd, args)
+        Self::load_from_dir(&cwd, overrides)
+    }
+
+    /// Render the merged configured tools and aliases as deterministic TOML.
+    ///
+    /// Both the `[tools]` and `[aliases]` headers are always present (even when empty), so the
+    /// output is a stable template a user can copy and edit. Each section's presence is decided
+    /// from the data (whether the map is empty), not by scanning the serializer's output.
+    pub fn tools_toml(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct ToolsSection<'a> {
+            tools: BTreeMap<&'a String, &'a ToolConfig>,
+        }
+        #[derive(Serialize)]
+        struct AliasesSection<'a> {
+            aliases: BTreeMap<&'a String, &'a String>,
+        }
+
+        /// Guarantee that a serialized section starts with its bare `[section]` header.
+        ///
+        /// `toml` only emits the bare `[tools]`/`[aliases]` line when a section has at least one
+        /// scalar entry; a section whose entries are all subtables (only detailed tool tables)
+        /// would otherwise start at `[tools.<name>]`. Prepending keeps the section visible and the
+        /// output a stable, editable template, without depending on how the serializer orders or
+        /// omits empty tables.
+        fn ensure_section_header(section: &str, body: String) -> String {
+            let header = format!("[{section}]");
+            if body.starts_with(&header) {
+                body
+            } else {
+                format!("{header}\n{body}")
+            }
+        }
+
+        let tools = if self.tools.is_empty() {
+            "[tools]\n".to_string()
+        } else {
+            let body = toml::to_string_pretty(&ToolsSection {
+                tools: self.sorted_tools(),
+            })
+            .context(crate::error::TomlSerializeSnafu)?;
+            ensure_section_header("tools", body)
+        };
+
+        let aliases = if self.aliases.is_empty() {
+            "[aliases]\n".to_string()
+        } else {
+            let body = toml::to_string_pretty(&AliasesSection {
+                aliases: self.sorted_aliases(),
+            })
+            .context(crate::error::TomlSerializeSnafu)?;
+            ensure_section_header("aliases", body)
+        };
+
+        Ok(format!("{tools}\n{aliases}"))
+    }
+
+    /// The configured tools in deterministic (key-sorted) order.
+    ///
+    /// The single source of ordering for both [`Config::tools_toml`] and `--list-tools` message
+    /// emission.
+    pub(crate) fn sorted_tools(&self) -> BTreeMap<&String, &ToolConfig> {
+        self.tools.iter().collect()
+    }
+
+    /// The configured aliases in deterministic (key-sorted) order.
+    pub(crate) fn sorted_aliases(&self) -> BTreeMap<&String, &String> {
+        self.aliases.iter().collect()
+    }
+
+    /// Group every configured tool and alias by the tool it resolves to, applying the same
+    /// single-step alias resolution as [`crate::cratespec::CrateSpec::load`].
+    ///
+    /// Each distinct resolved crate appears once, so `--prefetch-all` prefetches it a single time
+    /// regardless of how many aliases point at it.
+    pub(crate) fn configured_tools(&self) -> Vec<ConfiguredTool> {
+        let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for name in self.tools.keys().chain(self.aliases.keys()) {
+            let resolved = self.aliases.get(name).unwrap_or(name);
+            groups.entry(resolved.clone()).or_default().insert(name.clone());
+        }
+
+        groups
+            .into_iter()
+            .map(|(name, members)| {
+                let aliases = members.into_iter().filter(|member| *member != name).collect();
+                ConfiguredTool { name, aliases }
+            })
+            .collect()
     }
 
     /// Load config from the CLI args and a specified directory which may or may not contain config
     /// files.
-    pub fn load_from_dir(cwd: &Path, args: &CliArgs) -> Result<Self> {
+    pub fn load_from_dir(cwd: &Path, overrides: &ConfigOverrides) -> Result<Self> {
         let strategy = Self::get_user_dirs()?;
 
         // Start with base config defaults, then merge config files
         let mut figment = Figment::new().merge(Serialized::defaults(ConfigFile::base_config()));
 
-        for config_file in Self::discover_config_files(cwd, args)? {
+        for config_file in Self::discover_config_files(cwd, overrides)? {
             figment = figment.merge(Toml::file(config_file));
         }
 
@@ -427,42 +729,42 @@ impl Config {
         // Override the config file values using any CLI args that were specified
 
         // locked: --unlocked > --locked/--frozen > config > default(true)
-        let locked = if args.unlocked {
-            false
-        } else if args.locked || args.frozen {
-            true
-        } else {
-            config_file.locked.unwrap_or(true)
+        let locked = match overrides.lockfile {
+            LockMode::Unlocked => false,
+            LockMode::Locked | LockMode::Frozen => true,
+            LockMode::Default => config_file.locked.unwrap_or(true),
         };
 
         // offline: --offline/--frozen > config > default(false)
-        let offline = if args.offline || args.frozen {
+        let offline = if overrides.offline || overrides.lockfile == LockMode::Frozen {
             true
         } else {
             config_file.offline.unwrap_or(false)
         };
 
-        // toolchain: CLI > config
-        let toolchain = args.toolchain.clone().or(config_file.toolchain);
+        // The toolchain comes only from the config file here. The CLI `+toolchain` token is
+        // applied later as a `BuildOverride`, not a `ConfigOverride` (`ConfigOverrides` has no
+        // toolchain field), so there is no CLI value to consider at this point.
+        let toolchain = config_file.toolchain;
 
         // Determine config_dir based on override precedence
-        let config_dir = if let Some(user_config_dir) = &args.user_config_dir {
+        let config_dir = if let Some(user_config_dir) = &overrides.user_config_dir {
             user_config_dir.clone()
-        } else if let Some(app_dir) = &args.app_dir {
+        } else if let Some(app_dir) = &overrides.app_dir {
             app_dir.join("config")
         } else {
             strategy.config_dir()
         };
 
         // Determine cache_dir: CLI (app-dir) > config file > strategy
-        let cache_dir = if let Some(app_dir) = &args.app_dir {
+        let cache_dir = if let Some(app_dir) = &overrides.app_dir {
             app_dir.join("cache")
         } else {
             config_file.cache_dir.unwrap_or_else(|| strategy.cache_dir())
         };
 
         // Determine bin_dir: CLI (app-dir) > config file > strategy
-        let bin_dir = if let Some(app_dir) = &args.app_dir {
+        let bin_dir = if let Some(app_dir) = &overrides.app_dir {
             app_dir.join("bins")
         } else {
             config_file
@@ -471,7 +773,7 @@ impl Config {
         };
 
         // Determine build_dir: CLI (app-dir) > config file > strategy
-        let build_dir = if let Some(app_dir) = &args.app_dir {
+        let build_dir = if let Some(app_dir) = &overrides.app_dir {
             app_dir.join("build")
         } else {
             config_file
@@ -482,16 +784,16 @@ impl Config {
         let mut prebuilt_binaries = config_file.prebuilt_binaries.unwrap_or_default();
 
         // Apply CLI overrides for prebuilt binaries
-        if let Some(mode) = args.prebuilt_binary {
+        if let Some(mode) = overrides.prebuilt_binary {
             prebuilt_binaries.use_prebuilt_binaries = mode;
         }
-        if let Some(ref providers) = args.prebuilt_binary_sources {
+        if let Some(ref providers) = overrides.prebuilt_binary_sources {
             prebuilt_binaries.binary_providers = providers.clone();
         }
-        if args.prebuilt_binary_no_verify_checksums {
+        if overrides.prebuilt_binary_no_verify_checksums {
             prebuilt_binaries.verify_checksums = false;
         }
-        if args.prebuilt_binary_no_verify_signatures {
+        if overrides.prebuilt_binary_no_verify_signatures {
             prebuilt_binaries.verify_signatures = false;
         }
 
@@ -504,7 +806,7 @@ impl Config {
 
         // Build HTTP config with precedence: CLI > config file > Cargo env vars > defaults
         let http_config_file = config_file.http.unwrap_or_default();
-        let http = Self::build_http_config(&http_config_file, args)?;
+        let http = Self::build_http_config(&http_config_file, overrides)?;
 
         Ok(Self {
             config_dir,
@@ -516,9 +818,10 @@ impl Config {
                 .unwrap_or(DEFAULT_RESOLVE_CACHE_TIMEOUT),
             offline,
             locked,
-            refresh: args.refresh,
+            refresh: overrides.refresh,
             toolchain,
             log_level: config_file.log_level,
+            verbosity: overrides.verbosity,
             default_registry: config_file.default_registry,
             prebuilt_binaries,
             http,
@@ -536,16 +839,16 @@ impl Config {
     /// 2. User config: `$XDG_CONFIG_HOME/cgx/cgx.toml` or platform equivalent (or override
     ///    location)
     /// 3. Directory hierarchy: All `cgx.toml` files from filesystem root to current directory
-    fn discover_config_files(cwd: &Path, args: &CliArgs) -> Result<Vec<PathBuf>> {
+    fn discover_config_files(cwd: &Path, overrides: &ConfigOverrides) -> Result<Vec<PathBuf>> {
         let mut config_files = Vec::new();
 
         // If the user explicitly specified a config file, read ONLY that file
-        if let Some(config_path) = &args.config_file {
+        if let Some(config_path) = &overrides.config_file {
             return Ok(vec![config_path.clone()]);
         }
 
         // System config (can be overridden)
-        if let Some(system_config_dir) = &args.system_config_dir {
+        if let Some(system_config_dir) = &overrides.system_config_dir {
             let system_config = system_config_dir.join("cgx.toml");
             if system_config.exists() {
                 config_files.push(system_config);
@@ -571,10 +874,10 @@ impl Config {
         }
 
         // User config (can be overridden via user-config-dir or app-dir)
-        let user_config = if let Some(user_config_dir) = &args.user_config_dir {
+        let user_config = if let Some(user_config_dir) = &overrides.user_config_dir {
             // Most specific: explicit user config directory
             user_config_dir.join("cgx.toml")
-        } else if let Some(app_dir) = &args.app_dir {
+        } else if let Some(app_dir) = &overrides.app_dir {
             // App dir provides a base for config
             app_dir.join("config").join("cgx.toml")
         } else {
@@ -610,15 +913,15 @@ impl Config {
     }
 
     /// Build [`HttpConfig`] with proper precedence:
-    /// 1. CLI args (highest priority)
+    /// 1. CLI config overrides (highest priority)
     /// 2. Config file values
     /// 3. Cargo environment variable fallbacks
     /// 4. Defaults (lowest priority)
-    fn build_http_config(config_file: &HttpConfigFile, args: &CliArgs) -> Result<HttpConfig> {
+    fn build_http_config(config_file: &HttpConfigFile, overrides: &ConfigOverrides) -> Result<HttpConfig> {
         // Determine if CLI args were provided (they override everything)
-        let cli_timeout = args.http_timeout.as_ref();
-        let cli_retries = args.http_retries;
-        let cli_proxy = args.http_proxy.as_ref();
+        let cli_timeout = overrides.http_timeout.as_ref();
+        let cli_retries = overrides.http_retries;
+        let cli_proxy = overrides.http_proxy.as_ref();
 
         // timeout: CLI > config > CARGO_HTTP_TIMEOUT > default
         let timeout = if let Some(timeout_str) = cli_timeout {
@@ -709,16 +1012,19 @@ pub(crate) fn create_test_env() -> (tempfile::TempDir, Config) {
 mod tests {
     use std::path::Path;
 
+    use assert_matches::assert_matches;
+
     use super::*;
+    use crate::cli::Cli;
 
     /// Apply test-local config directory overrides so config loading cannot read
     /// host-level `/etc/cgx.toml` or user-level cgx config on the machine running tests.
     ///
     /// This keeps tests deterministic on developer systems that actively use cgx.
-    fn with_isolated_global_config(mut args: CliArgs, root: &Path) -> CliArgs {
-        args.system_config_dir = Some(root.join("system"));
-        args.user_config_dir = Some(root.join("user"));
-        args
+    fn with_isolated_global_config(mut overrides: ConfigOverrides, root: &Path) -> ConfigOverrides {
+        overrides.system_config_dir = Some(root.join("system"));
+        overrides.user_config_dir = Some(root.join("user"));
+        overrides
     }
 
     #[test]
@@ -804,14 +1110,86 @@ mod tests {
         let tools = config.tools.unwrap();
 
         match tools.get("taplo-cli") {
-            Some(ToolConfig::Detailed {
+            Some(ToolConfig::Detailed(ToolConfigDetailed {
                 version, features, ..
-            }) => {
+            })) => {
                 assert_eq!(*version, Some("1.11.0".to_string()));
                 assert_eq!(*features, Some(vec!["schema".to_string()]));
             }
             _ => panic!("Expected Detailed tool config"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_tools_default_features() {
+        // `default-features` (hyphenated, matching Cargo) is accepted and parsed.
+        let toml_content = r#"
+            [tools]
+            no-defaults = { version = "1.0", default-features = false }
+            with-defaults = { version = "1.0" }
+        "#;
+
+        let config: ConfigFile = toml::from_str(toml_content).unwrap();
+        let tools = config.tools.unwrap();
+
+        // Explicit `default-features = false` is captured.
+        assert!(!tools.get("no-defaults").unwrap().default_features());
+
+        // When the key is absent it defaults to `true`, matching Cargo's default.
+        assert!(tools.get("with-defaults").unwrap().default_features());
+
+        // The legacy underscore spelling is rejected; we accept only the hyphenated Cargo form.
+        let underscore = r#"
+            [tools]
+            nope = { version = "1.0", default_features = false }
+        "#;
+        assert_matches!(toml::from_str::<ConfigFile>(underscore), Err(_));
+    }
+
+    #[test]
+    fn test_default_features_round_trips_via_tools_toml() {
+        let mut config = Config::default();
+        config.tools.insert(
+            "no-defaults".to_string(),
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: false,
+                version: Some("1.0".to_string()),
+                features: None,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            }),
+        );
+        config.tools.insert(
+            "with-defaults".to_string(),
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
+                version: Some("1.0".to_string()),
+                features: None,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            }),
+        );
+
+        let rendered = config.tools_toml().unwrap();
+
+        // `default-features = false` is rendered with the hyphenated Cargo key, while the default
+        // `true` is omitted entirely thanks to `skip_serializing_if`.
+        assert!(rendered.contains("default-features = false"));
+        assert!(!rendered.contains("default-features = true"));
+
+        // The setting survives a round-trip back through the parser.
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        let tools = parsed.tools.unwrap();
+        assert!(!tools.get("no-defaults").unwrap().default_features());
+        assert!(tools.get("with-defaults").unwrap().default_features());
     }
 
     #[test]
@@ -829,9 +1207,240 @@ mod tests {
     }
 
     #[test]
+    fn test_tools_toml_is_sorted_and_valid() {
+        let mut config = Config::default();
+        config
+            .tools
+            .insert("zeta".to_string(), ToolConfig::Version("2".to_string()));
+        config
+            .tools
+            .insert("alpha".to_string(), ToolConfig::Version("1".to_string()));
+        config.tools.insert(
+            "beta".to_string(),
+            ToolConfig::Detailed(ToolConfigDetailed {
+                default_features: true,
+                version: Some("1.5".to_string()),
+                features: Some(vec!["frobnulator".to_string()]),
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            }),
+        );
+        config.aliases.insert("zz".to_string(), "zeta".to_string());
+        config.aliases.insert("aa".to_string(), "alpha".to_string());
+
+        let rendered = config.tools_toml().unwrap();
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+
+        let tools = parsed.tools.unwrap();
+        assert_eq!(tools.get("alpha"), Some(&ToolConfig::Version("1".to_string())));
+        assert_eq!(tools.get("zeta"), Some(&ToolConfig::Version("2".to_string())));
+        assert_matches!(
+            tools.get("beta"),
+            Some(ToolConfig::Detailed(ToolConfigDetailed {
+                version: Some(version),
+                features: Some(features),
+                ..
+            })) if version == "1.5" && features == &vec!["frobnulator".to_string()]
+        );
+
+        let aliases = parsed.aliases.unwrap();
+        assert_eq!(aliases.get("aa"), Some(&"alpha".to_string()));
+        assert_eq!(aliases.get("zz"), Some(&"zeta".to_string()));
+
+        assert!(rendered.find("alpha").unwrap() < rendered.find("zeta").unwrap());
+        assert!(rendered.find("aa").unwrap() < rendered.find("zz").unwrap());
+    }
+
+    fn config_with(tools: &[&str], aliases: &[(&str, &str)]) -> Config {
+        let mut config = Config::default();
+        for &tool in tools {
+            config
+                .tools
+                .insert(tool.to_string(), ToolConfig::Version("*".to_string()));
+        }
+        for &(name, target) in aliases {
+            config.aliases.insert(name.to_string(), target.to_string());
+        }
+        config
+    }
+
+    #[test]
+    fn configured_tools_groups_alias_with_its_tool() {
+        let config = config_with(&["eza"], &[("e", "eza")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_alias_to_unconfigured_crate_yields_its_target() {
+        let config = config_with(&[], &[("x", "ripgrep")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "ripgrep".to_string(),
+                aliases: vec!["x".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_groups_multiple_aliases_under_one_tool() {
+        let config = config_with(&["eza"], &[("e", "eza"), ("ez", "eza")]);
+        assert_eq!(
+            config.configured_tools(),
+            [ConfiguredTool {
+                name: "eza".to_string(),
+                aliases: vec!["e".to_string(), "ez".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_tools_are_deterministically_ordered() {
+        let config = config_with(&["zoxide", "eza"], &[("a", "zoxide")]);
+        let names: Vec<_> = config
+            .configured_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(names, ["eza", "zoxide"]);
+    }
+
+    #[test]
+    fn configured_tools_keep_independent_tools_separate() {
+        let config = config_with(&["eza", "ripgrep"], &[]);
+        assert_eq!(
+            config.configured_tools(),
+            [
+                ConfiguredTool {
+                    name: "eza".to_string(),
+                    aliases: Vec::new(),
+                },
+                ConfiguredTool {
+                    name: "ripgrep".to_string(),
+                    aliases: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tools_toml_empty_config_still_renders_both_headers() {
+        let rendered = Config::default().tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"), "missing [tools] in:\n{rendered}");
+        assert!(
+            rendered.contains("[aliases]"),
+            "missing [aliases] in:\n{rendered}"
+        );
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap_or_default().is_empty());
+        assert!(parsed.aliases.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn tools_toml_tools_only_still_renders_aliases_header() {
+        let config = config_with(&["ripgrep"], &[]);
+        let rendered = config.tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"));
+        assert!(rendered.contains("[aliases]"));
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap().contains_key("ripgrep"));
+    }
+
+    #[test]
+    fn tools_toml_aliases_only_still_renders_tools_header() {
+        let config = config_with(&[], &[("rg", "ripgrep")]);
+        let rendered = config.tools_toml().unwrap();
+        assert!(rendered.contains("[tools]"));
+        assert!(rendered.contains("[aliases]"));
+
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert_eq!(parsed.aliases.unwrap().get("rg"), Some(&"ripgrep".to_string()));
+    }
+
+    #[test]
+    fn tools_toml_all_detailed_entries_still_render_bare_tools_header() {
+        let mut config = Config::default();
+        config.tools.insert(
+            "only-detailed".to_string(),
+            ToolConfig::Detailed(ToolConfigDetailed {
+                version: Some("1.0".to_string()),
+                features: Some(vec!["x".to_string()]),
+                default_features: true,
+                registry: None,
+                git: None,
+                branch: None,
+                tag: None,
+                rev: None,
+                path: None,
+            }),
+        );
+
+        let rendered = config.tools_toml().unwrap();
+
+        // Even when every tool is a subtable (`[tools.only-detailed]`), the bare `[tools]` header
+        // is present so the section is always visible and the output is a stable template.
+        assert!(
+            rendered.lines().any(|line| line.trim() == "[tools]"),
+            "missing bare [tools] header in:\n{rendered}"
+        );
+        let parsed: ConfigFile = toml::from_str(&rendered).unwrap();
+        assert!(parsed.tools.unwrap().contains_key("only-detailed"));
+    }
+
+    #[test]
+    fn tool_config_unknown_key_error_names_the_field() {
+        let toml_content = r#"
+            [tools]
+            ripgrep = { versio = "14" }
+        "#;
+        let error = toml::from_str::<ConfigFile>(toml_content)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("versio"),
+            "error did not name the bad key:\n{error}"
+        );
+        assert!(
+            !error.contains("did not match any variant"),
+            "error was the opaque untagged message:\n{error}"
+        );
+    }
+
+    #[test]
+    fn tool_config_type_mismatch_error_is_precise() {
+        let toml_content = r#"
+            [tools]
+            ripgrep = { default-features = "false" }
+        "#;
+        let error = toml::from_str::<ConfigFile>(toml_content)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("boolean"),
+            "error did not describe the expected type:\n{error}"
+        );
+        assert!(
+            !error.contains("did not match any variant"),
+            "error was the opaque untagged message:\n{error}"
+        );
+    }
+
+    #[test]
     fn test_config_defaults() {
-        let args = CliArgs::parse_from_test_args(["test-crate"]);
-        let config = Config::load(&args).unwrap();
+        let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+        let config = Config::load(&config_overrides).unwrap();
 
         assert!(!config.offline);
         assert!(config.locked); // Default is true per issue #55
@@ -841,18 +1450,29 @@ mod tests {
 
     #[test]
     fn test_cli_overrides() {
-        let args = CliArgs::parse_from_test_args(["+nightly", "--offline", "--locked", "test-crate"]);
-        let config = Config::load(&args).unwrap();
+        let cli = Cli::parse_from_test_args(["+nightly", "--offline", "--locked", "test-crate"]);
+        let config_overrides = cli.to_config_overrides();
+        let config = Config::load(&config_overrides).unwrap();
+        let build_overrides = if let Cli::Run { args, .. } = cli {
+            args.to_build_overrides()
+        } else {
+            panic!("Expected Run command")
+        };
 
         assert!(config.offline);
         assert!(config.locked);
-        assert_eq!(config.toolchain, Some("nightly".to_string()));
+        // NOTE: In `config`, the +nightly toolchain from the command line isn't specified, as this
+        // is considered to be a build override and not a config option.  Since these tests run
+        // without any config files, `config.toolchain` is expected to be the default of `None`,
+        // whiel the CLI-provided toolchain is reflected in the build options.
+        assert_eq!(config.toolchain, None);
+        assert_eq!(build_overrides.toolchain, Some("nightly".to_string()));
     }
 
     #[test]
     fn test_frozen_implies_locked_and_offline() {
-        let args = CliArgs::parse_from_test_args(["--frozen", "test-crate"]);
-        let config = Config::load(&args).unwrap();
+        let config_overrides = Cli::parse_from_test_args(["--frozen", "test-crate"]).to_config_overrides();
+        let config = Config::load(&config_overrides).unwrap();
 
         assert!(config.offline);
         assert!(config.locked);
@@ -932,8 +1552,8 @@ mod tests {
             "#;
 
             let temp_dir = create_temp_config(toml_content);
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let result = Config::load_from_dir(temp_dir.path(), &args);
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let result = Config::load_from_dir(temp_dir.path(), &config_overrides);
             assert_matches!(result, Err(crate::error::Error::NoProvidersConfigured));
         }
 
@@ -946,8 +1566,8 @@ mod tests {
             "#;
 
             let temp_dir = create_temp_config(toml_content);
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let result = Config::load_from_dir(temp_dir.path(), &args);
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let result = Config::load_from_dir(temp_dir.path(), &config_overrides);
             assert_matches!(result, Err(crate::error::Error::NoProvidersConfigured));
         }
 
@@ -960,8 +1580,8 @@ mod tests {
             "#;
 
             let temp_dir = create_temp_config(toml_content);
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let result = Config::load_from_dir(temp_dir.path(), &args);
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let result = Config::load_from_dir(temp_dir.path(), &config_overrides);
             assert!(result.is_ok(), "Empty providers with 'never' mode should succeed");
         }
     }
@@ -975,6 +1595,7 @@ mod tests {
         use assert_matches::assert_matches;
 
         use super::*;
+        use crate::builder::BuildOptions;
 
         /// Test loading config from a 3-level hierarchy (root → work → project1).
         ///
@@ -986,8 +1607,8 @@ mod tests {
         fn test_config_hierarchy_project1() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_project1();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(3 * 60));
 
@@ -1014,8 +1635,8 @@ mod tests {
         fn test_config_hierarchy_project2() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_project2();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(5 * 60));
 
@@ -1041,8 +1662,8 @@ mod tests {
         fn test_config_hierarchy_work() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_work();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(2 * 60));
 
@@ -1067,8 +1688,8 @@ mod tests {
         fn test_config_hierarchy_root() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_root();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(60));
 
@@ -1093,10 +1714,10 @@ mod tests {
         fn test_explicit_config_file() {
             let test_case = crate::testdata::ConfigTestCase::explicit_non_standard_name();
 
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(test_case.path().to_path_buf());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(test_case.path().to_path_buf());
 
-            let config = Config::load(&args).unwrap();
+            let config = Config::load(&config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(6 * 60));
 
@@ -1119,17 +1740,17 @@ mod tests {
         fn test_tools_detailed_config_preserved() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_root();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
 
             let taplo_tool = config.tools.get("taplo-cli").unwrap();
             assert_matches!(
                 taplo_tool,
-                ToolConfig::Detailed {
+                ToolConfig::Detailed(ToolConfigDetailed {
                     version: Some(v),
                     features: Some(f),
                     ..
-                } if v == "1.11.0" && f == &vec!["schema".to_string()]
+                }) if v == "1.11.0" && f == &vec!["schema".to_string()]
             );
         }
 
@@ -1142,12 +1763,25 @@ mod tests {
         fn test_cli_args_override_config_files() {
             let test_case = crate::testdata::ConfigTestCase::hierarchy_project1();
 
-            let args = CliArgs::parse_from_test_args(["+stable", "--offline", "--locked", "test-crate"]);
-            let config = Config::load_from_dir(test_case.path(), &args).unwrap();
+            // NOTE: `+stable` is the toolchain specification; this doesn't go in config overrides
+            // but in build overrides.
+            let cli = Cli::parse_from_test_args(["+stable", "--offline", "--locked", "test-crate"]);
+            let config_overrides = cli.to_config_overrides();
+            let build_overrides = if let Cli::Run { args, .. } = cli {
+                args.to_build_overrides()
+            } else {
+                panic!("Expected Run command")
+            };
+            let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
+            let build_options = BuildOptions::load(&config, &build_overrides).unwrap();
 
             assert!(config.offline);
             assert!(config.locked);
-            assert_eq!(config.toolchain, Some("stable".to_string()));
+
+            // `+stable` doesn't override the config (because we don't consider the toolchain a
+            // config override), but it overrides the build options
+            assert_eq!(config.toolchain, None);
+            assert_eq!(build_options.toolchain, Some("stable".to_string()));
         }
 
         /// Test that --config-file reads only the specified file.
@@ -1164,10 +1798,10 @@ mod tests {
             let explicit_config = crate::testdata::ConfigTestCase::explicit_non_standard_name();
 
             // Load config from project1 directory but with --config-file pointing to explicit config
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(explicit_config.path().to_path_buf());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(explicit_config.path().to_path_buf());
 
-            let config = Config::load_from_dir(hierarchy_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(hierarchy_dir.path(), &config_overrides).unwrap();
 
             // Should have the explicit config's timeout (6m), not any from the hierarchy (1m/2m/3m)
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(6 * 60));
@@ -1248,10 +1882,10 @@ mod tests {
             };
 
             // Test with --config-file
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(explicit_config.clone());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(explicit_config.clone());
 
-            let discovered = Config::discover_config_files(&sub_dir, &args).unwrap();
+            let discovered = Config::discover_config_files(&sub_dir, &config_overrides).unwrap();
 
             // Should contain ONLY the explicit config file (no system, user, or hierarchy configs)
             // This will FAIL if the bug exists, showing [user_config, explicit_config]
@@ -1280,8 +1914,8 @@ mod tests {
             let sub_config = sub_dir.join("cgx.toml");
             fs::write(&sub_config, "resolve_cache_timeout = \"2m\"").unwrap();
 
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let discovered = Config::discover_config_files(&sub_dir, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let discovered = Config::discover_config_files(&sub_dir, &config_overrides).unwrap();
 
             // Should contain both hierarchy configs (and possibly system/user if they exist)
             // We check that at least our two configs are present
@@ -1319,11 +1953,11 @@ mod tests {
                 let user_config_dir = temp_dir.path().join("user");
                 fs::create_dir_all(&user_config_dir).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.system_config_dir = Some(system_config_dir);
-                args.user_config_dir = Some(user_config_dir);
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.system_config_dir = Some(system_config_dir);
+                config_overrides.user_config_dir = Some(user_config_dir);
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.resolve_cache_timeout, Duration::from_secs(5 * 60));
             }
 
@@ -1352,11 +1986,11 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.system_config_dir = Some(system_config_dir);
-                args.user_config_dir = Some(user_config_dir);
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.system_config_dir = Some(system_config_dir);
+                config_overrides.user_config_dir = Some(user_config_dir);
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 // User config should override system config
                 assert_eq!(config.resolve_cache_timeout, Duration::from_secs(20 * 60));
             }
@@ -1376,10 +2010,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.resolve_cache_timeout, Duration::from_secs(7 * 60));
                 assert_eq!(config.config_dir, config_dir);
             }
@@ -1391,10 +2025,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.cache_dir, app_dir.join("cache"));
             }
 
@@ -1405,10 +2039,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.bin_dir, app_dir.join("bins"));
             }
 
@@ -1419,10 +2053,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.build_dir, app_dir.join("build"));
             }
 
@@ -1433,10 +2067,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
 
                 // All directories should be under app_dir
                 assert!(config.config_dir.starts_with(&app_dir));
@@ -1459,10 +2093,10 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.user_config_dir = Some(user_config_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.user_config_dir = Some(user_config_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
                 assert_eq!(config.resolve_cache_timeout, Duration::from_secs(8 * 60));
                 assert_eq!(config.config_dir, user_config_dir);
             }
@@ -1489,11 +2123,11 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
-                args.user_config_dir = Some(user_config_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
+                config_overrides.user_config_dir = Some(user_config_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
 
                 // user_config_dir should override app_dir for config location
                 assert_eq!(config.resolve_cache_timeout, Duration::from_secs(11 * 60));
@@ -1541,12 +2175,12 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.system_config_dir = Some(system_config_dir);
-                args.app_dir = Some(app_dir.clone());
-                args.user_config_dir = Some(user_config_dir.clone());
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.system_config_dir = Some(system_config_dir);
+                config_overrides.app_dir = Some(app_dir.clone());
+                config_overrides.user_config_dir = Some(user_config_dir.clone());
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
 
                 // Should have merged tools from all configs
                 assert!(config.tools.contains_key("system_tool"));
@@ -1581,10 +2215,10 @@ mod tests {
                 fs::create_dir_all(&sub).unwrap();
                 fs::write(sub.join("cgx.toml"), "[tools]\nsub_tool = \"1\"").unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir);
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir);
 
-                let config = Config::load_from_dir(&sub, &args).unwrap();
+                let config = Config::load_from_dir(&sub, &config_overrides).unwrap();
 
                 // Should have tools from both hierarchy configs
                 assert!(config.tools.contains_key("root_tool"));
@@ -1614,11 +2248,11 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-                args.app_dir = Some(app_dir.clone());
-                args.config_file = Some(config_file);
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+                config_overrides.app_dir = Some(app_dir.clone());
+                config_overrides.config_file = Some(config_file);
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
 
                 // CLI --app-dir should win over config file settings
                 assert_eq!(config.cache_dir, app_dir.join("cache"));
@@ -1643,11 +2277,11 @@ mod tests {
                 let cwd = temp_dir.path().join("work");
                 fs::create_dir_all(&cwd).unwrap();
 
-                let mut args = CliArgs::parse_from_test_args(["test-crate"]);
+                let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
                 // No --app-dir specified
-                args.config_file = Some(config_file);
+                config_overrides.config_file = Some(config_file);
 
-                let config = Config::load_from_dir(&cwd, &args).unwrap();
+                let config = Config::load_from_dir(&cwd, &config_overrides).unwrap();
 
                 // Config file paths should be used when --app-dir is not specified
                 assert_eq!(config.cache_dir, temp_dir.path().join("my-cache"));
@@ -1752,11 +2386,11 @@ mod tests {
         #[test]
         fn test_http_config_all_defaults() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(30));
             assert_eq!(config.http.retries, 2);
             assert_eq!(config.http.backoff_base, Duration::from_millis(500));
@@ -1773,11 +2407,11 @@ mod tests {
                 proxy = "http://proxy:3128"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(120));
             assert_eq!(config.http.retries, 5);
             assert_eq!(config.http.proxy, Some("http://proxy:3128".to_string()));
@@ -1792,7 +2426,7 @@ mod tests {
                 proxy = "http://proxy:3128"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let mut args = CliArgs::parse_from_test_args([
+            let mut config_overrides = Cli::parse_from_test_args([
                 "--http-timeout",
                 "10s",
                 "--http-retries",
@@ -1800,11 +2434,12 @@ mod tests {
                 "--http-proxy",
                 "socks5://other:1080",
                 "test-crate",
-            ]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            ])
+            .to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(10));
             assert_eq!(config.http.retries, 0);
             assert_eq!(config.http.proxy, Some("socks5://other:1080".to_string()));
@@ -1819,11 +2454,12 @@ mod tests {
                 proxy = "http://proxy:3128"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let mut args = CliArgs::parse_from_test_args(["--http-timeout", "10s", "test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides =
+                Cli::parse_from_test_args(["--http-timeout", "10s", "test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(10));
             assert_eq!(config.http.retries, 5);
             assert_eq!(config.http.proxy, Some("http://proxy:3128".to_string()));
@@ -1832,22 +2468,25 @@ mod tests {
         #[test]
         fn test_http_config_invalid_timeout_duration() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let mut args = CliArgs::parse_from_test_args(["--http-timeout", "not-a-duration", "test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides =
+                Cli::parse_from_test_args(["--http-timeout", "not-a-duration", "test-crate"])
+                    .to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let result = Config::load_from_dir(temp_dir.path(), &args);
+            let result = Config::load_from_dir(temp_dir.path(), &config_overrides);
             assert_matches!(result, Err(crate::error::Error::InvalidHttpTimeout { .. }));
         }
 
         #[test]
         fn test_http_config_zero_retries() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let mut args = CliArgs::parse_from_test_args(["--http-retries", "0", "test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides =
+                Cli::parse_from_test_args(["--http-retries", "0", "test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.retries, 0);
         }
 
@@ -1859,11 +2498,11 @@ mod tests {
                 backoff_max = "60s"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.backoff_base, Duration::from_secs(2));
             assert_eq!(config.http.backoff_max, Duration::from_secs(60));
         }
@@ -1875,11 +2514,11 @@ mod tests {
                 timeout = "45s"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.backoff_base, Duration::from_millis(500));
             assert_eq!(config.http.backoff_max, Duration::from_secs(5));
         }
@@ -1913,10 +2552,12 @@ mod tests {
             )
             .unwrap();
 
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(&child, &args).unwrap();
+            let config = Config::load_from_dir(&child, &config_overrides).unwrap();
             // Timeout comes from the child, overriding the parent, but since retries wasn't
             // specified in the child, it should be inherited from the parent config
             assert_eq!(config.http.timeout, Duration::from_secs(45));
@@ -1953,10 +2594,12 @@ mod tests {
             )
             .unwrap();
 
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(&child, &args).unwrap();
+            let config = Config::load_from_dir(&child, &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(45));
             assert_eq!(config.http.retries, 5);
         }
@@ -1981,10 +2624,12 @@ mod tests {
         /// Verifies `CARGO_HTTP_TIMEOUT` is used when neither CLI nor config file sets timeout.
         fn test_env_timeout_used_when_no_cli_or_config() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(45));
         }
 
@@ -1992,10 +2637,12 @@ mod tests {
         /// Verifies `CARGO_NET_RETRY` is used when neither CLI nor config file sets retries.
         fn test_env_retries_used_when_no_cli_or_config() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.retries, 7);
         }
 
@@ -2003,10 +2650,12 @@ mod tests {
         /// Verifies `CARGO_HTTP_PROXY` is used when neither CLI nor config file sets proxy.
         fn test_env_proxy_used_when_no_cli_or_config() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.proxy, Some("socks5://env-proxy:1080".to_string()));
         }
 
@@ -2018,8 +2667,8 @@ mod tests {
         /// Verifies CLI HTTP flags take precedence over Cargo HTTP environment variables.
         fn test_cli_overrides_env() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args = with_isolated_global_config(
-                CliArgs::parse_from_test_args([
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args([
                     "--http-timeout",
                     "10s",
                     "--http-retries",
@@ -2027,11 +2676,12 @@ mod tests {
                     "--http-proxy",
                     "socks5://cli-proxy:1080",
                     "test-crate",
-                ]),
+                ])
+                .to_config_overrides(),
                 temp_dir.path(),
             );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(10));
             assert_eq!(config.http.retries, 1);
             assert_eq!(config.http.proxy, Some("socks5://cli-proxy:1080".to_string()));
@@ -2051,10 +2701,12 @@ mod tests {
                 proxy = "http://config-proxy:8080"
             "#;
             let temp_dir = create_temp_config(toml_content);
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, Duration::from_secs(120));
             assert_eq!(config.http.retries, 5);
             assert_eq!(config.http.proxy, Some("http://config-proxy:8080".to_string()));
@@ -2064,10 +2716,12 @@ mod tests {
         /// Verifies invalid `CARGO_HTTP_TIMEOUT` falls back to the built-in default timeout.
         fn test_invalid_env_timeout_falls_back_to_default() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.timeout, DEFAULT_HTTP_TIMEOUT);
         }
 
@@ -2075,10 +2729,12 @@ mod tests {
         /// Verifies invalid `CARGO_NET_RETRY` falls back to the built-in default retries value.
         fn test_invalid_env_retries_falls_back_to_default() {
             let temp_dir = tempfile::tempdir().unwrap();
-            let args =
-                with_isolated_global_config(CliArgs::parse_from_test_args(["test-crate"]), temp_dir.path());
+            let config_overrides = with_isolated_global_config(
+                Cli::parse_from_test_args(["test-crate"]).to_config_overrides(),
+                temp_dir.path(),
+            );
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
             assert_eq!(config.http.retries, DEFAULT_HTTP_RETRIES);
         }
     }
@@ -2092,8 +2748,8 @@ mod tests {
                 timeout: Some(Duration::from_secs(120)),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.timeout, Duration::from_secs(120));
             assert_eq!(http.retries, DEFAULT_HTTP_RETRIES);
         }
@@ -2104,8 +2760,8 @@ mod tests {
                 retries: Some(10),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.retries, 10);
         }
 
@@ -2115,8 +2771,8 @@ mod tests {
                 proxy: Some("http://proxy:3128".to_string()),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.proxy, Some("http://proxy:3128".to_string()));
         }
 
@@ -2126,8 +2782,9 @@ mod tests {
                 timeout: Some(Duration::from_secs(120)),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["--http-timeout", "10s", "test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides =
+                Cli::parse_from_test_args(["--http-timeout", "10s", "test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.timeout, Duration::from_secs(10));
         }
 
@@ -2137,8 +2794,9 @@ mod tests {
                 retries: Some(10),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["--http-retries", "0", "test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides =
+                Cli::parse_from_test_args(["--http-retries", "0", "test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.retries, 0);
         }
 
@@ -2148,16 +2806,18 @@ mod tests {
                 proxy: Some("http://old:3128".to_string()),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["--http-proxy", "socks5://new:1080", "test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides =
+                Cli::parse_from_test_args(["--http-proxy", "socks5://new:1080", "test-crate"])
+                    .to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.proxy, Some("socks5://new:1080".to_string()));
         }
 
         #[test]
         fn test_empty_config_file_yields_defaults() {
             let config_file = HttpConfigFile::default();
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.timeout, DEFAULT_HTTP_TIMEOUT);
             assert_eq!(http.retries, DEFAULT_HTTP_RETRIES);
             assert_eq!(http.backoff_base, DEFAULT_HTTP_BACKOFF_BASE);
@@ -2172,8 +2832,8 @@ mod tests {
                 backoff_max: Some(Duration::from_secs(60)),
                 ..Default::default()
             };
-            let args = CliArgs::parse_from_test_args(["test-crate"]);
-            let http = Config::build_http_config(&config_file, &args).unwrap();
+            let config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            let http = Config::build_http_config(&config_file, &config_overrides).unwrap();
             assert_eq!(http.backoff_base, Duration::from_secs(2));
             assert_eq!(http.backoff_max, Duration::from_secs(60));
         }
@@ -2188,10 +2848,10 @@ mod tests {
         fn test_invalid_toml_syntax() {
             let test_case = crate::testdata::ConfigTestCase::invalid_toml();
 
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(test_case.path().to_path_buf());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(test_case.path().to_path_buf());
 
-            let result = Config::load(&args);
+            let result = Config::load(&config_overrides);
             assert_matches!(result, Err(crate::error::Error::ConfigExtract { .. }));
         }
 
@@ -2199,10 +2859,10 @@ mod tests {
         fn test_invalid_config_options_raise_error() {
             let test_case = crate::testdata::ConfigTestCase::invalid_options();
 
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(test_case.path().to_path_buf());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(test_case.path().to_path_buf());
 
-            let result = Config::load(&args);
+            let result = Config::load(&config_overrides);
             assert_matches!(result, Err(crate::error::Error::ConfigExtract { .. }));
         }
 
@@ -2210,10 +2870,10 @@ mod tests {
         fn test_nonexistent_explicit_config_file() {
             let test_case = crate::testdata::ConfigTestCase::nonexistent();
 
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
-            args.config_file = Some(test_case.path().to_path_buf());
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
+            config_overrides.config_file = Some(test_case.path().to_path_buf());
 
-            let config = Config::load(&args).unwrap();
+            let config = Config::load(&config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(60 * 60));
         }
@@ -2222,14 +2882,14 @@ mod tests {
         fn test_no_config_files_uses_defaults() {
             let temp_dir = tempfile::tempdir().unwrap();
 
-            let mut args = CliArgs::parse_from_test_args(["test-crate"]);
+            let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
             // Ensure isolation from developer's real cgx config on their system.
             // Without these overrides, this test would load ~/.config/cgx/cgx.toml if it exists,
             // causing the test to fail with config values from the developer's actual config.
-            args.system_config_dir = Some(temp_dir.path().join("system"));
-            args.user_config_dir = Some(temp_dir.path().join("user"));
+            config_overrides.system_config_dir = Some(temp_dir.path().join("system"));
+            config_overrides.user_config_dir = Some(temp_dir.path().join("user"));
 
-            let config = Config::load_from_dir(temp_dir.path(), &args).unwrap();
+            let config = Config::load_from_dir(temp_dir.path(), &config_overrides).unwrap();
 
             assert_eq!(config.resolve_cache_timeout, Duration::from_secs(60 * 60));
             assert!(!config.offline);
