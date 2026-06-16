@@ -57,6 +57,89 @@ Download prebuilt binaries directly from the [Releases page](https://github.com/
 
 _Coming soon: Install via `curl https://cgx.sh/install.sh | sh` once the cgx.sh domain is set up._
 
+## GitHub Action
+
+`cgx` ships a GitHub Action that installs `cgx` and puts it on `PATH`, so later steps can
+run `cgx <crate>`. It prefers prebuilt binaries but falls back to building from source only when no suitable prebuilt
+binary is available for the runner.
+
+### Usage
+
+```yaml
+- uses: anelson/cgx@v1
+- run: cgx ripgrep -- --version
+```
+
+A fuller example:
+
+```yaml
+- uses: anelson/cgx@v1
+  with:
+    version: "0.0.11" # default: latest release
+    cargo-cgx: true # also install the `cargo cgx` subcommand
+    # prefetch specific crates (--prefetch-all is already enabled by default)
+    prefetch: |
+      ripgrep@14
+      cargo-deny
+- run: cgx ripgrep -- --version
+```
+
+### Inputs
+
+- `version` — cgx version to install (`0.0.11` or `v0.0.11`; leading `v` optional).
+  - Default: `latest`.
+- `target` — target triple to install. When set, downloads that exact prebuilt archive.
+  - Default: the runner's native target (auto-detected).
+- `cargo-cgx` — also install the `cargo-cgx` binary (the `cargo cgx ...` subcommand).
+  - Default: `false`.
+- `github-token` — token for the action's own downloads and prefetch. Never exported to later steps.
+  - Default: `${{ github.token }}`.
+- `cache` — cache cgx's state (resolve cache + downloaded tool binaries) across runs.
+  - Default: `true`.
+- `cache-key-prefix` — prefix for the cache key; bump it to invalidate.
+  - Default: `cgx`.
+- `app-dir` — directory for cgx's state, exported as `CGX_APP_DIR` for later steps.
+  - Default: a stable per-runner path under the runner tool cache.
+- `prefetch-all` — after install, run `cgx --prefetch-all` (uses this repo's `cgx.toml`).
+  - Default: `true`.
+- `prefetch` — newline-separated crate specs to prefetch with `cgx --prefetch`.
+  - Default: empty (nothing prefetched).
+
+### Outputs
+
+- `version` — the requested version (`latest` or `vX.Y.Z`).
+- `cgx-version` — the concrete version reported by `cgx --version`.
+- `path` — absolute path to the installed `cgx` binary.
+- `app-dir` — the `CGX_APP_DIR` used for cgx's state.
+
+### Caching and prefetch
+
+With `cache: true` (the default) the action caches cgx's on-disk state — the resolve cache and the tool
+binaries cgx downloads — keyed by OS and architecture, restoring it before your steps and saving it after the
+job. The cgx binary itself is downloaded fresh each run.
+
+Prefetch warms that cache at setup time so later `cgx <crate>` steps are instant. `prefetch-all` prepares
+every tool and alias in your repository's `cgx.toml` (so run `actions/checkout` before this action, otherwise
+there is no `cgx.toml` to read); `prefetch` prepares the crate specs you list. **Prefetch failures are reported
+as warnings and never fail your build**, and any tools prepared successfully are still cached.
+
+### GitHub token
+
+The `github-token` is used only inside the action's own install and prefetch steps; for security reasons it is never
+persisted anywhere for re-use in later steps. If you run `cgx` yourself in later steps and want those requests authenticated (to avoid
+GitHub's anonymous API rate limits), set the token on those steps where `cgx` is invoked, eg:
+
+```yaml
+- run: cgx cargo deny check
+  env:
+    GITHUB_TOKEN: ${{ github.token }}
+```
+
+### Pinning
+
+`@v1` tracks the latest v1 release of the action. To pin exactly, reference a commit SHA
+(`anelson/cgx@<sha>`).
+
 ## Runtime Dependencies
 
 `cgx` uses `gix` for git operations, and for git-over-HTTP `gix` uses a curl/OpenSSL transport backend.
