@@ -144,9 +144,10 @@ esac
 
 cgx_bin="$dest/cgx"
 [ -x "$cgx_bin" ] || cgx_bin="$(command -v cgx || echo "$dest/cgx")"
-# `cgx --version` prints "cgx <version>" (optionally followed by " (<sha> <date>)"),
-# so the version is the second field, not the last.
-cgx_version="$("$cgx_bin" --version 2>/dev/null | awk 'NR==1{print $2}')" || cgx_version=""
+# `cgx --version` prints "cgx <version>" (optionally followed by " (<sha> <date>)"), so the
+# version is the second field, not the last. Merge stderr into stdout (2>&1) because older
+# releases (<=0.0.11) print --version to stderr; 2>/dev/null would then capture nothing.
+cgx_version="$("$cgx_bin" --version 2>&1 | awk 'NR==1{print $2}')" || cgx_version=""
 
 {
   echo "version=$VERSION"

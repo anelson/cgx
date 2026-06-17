@@ -130,9 +130,11 @@ if (-not (Test-Path $cgxBin)) {
 }
 $cgxVersion = ""
 if (Test-Path $cgxBin) {
-  $line = (& $cgxBin --version 2>$null | Select-Object -First 1)
-  # `cgx --version` prints "cgx <version>" (optionally " (<sha> <date>)"), so the
-  # version is the second whitespace-separated field, not the last.
+  # `cgx --version` prints "cgx <version>" (optionally " (<sha> <date>)"), so the version is the
+  # second whitespace-separated field, not the last. Merge stderr (2>&1) so the probe works
+  # whether the binary prints --version to stdout (current releases) or stderr (older ones);
+  # native-command stderr arrives as ErrorRecord objects, so stringify each line before splitting.
+  $line = (& $cgxBin --version 2>&1 | ForEach-Object { "$_" } | Select-Object -First 1)
   if ($line) { $cgxVersion = ($line.Trim() -split '\s+')[1] }
 }
 

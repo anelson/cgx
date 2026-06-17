@@ -32,7 +32,9 @@ jobs:
         name: [default, cargo-cgx]
         include:
           # Extra scenarios (run once, on Linux unless platform-specific).
-          - { os: ubuntu-24.04, name: explicit-version, version: "0.0.11" }
+          # explicit-version must pin >= 0.0.12 (first release with the fresh-cargo-home fix),
+          # or the e2e `cgx ripgrep` step below fails on a clean runner.
+          - { os: ubuntu-24.04, name: explicit-version, version: "0.0.12" }
           - { os: ubuntu-24.04, name: cache-off, cache: "false" }
           - {
               os: ubuntu-24.04,
