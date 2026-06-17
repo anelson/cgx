@@ -1,0 +1,151 @@
+name: Setup cgx
+description: >-
+  Install the cgx CLI, put it on PATH, and optionally prefetch tools to warm cgx's cache. Prefers prebuilt binaries,
+  but falls back to building from source in the (unlikely) event that no suitable prebuilt binary exists for the runner's
+  OS/architecture.
+author: anelson
+branding:
+  icon: package
+  color: orange
+
+inputs:
+  version:
+    description: >-
+      cgx version to install, e.g. "0.0.11" or "v0.0.11" (a leading "v" is
+      optional). Defaults to the latest release.
+    required: false
+    default: latest
+  target:
+    description: >-
+      Rust target triple to install (e.g. x86_64-unknown-linux-musl). Defaults
+      to auto-detecting the runner's native target. When set, the action
+      downloads that exact prebuilt archive instead of using the cargo-dist
+      installer's auto-detection.
+    required: false
+    default: ""
+  cargo-cgx:
+    description: Also install the `cargo-cgx` binary (the `cargo cgx ...` subcommand).
+    required: false
+    default: "false"
+  github-token:
+    description: >-
+      Token used to authenticate downloads (and prefetch-related GitHub lookups),
+      avoiding anonymous rate limits. Defaults to the workflow token.
+    required: false
+    default: ${{ github.token }}
+  cache:
+    description: >-
+      Cache cgx's on-disk state (resolve cache + downloaded tool binaries) across
+      runs. Restored before your steps and saved after the job. Set to "false" to
+      disable.
+    required: false
+    default: "true"
+  cache-key-prefix:
+    description: Prefix for the cache key.
+    required: false
+    default: cgx
+  app-dir:
+    description: >-
+      Directory for cgx's app state, exported as CGX_APP_DIR for all later steps.
+      Defaults to a stable per-runner path under the runner tool cache.
+    required: false
+    default: ""
+  prefetch-all:
+    description: >-
+      After install, run `cgx --prefetch-all` to prepare every tool/alias in the
+      repository's cgx.toml. Failures are logged as warnings and never fail the
+      build.
+    required: false
+    default: "true"
+  prefetch:
+    description: >-
+      After install, prefetch these crate specs (one per line), e.g. "ripgrep@14".
+      Each runs `cgx --prefetch <spec>`. Failures are logged as warnings and never
+      fail the build.
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: The requested cgx version (normalized; "latest" or "vX.Y.Z").
+    value: ${{ steps.install.outputs.version || steps.install-windows.outputs.version }}
+  cgx-version:
+    description: The concrete version reported by `cgx --version` after install.
+    value: ${{ steps.install.outputs.cgx-version || steps.install-windows.outputs.cgx-version }}
+  path:
+    description: Absolute path to the installed cgx binary.
+    value: ${{ steps.install.outputs.path || steps.install-windows.outputs.path }}
+  app-dir:
+    description: The CGX_APP_DIR used for cgx's state.
+    value: ${{ steps.prep.outputs.app-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare cgx setup
+      id: prep
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_APP_DIR: ${{ inputs.app-dir }}
+      run: |
+        set -euo pipefail
+        ver="${INPUT_VERSION:-latest}"
+        case "$ver" in
+          "" | latest) ver=latest ;;
+          v*) ;;
+          *) ver="v$ver" ;;
+        esac
+        app_dir="${INPUT_APP_DIR:-}"
+        if [ -z "$app_dir" ]; then
+          app_dir="${RUNNER_TOOL_CACHE}/cgx"
+        fi
+        mkdir -p "$app_dir/cache" "$app_dir/bins"
+        echo "CGX_APP_DIR=$app_dir" >> "$GITHUB_ENV"
+        {
+          echo "version=$ver"
+          echo "app-dir=$app_dir"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Cache cgx state
+      if: ${{ inputs.cache == 'true' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ steps.prep.outputs.app-dir }}/cache
+          ${{ steps.prep.outputs.app-dir }}/bins
+        key: ${{ inputs.cache-key-prefix }}-state-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-state-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install cgx (Unix)
+      id: install
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CGX_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_VERSION: ${{ steps.prep.outputs.version }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_CARGO_CGX: ${{ inputs.cargo-cgx }}
+      run: bash "$GITHUB_ACTION_PATH/.github/actions/cgx-action/install.sh"
+
+    - name: Install cgx (Windows)
+      id: install-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CGX_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_VERSION: ${{ steps.prep.outputs.version }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_CARGO_CGX: ${{ inputs.cargo-cgx }}
+      run: |
+        & "$env:GITHUB_ACTION_PATH/.github/actions/cgx-action/install.ps1"
+
+    - name: Prefetch cgx tools
+      if: ${{ inputs.prefetch-all == 'true' || inputs.prefetch != '' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_PREFETCH_ALL: ${{ inputs.prefetch-all }}
+        INPUT_PREFETCH: ${{ inputs.prefetch }}
+      run: bash "$GITHUB_ACTION_PATH/.github/actions/cgx-action/prefetch.sh"
