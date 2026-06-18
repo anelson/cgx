@@ -1,0 +1,16 @@
+id: panic-requires-message
+language: rust
+severity: error
+message: "`panic!`/`unreachable!` must include an explanatory message"
+note: |
+  A bare `panic!()` or `unreachable!()` aborts with no hint about which invariant was violated. Pass a message
+  explaining why this point should be unreachable, e.g. `unreachable!("clap enforces that --bin and --example are
+  mutually exclusive")`.
+rule:
+  # A `panic!`/`unreachable!` macro invocation whose token tree is empty, i.e. `panic!()` / `unreachable!()` with no
+  # arguments. The message-carrying forms `panic!("...")` / `unreachable!("{}", x)` have a non-empty token tree and are
+  # not matched.
+  kind: macro_invocation
+  all:
+    - has: { field: macro, regex: "^(panic|unreachable)$" }
+    - has: { kind: token_tree, regex: '^\(\s*\)$' }

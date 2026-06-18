@@ -1,0 +1,27 @@
+id: panic-requires-message
+valid:
+  # Message explaining the violated invariant.
+  - |
+    fn f() {
+        panic!("crate index is always populated before this point");
+    }
+  - |
+    fn f() {
+        unreachable!("clap enforces mutual exclusivity");
+    }
+  # Format-string message with arguments.
+  - |
+    fn f() {
+        panic!("unexpected state: {}", state);
+    }
+invalid:
+  # Bare panic with no explanation.
+  - |
+    fn f() {
+        panic!();
+    }
+  # Bare unreachable with no explanation.
+  - |
+    fn f() {
+        unreachable!();
+    }

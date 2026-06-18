@@ -177,6 +177,11 @@ impl Cli {
     {
         let args = args.into_iter().map(|s| s.into()).collect::<Vec<String>>();
         if args.len() > 1 && args[1].starts_with('+') && args[1].len() > 1 {
+            #[expect(
+                clippy::string_slice,
+                reason = "guarded by starts_with('+') && len() > 1, so byte 1 is a valid char boundary in \
+                          range"
+            )]
             let toolchain = args[1][1..].to_string();
 
             let mut filtered = vec![args[0].clone()];

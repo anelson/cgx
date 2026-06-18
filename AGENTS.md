@@ -41,6 +41,23 @@ This is a Rust CLI binary that combines functionality of `cargo install`, `cargo
   re-exports (`pub use ...`) too: do not try to visually separate them from plain imports, since rustfmt sorts them in
   with everything else in their group.
 
+### Panicking, `unwrap`, and `expect`
+
+Test code is exempt from these rules (see `clippy.toml`); the following applies to non-test code.
+
+`clippy::unwrap_used` forbids a bare `.unwrap()`. When a call genuinely cannot fail, pick one of:
+
+- keep `.unwrap()` and justify it with `#[expect(clippy::unwrap_used, reason = "why this cannot fail")]`, or
+- use `.expect("why this cannot fail")`, where the message passed to `expect` justifies why the failure is impossible.
+
+Prefer the `.expect("…")` form: the justification lives at the call site and is printed if the "impossible" ever
+happens, so it does not duplicate an `#[expect]` reason. There is intentionally no `expect_used` lint, so `.expect()`
+needs no attribute — but an `expect` message that does not explain why the condition cannot occur is not acceptable.
+
+`panic!` and `unreachable!` are allowed but must carry an explanatory message, enforced by the `panic-requires-message`
+ast-grep rule (run as part of `just vibecheck`). `todo!` and `unimplemented!` are forbidden outright (`clippy::todo`,
+`clippy::unimplemented`).
+
 ### Error Reporting
 
 We use `snafu` for error reporting. The main error enum is `cgx-core/src/error.rs::Error`; the `cgx` crate re-exports

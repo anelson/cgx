@@ -162,7 +162,10 @@ impl Cgx {
     /// source if needed, but does not build from source or look for a pre-built binary.
     ///
     /// Returns `(crate_name, default_target, bin_targets, example_targets)`.
-    #[allow(clippy::type_complexity)]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the returned 4-tuple is documented above and clearer here than a one-off named struct"
+    )]
     pub fn list_targets(
         &self,
         request: &CrateRequest,

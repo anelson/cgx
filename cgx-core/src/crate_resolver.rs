@@ -345,7 +345,7 @@ impl DefaultCrateResolver {
                 commit,
             };
         } else {
-            panic!("BUG: Expected ResolvedSource::Git from resolve_git");
+            unreachable!("BUG: Expected ResolvedSource::Git from resolve_git");
         }
 
         Ok(resolved)

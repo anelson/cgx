@@ -1839,7 +1839,7 @@ mod tests {
             impl Drop for UserConfigGuard {
                 fn drop(&mut self) {
                     if self.should_delete {
-                        fs::remove_file(&self.path).ok();
+                        let _ = fs::remove_file(&self.path);
                     }
                 }
             }
@@ -1863,7 +1863,7 @@ mod tests {
             // Create a user config to trigger the bug (if it doesn't already exist)
             let strategy = Config::get_user_dirs().unwrap();
             let user_config_dir = strategy.config_dir();
-            fs::create_dir_all(&user_config_dir).ok();
+            let _ = fs::create_dir_all(&user_config_dir);
             let user_config_path = user_config_dir.join("cgx.toml");
             let user_config_existed = user_config_path.exists();
 

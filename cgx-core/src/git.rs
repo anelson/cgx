@@ -639,6 +639,11 @@ mod tests {
             // result
             drop(_temp);
             let (git_client, _temp) = test_git_client();
+            #[expect(
+                clippy::string_slice,
+                reason = "commit is a 40-char ASCII hex literal in tests, so [..7] is in range and on a \
+                          char boundary"
+            )]
             let short_commit = &commit[..7];
             let (checkout_path, commit_hash) = git_client
                 .checkout_ref(url, GitSelector::Commit(short_commit.to_string()))
@@ -670,6 +675,11 @@ mod tests {
             // result
             drop(_temp);
             let (git_client, _temp) = test_git_client();
+            #[expect(
+                clippy::string_slice,
+                reason = "commit is a 40-char ASCII hex literal in tests, so [..7] is in range and on a \
+                          char boundary"
+            )]
             let short_commit = &commit[..7];
             let (checkout_path, commit_hash) = git_client
                 .checkout_ref(url, GitSelector::Commit(short_commit.to_string()))

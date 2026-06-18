@@ -442,7 +442,7 @@ mod tests {
             };
             let client = HttpClient::new(&config).unwrap();
             let result = client.get(&server.url("/ratelimit"));
-            assert!(result.is_err());
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 429, .. }));
             fail_mock.assert_calls(2);
         }
 
@@ -462,7 +462,7 @@ mod tests {
             };
             let client = HttpClient::new(&config).unwrap();
             let result = client.get(&server.url("/error"));
-            assert!(result.is_err());
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 500, .. }));
             fail_mock.assert_calls(2);
         }
 
@@ -482,7 +482,7 @@ mod tests {
             };
             let client = HttpClient::new(&config).unwrap();
             let result = client.get(&server.url("/unavailable"));
-            assert!(result.is_err());
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 503, .. }));
             fail_mock.assert_calls(2);
         }
 
@@ -667,7 +667,7 @@ mod tests {
             };
             let client = HttpClient::new(&config).unwrap();
             let result = client.head(&server.url("/head-ratelimit"));
-            assert!(result.is_err());
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 429, .. }));
             mock.assert_calls(2);
         }
     }

@@ -43,10 +43,14 @@ pub(crate) fn copy_source_tree(src: &Path, dst: &Path) -> Result<()> {
             continue; // Skip the root directory itself
         }
 
-        let rel_path = src_path.strip_prefix(src).unwrap();
+        let rel_path = src_path
+            .strip_prefix(src)
+            .expect("BUG: strip_prefix cannot fail: src_path was produced by walking src");
         let dst_path = dst.join(rel_path);
 
-        let file_type = entry.file_type().unwrap();
+        let file_type = entry
+            .file_type()
+            .expect("BUG: file_type returns None only for stdin, impossible when walking a directory");
         if file_type.is_dir() {
             std::fs::create_dir_all(&dst_path)
                 .map_err(|e| Box::new(e) as _)
