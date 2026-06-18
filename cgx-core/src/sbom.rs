@@ -519,7 +519,6 @@ pub(crate) mod tests {
     /// Get the version of a specific component from an SBOM file.
     ///
     /// Returns [`None`] if the component is not found in the SBOM.
-    #[allow(dead_code)]
     pub(crate) fn get_sbom_component_version(sbom_path: &Path, component_name: &str) -> Option<String> {
         let json_str = std::fs::read_to_string(sbom_path)
             .unwrap_or_else(|e| panic!("Failed to read SBOM from {}: {}", sbom_path.display(), e));
@@ -536,7 +535,10 @@ pub(crate) mod tests {
     /// Assert that two SBOMs are equal after normalization.
     ///
     /// Panics with a detailed JSON diff if the SBOMs differ.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "kept alongside assert_sboms_ne for symmetry; not currently called by any test"
+    )]
     pub(crate) fn assert_sboms_eq(path1: &Path, path2: &Path) {
         let sbom1 = read_and_normalize_sbom(path1);
         let sbom2 = read_and_normalize_sbom(path2);

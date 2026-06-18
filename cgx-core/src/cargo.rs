@@ -472,8 +472,8 @@ impl CargoRunner for RealCargoRunner {
         let status = child.wait().context(error::CommandExecutionSnafu)?;
 
         // Join both threads after wait() returns
-        let binary_path = stdout_handle.join().expect("stdout thread panicked");
-        stderr_handle.join().expect("stderr thread panicked");
+        let binary_path = stdout_handle.join().expect("BUG: stdout thread panicked");
+        stderr_handle.join().expect("BUG: stderr thread panicked");
 
         if !status.success() {
             return error::CargoBuildFailedSnafu {

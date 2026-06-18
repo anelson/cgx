@@ -314,7 +314,9 @@ impl Cache {
             .report(|| SourceMessage::downloading(resolved));
 
         // Ensure parent directory exists
-        let parent = cache_path.parent().expect("BUG: Cache path has no parent");
+        let parent = cache_path
+            .parent()
+            .expect("BUG: cache_path is built by joining onto the cache root, so it always has a parent");
         fs::create_dir_all(parent).with_context(|_| error::IoSnafu {
             path: parent.to_path_buf(),
         })?;
@@ -574,7 +576,7 @@ impl Cache {
             },
 
             ResolvedSource::LocalDir { .. } => {
-                unreachable!("LocalDir sources should not be passed to source_cache_path")
+                unreachable!("BUG: LocalDir sources should not be passed to source_cache_path")
             }
         };
 
@@ -612,6 +614,11 @@ impl Cache {
             .unwrap_or("repo");
 
         // Short hash of full URL for uniqueness
+        #[expect(
+            clippy::string_slice,
+            reason = "compute_hash returns a 64-char ASCII hex digest, so [..8] is in range and on a char \
+                      boundary"
+        )]
         let hash = &Self::compute_hash(url.as_bytes())[..8];
 
         format!("{}-{}", name, hash)
@@ -782,7 +789,7 @@ impl Cache {
                 commit.hash(&mut hasher);
             }
             ResolvedSource::LocalDir { .. } => {
-                panic!("Should not compute hash for LocalDir sources");
+                panic!("BUG: Should not compute hash for LocalDir sources");
             }
         }
         format!("{:016x}", hasher.finish())

@@ -1776,7 +1776,7 @@ mod tests {
         mod locked_offline_from_config {
             use super::*;
 
-            /// BuildOptions reads locked/offline from Config.
+            /// `BuildOptions` reads locked/offline from Config.
             ///
             /// CLI override tests (--locked, --unlocked, --frozen, --offline) belong in config.rs
             /// since that's where the CLI-to-Config override logic lives.
@@ -1832,7 +1832,7 @@ mod tests {
         mod toolchain_from_config {
             use super::*;
 
-            /// BuildOptions reads toolchain from Config.
+            /// `BuildOptions` reads toolchain from Config.
             ///
             /// CLI override tests (+toolchain syntax) belong in config.rs since that's where
             /// the CLI-to-Config override logic lives.

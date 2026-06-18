@@ -526,7 +526,13 @@ impl Forge {
         let mut repo = segments[1].to_string();
 
         if repo.ends_with(".git") {
-            repo = repo[..repo.len() - 4].to_string();
+            #[expect(
+                clippy::string_slice,
+                reason = "guarded by ends_with(\".git\"); the 4 trailing ASCII bytes are a valid char \
+                          boundary in range"
+            )]
+            let trimmed = repo[..repo.len() - 4].to_string();
+            repo = trimmed;
         }
 
         match host {

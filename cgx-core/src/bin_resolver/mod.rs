@@ -210,7 +210,13 @@ impl DefaultBinaryResolver {
             }
         }
 
-        crate::helpers::format_hex_lower(hasher.finalize())[..16].to_string()
+        #[expect(
+            clippy::string_slice,
+            reason = "format_hex_lower returns a 64-char ASCII hex digest, so [..16] is in range and on a \
+                      char boundary"
+        )]
+        let id = crate::helpers::format_hex_lower(hasher.finalize())[..16].to_string();
+        id
     }
 }
 
@@ -389,8 +395,10 @@ mod tests {
     /// Test that explicit --bin flag disqualifies pre-built binaries
     #[test]
     fn test_disqualification_explicit_bin() {
-        let mut options = BuildOptions::default();
-        options.build_target = BuildTarget::Bin("specific-bin".to_string());
+        let options = BuildOptions {
+            build_target: BuildTarget::Bin("specific-bin".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             is_disqualified(&options),
             Some("explicit --bin or --example specified")
@@ -400,8 +408,10 @@ mod tests {
     /// Test that explicit --example flag disqualifies pre-built binaries
     #[test]
     fn test_disqualification_explicit_example() {
-        let mut options = BuildOptions::default();
-        options.build_target = BuildTarget::Example("my-example".to_string());
+        let options = BuildOptions {
+            build_target: BuildTarget::Example("my-example".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
             is_disqualified(&options),
             Some("explicit --bin or --example specified")
@@ -411,48 +421,60 @@ mod tests {
     /// Test that custom features disqualify pre-built binaries
     #[test]
     fn test_disqualification_custom_features() {
-        let mut options = BuildOptions::default();
-        options.features = vec!["serde".to_string(), "json".to_string()];
+        let options = BuildOptions {
+            features: vec!["serde".to_string(), "json".to_string()],
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("custom features specified"));
     }
 
     /// Test that --all-features disqualifies pre-built binaries
     #[test]
     fn test_disqualification_all_features() {
-        let mut options = BuildOptions::default();
-        options.all_features = true;
+        let options = BuildOptions {
+            all_features: true,
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("--all-features specified"));
     }
 
     /// Test that --no-default-features disqualifies pre-built binaries
     #[test]
     fn test_disqualification_no_default_features() {
-        let mut options = BuildOptions::default();
-        options.no_default_features = true;
+        let options = BuildOptions {
+            no_default_features: true,
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("--no-default-features specified"));
     }
 
     /// Test that custom profile disqualifies pre-built binaries
     #[test]
     fn test_disqualification_custom_profile() {
-        let mut options = BuildOptions::default();
-        options.profile = Some("release-with-debug".to_string());
+        let options = BuildOptions {
+            profile: Some("release-with-debug".to_string()),
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("custom profile specified"));
     }
 
     /// Test that custom target disqualifies pre-built binaries
     #[test]
     fn test_disqualification_custom_target() {
-        let mut options = BuildOptions::default();
-        options.target = Some("x86_64-unknown-linux-musl".to_string());
+        let options = BuildOptions {
+            target: Some("x86_64-unknown-linux-musl".to_string()),
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("custom target specified"));
     }
 
     /// Test that custom toolchain disqualifies pre-built binaries
     #[test]
     fn test_disqualification_custom_toolchain() {
-        let mut options = BuildOptions::default();
-        options.toolchain = Some("nightly".to_string());
+        let options = BuildOptions {
+            toolchain: Some("nightly".to_string()),
+            ..Default::default()
+        };
         assert_eq!(is_disqualified(&options), Some("custom toolchain specified"));
     }
 

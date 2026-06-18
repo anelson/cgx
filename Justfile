@@ -140,7 +140,7 @@ ast-grep:
 vibecheck: check-dist-release-generated ast-grep
     cargo check --all-targets --workspace
     cargo check --all-targets --all-features --workspace
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --all-features --workspace -- -D warnings
     cargo doc --workspace --no-deps --document-private-items
 
 # Check dependencies, looking for security vulns, unused dependencies, and duplicates

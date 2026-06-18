@@ -11,14 +11,6 @@ pub(crate) struct CrateTestCase {
     /// The name of the test case, which is also the name of the directory under `testdata`.
     pub name: &'static str,
 
-    /// The full path to the test case directory.
-    ///
-    /// NEVER EVER EVER MODIFY FILES HERE!  This is the canonical source of truth for the test case.
-    /// Instead, use `temp_copy` to get a temporary copy of the test case that tests can modify at
-    /// will.
-    #[allow(dead_code)]
-    path: PathBuf,
-
     /// The temp directory containing a copy of the test case.
     ///
     /// Kept alive to prevent automatic cleanup of the temporary directory. All test crates are
@@ -34,7 +26,6 @@ impl CrateTestCase {
     /// Get the path to the crate in the temporary directory.
     ///
     /// This is the directory containing Cargo.toml that should be used for building.
-    #[allow(clippy::misnamed_getters)] // as far as the caller knows `crate_path` is the path
     pub(crate) fn path(&self) -> &Path {
         &self.crate_path
     }
@@ -122,7 +113,6 @@ impl CrateTestCase {
 
         Self {
             name,
-            path,
             _temp_dir: temp_dir,
             crate_path,
         }
