@@ -75,7 +75,7 @@ impl From<&BuildOptions> for CargoMetadataOptions {
 /// error-prone, and worst of all inelegant.  But it's also the only way to get certain things
 /// done.
 ///
-/// This type is mainly concerened with the surprisingly complex task of figuring out where `cargo`
+/// This type is mainly concerned with the surprisingly complex task of figuring out where `cargo`
 /// is and how to invoke it, and secondarily with constructing its command lines and parsing the
 /// resulting output.
 pub(crate) trait CargoRunner: std::fmt::Debug + Send + Sync + 'static {

@@ -93,7 +93,7 @@ pub struct PrebuiltBinariesConfig {
     /// This adds minimal overhead and is recommended for security, therefore is on by default.
     pub verify_checksums: bool,
 
-    /// If enabled, when dowloading a binary check for a signature file and if found verify that
+    /// If enabled, when downloading a binary check for a signature file and if found verify that
     /// the download matches the signature.
     ///
     /// This is not quite as simple as [`Self::verify_checksums`] since it requires having the
@@ -1403,13 +1403,13 @@ mod tests {
     fn tool_config_unknown_key_error_names_the_field() {
         let toml_content = r#"
             [tools]
-            ripgrep = { versio = "14" }
+            ripgrep = { versio = "14" } # spellchecker:disable-line
         "#;
         let error = toml::from_str::<ConfigFile>(toml_content)
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("versio"),
+            error.contains("versio"), // spellchecker:disable-line
             "error did not name the bad key:\n{error}"
         );
         assert!(
@@ -1589,7 +1589,7 @@ mod tests {
     /// Test the config loading logic that traverses up a directory hierarchy looking for config
     /// files.
     ///
-    /// `testdata/configs` contains test config files constructed specificially to facilitate these
+    /// `testdata/configs` contains test config files constructed specifically to facilitate these
     /// tests
     mod hierarchy_tests {
         use assert_matches::assert_matches;

@@ -39,6 +39,7 @@ Additional tools used by the fuller project recipes:
 
 - `taplo` for TOML formatting checks.
 - `ast-grep` for the structural lints in `just vibecheck`.
+- `typos` (the `typos-cli` crate) for the spell check in `just vibecheck`.
 - `cargo-deny` and `cargo-machete` for dependency checks.
 - The nightly Rust toolchain for the first pass of `just fmt`.
 - `gh` is optional for tests; `just test` uses `gh auth token` as `GITHUB_TOKEN` when available to avoid
@@ -79,8 +80,9 @@ Run the main compile/lint/doc check:
 just vibecheck
 ```
 
-`vibecheck` checks that cargo-dist generated workflows are up to date, runs the ast-grep structural lints, then runs
-workspace `cargo check`, all-feature `cargo check`, clippy with warnings as errors, and private-item docs.
+`vibecheck` checks that cargo-dist generated workflows are up to date, runs the ast-grep structural lints and the
+`typos` spell check, then runs workspace `cargo check`, all-feature `cargo check`, clippy with warnings as errors, and
+private-item docs.
 
 Format the project:
 

@@ -215,7 +215,7 @@ eza = { version = "=0.23.1", default-features = false }
         )
         .unwrap();
 
-    // No CLI feature flags; just use the configred `[tools]` options
+    // No CLI feature flags; just use the configured `[tools]` options
     let (assert, messages) = cgx
         .cmd
         .with_json_messages()

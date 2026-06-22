@@ -109,12 +109,12 @@ impl CrateRequest {
 /// For crate specs that point to registries (which store multiple versions of a crate), the
 /// default is to choose the latest version.  If a version is specified, then the most recent
 /// version that matches the specification is chosen.  If no such version exists then an error
-/// ocurrs.
+/// occurs.
 ///
 /// For crate specs that point to local paths, forges, or git repos, there is no choice of
 /// version; the version of the crate is whatever it is at the specified location.  In those cases,
 /// if the `version` field is present, it is validated against the version found at the location,
-/// and if it's not compatible then an error ocurrs.
+/// and if it's not compatible then an error occurs.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CrateSpec {
     /// A crate on Crates.io, specified by its name and optional version.
@@ -139,7 +139,7 @@ pub enum CrateSpec {
     /// the name must be specified.
     ///
     /// If the `version` field is present, the crate found at the specified repo must have a
-    /// version that is compatible with the version specification or an error ocurrs.
+    /// version that is compatible with the version specification or an error occurs.
     Git {
         repo: String,
         selector: GitSelector,
@@ -398,7 +398,7 @@ impl CrateSpec {
     /// Get the crate name used for looking up the crate in the `[tools]` TOML section,
     /// if one is known.
     ///
-    /// Not all `CrateSpec` variants have a known crate name; for those variants, unfortunatelly,
+    /// Not all `CrateSpec` variants have a known crate name; for those variants, unfortunately,
     /// the contents of the `[tools]` section cannot be used to configure them, and this method
     /// returns `None`.
     pub fn configured_tool_name(&self) -> Option<&str> {

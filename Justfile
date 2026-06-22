@@ -133,11 +133,16 @@ ast-grep:
     ast-grep test --skip-snapshot-tests
     ast-grep scan
 
+# Spell-check source, comments, docs, and text files.
+# Config and allow-list overrides go in `typos.toml`.
+typos:
+    typos
+
 # Do a Rust "vibe check" (*cringe*) on the codebase
 # This is helpful for humans but it's mainly intended to provide a deterministic way for coding agents
 # to get feedback on their almost certainly shitty changes before wasting a human's time with their garbage code.
 # Run the generated workflow check plus Rust compile, clippy, and docs checks.
-vibecheck: check-dist-release-generated ast-grep
+vibecheck: check-dist-release-generated ast-grep typos
     cargo check --all-targets --workspace
     cargo check --all-targets --all-features --workspace
     cargo clippy --all-targets --all-features --workspace -- -D warnings

@@ -216,6 +216,11 @@ jobs:
         with:
           tool: ast-grep
 
+      - name: Install typos
+        uses: taiki-e/install-action@v2.81.3
+        with:
+          tool: typos@1.44.0
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-targets: false
