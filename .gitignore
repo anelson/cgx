@@ -20,6 +20,10 @@ target
 # We need a directory where we can just dump crap without contaminating the repository
 scrap/
 
+# Local Claude worktrees obviously do not belong under source control
+# and should also be ignored
+.claude/worktrees/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
