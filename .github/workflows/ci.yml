@@ -56,7 +56,8 @@ jobs:
           fi
 
   # Stage 1a: Minimal dependency checks for dependabot PRs (Linux amd64 only)
-  # This runs depcheck, verifies the runtime binary's linkage, and builds/runs unit tests.
+  # This runs depcheck, verifies the cargo-dist-generated release workflows are still
+  # in sync, verifies the runtime binary's linkage, and builds/runs unit tests.
   dependabot-quick-check:
     name: Dependabot Quick Check (Linux amd64)
     needs: detect-pr-type
@@ -93,6 +94,12 @@ jobs:
 
       - name: Run dependency checks
         run: just depcheck
+
+      # github-actions dependabot bumps edit workflow YAML, which can desync the
+      # cargo-dist-generated release workflows. The dependabot fast-path skips the
+      # lint job where this normally runs, so check it here too.
+      - name: Check dist release workflows are up to date
+        run: just check-dist-release-generated
 
       - name: Build workspace binaries
         run: cargo build --workspace --bins
