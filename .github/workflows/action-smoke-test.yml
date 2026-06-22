@@ -62,7 +62,7 @@ jobs:
               target: x86_64-pc-windows-msvc,
             }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - name: Run cgx action
         id: cgx
@@ -153,7 +153,7 @@ jobs:
     name: prefetch (default-on + warn-not-fail)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - name: Create cgx.toml fixture
         shell: bash
@@ -186,7 +186,7 @@ jobs:
     name: default usage (no cgx.toml present)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       # This job tests default-on --prefetch-all with nothing to prefetch, so it must run with no cgx.toml in scope, so
       # delete it explicitly to keep that assumption true.
@@ -213,7 +213,7 @@ jobs:
     name: cache round-trip (seed + save)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
       - name: Install cgx
         uses: ./
         with:
@@ -229,7 +229,7 @@ jobs:
     needs: cache-roundtrip-seed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
       - name: Install cgx (should restore the seed job's cache)
         uses: ./
         with:
