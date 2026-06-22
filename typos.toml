@@ -1,0 +1,18 @@
+# Configuration for the `typos` spell checker (https://github.com/crate-ci/typos).
+# Run via `just typos`, which is also part of `just vibecheck`. `typos` honors `.gitignore`,
+# so build artifacts and other ignored paths are already skipped.
+
+[default]
+# `typos` has no built-in inline ignore directive, but its documented workaround is to configure a regex that
+# matches a trailing marker comment indicating that typos should ignore the matching line.
+# Thus, A line ending in `spellchecker:disable-line` (after a TOML
+# `#` or Rust `//` comment leader) is skipped.
+#
+# This surprisingly not-built-in mechanism lets us deliberately make typos in tests or wherever without having to
+# globally register those typos as allowed words in the config.
+extend-ignore-re = ['(?Rm)^.*(#|//)\s*spellchecker:disable-line[ \t]*$']
+
+[default.extend-words]
+# "compilability" is intentional in AGENTS.md ("a basic compilability check" = whether the code
+# compiles); it is not a misspelling of "compatibility".
+compilability = "compilability"

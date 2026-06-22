@@ -843,7 +843,7 @@ impl RawCli {
     /// required or forbidden, and whether trailing tool arguments are allowed.
     ///
     /// It would be nice if more of the rules about which args are allowed with which modes could
-    /// be expressed usign `clap` proc macros, but we're already pushing the limits of clap as it
+    /// be expressed using `clap` proc macros, but we're already pushing the limits of clap as it
     /// is.  An earlier attempt at CLI parsing was even more horrifyingly manual and
     /// stringly-typed.
     fn render(self) -> Result<Cli, clap::Error> {

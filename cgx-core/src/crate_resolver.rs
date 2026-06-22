@@ -102,7 +102,7 @@ pub enum ResolvedSource {
     },
 }
 
-/// Create the default [`CrateResolver`] implementation, repecting the given config and using the
+/// Create the default [`CrateResolver`] implementation, respecting the given config and using the
 /// provided cache.
 pub(crate) fn create_resolver(
     config: Config,

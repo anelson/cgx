@@ -289,7 +289,7 @@ cgx --list-tools
 ```
 
 `--prefetch` is equivalent to `--no-exec` but prints nothing on success; once a crate is prefetched it is guaranteed to
-be runnable later without network access and without building froms ource (as long as you don't change build options,
+be runnable later without network access and without building from source (as long as you don't change build options,
 features, or toolchain). `--prefetch-all` is a convenience shortcut equivalent to running `--prefetch` for each
 configured tool and alias.
 

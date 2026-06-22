@@ -21,7 +21,7 @@ use crate::{
 /// This nomenclature is perhaps a bit misleading, since it's possible for the user to specify a
 /// [`crate::cratespec::CrateSpec::LocalDir`] crate spec to the resolver, which will resolve
 /// directly to that local dir without any downloading or caching.  However,
-/// `DownlaodedOrPossiblyAlreadyLocalCrate` isn't very catchy, so you'll have to do that
+/// `DownloadedOrPossiblyAlreadyLocalCrate` isn't very catchy, so you'll have to do that
 /// substitution in your head.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DownloadedCrate {

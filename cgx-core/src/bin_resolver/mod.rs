@@ -52,7 +52,7 @@ pub trait BinaryResolver {
     ) -> Result<Option<ResolvedBinary>>;
 }
 
-/// Create the default [`BinaryResolver`] implementation, repecting the given config and using the
+/// Create the default [`BinaryResolver`] implementation, respecting the given config and using the
 /// provided cache.
 pub(crate) fn create_resolver(
     config: Config,
