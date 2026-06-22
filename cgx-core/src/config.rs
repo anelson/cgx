@@ -9,6 +9,7 @@ use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 use figment::{
     Figment,
     providers::{Format, Serialized, Toml},
+    value::magic::RelativePathBuf,
 };
 use serde::{
     Deserialize, Serialize,
@@ -404,6 +405,121 @@ where
     }
 }
 
+/// Attempt to read a config file, rewriting tool paths if necessary to produce tool paths with
+/// absolute paths.
+///
+/// Each config file in the set of evaluated config files can specify a `[tools]` section, and a
+/// tool can optionally specify a path to a local directory where the crate code is located.  That
+/// can be absolute or relative, but if it's relative it's relative to the directory where the
+/// config TOML file is, not the CWD of the running process.
+///
+/// This function applies that logic, replacing relative paths by evaluating them relative to the
+/// config file path, to produce the correct absolute path.
+///
+/// If any rewriting was done, returns `Some` with the `ConfigFile` config containing just the tool
+/// with the rewritten path.  This can be used with figment's merge feature as a way to patch in
+/// the correct full path in place of the relative path that was loaded previously from the config
+/// file.
+fn tool_path_patch(config_file: &Path) -> Result<Option<ConfigFile>> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct ToolPathPatchFile {
+        tools: HashMap<String, ToolPathPatchTool>,
+    }
+
+    enum ToolPathPatchTool {
+        Detailed(ToolPathPatchDetailed),
+        Version,
+    }
+
+    impl<'de> Deserialize<'de> for ToolPathPatchTool {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            struct ToolPathPatchToolVisitor;
+
+            impl<'de> Visitor<'de> for ToolPathPatchToolVisitor {
+                type Value = ToolPathPatchTool;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("a version string or a detailed tool table")
+                }
+
+                fn visit_str<E>(self, _value: &str) -> std::result::Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(ToolPathPatchTool::Version)
+                }
+
+                fn visit_string<E>(self, _value: String) -> std::result::Result<Self::Value, E>
+                where
+                    E: de::Error,
+                {
+                    Ok(ToolPathPatchTool::Version)
+                }
+
+                fn visit_map<M>(self, map: M) -> std::result::Result<Self::Value, M::Error>
+                where
+                    M: MapAccess<'de>,
+                {
+                    Ok(ToolPathPatchTool::Detailed(ToolPathPatchDetailed::deserialize(
+                        MapAccessDeserializer::new(map),
+                    )?))
+                }
+            }
+
+            deserializer.deserialize_any(ToolPathPatchToolVisitor)
+        }
+    }
+
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct ToolPathPatchDetailed {
+        path: Option<RelativePathBuf>,
+    }
+
+    // This private extraction intentionally sees only enough of the file to normalize
+    // `[tools].*.path`. Final `ConfigFile` extraction below still owns schema validation, so a
+    // typo in the full tool table is not hidden by this sparse patch.
+    let patch_file: ToolPathPatchFile = Figment::from(Toml::file(config_file))
+        .extract()
+        .context(crate::error::ConfigExtractSnafu)?;
+
+    let tools = patch_file
+        .tools
+        .into_iter()
+        .filter_map(|(name, tool)| match tool {
+            ToolPathPatchTool::Detailed(ToolPathPatchDetailed { path: Some(path) }) => Some((
+                name,
+                ToolConfig::Detailed(ToolConfigDetailed {
+                    version: None,
+                    features: None,
+                    default_features: true,
+                    registry: None,
+                    git: None,
+                    branch: None,
+                    tag: None,
+                    rev: None,
+                    path: Some(path.relative()),
+                }),
+            )),
+            ToolPathPatchTool::Detailed(ToolPathPatchDetailed { path: None })
+            | ToolPathPatchTool::Version => None,
+        })
+        .collect::<HashMap<_, _>>();
+
+    if tools.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(ConfigFile {
+            tools: Some(tools),
+            ..ConfigFile::default()
+        }))
+    }
+}
+
 /// Configuration settings for cgx.
 ///
 /// Configuration is loaded from multiple sources in order of precedence (later sources override
@@ -720,7 +836,13 @@ impl Config {
         let mut figment = Figment::new().merge(Serialized::defaults(ConfigFile::base_config()));
 
         for config_file in Self::discover_config_files(cwd, overrides)? {
-            figment = figment.merge(Toml::file(config_file));
+            figment = figment.merge(Toml::file(&config_file));
+            // Figment keeps source metadata on each leaf value, but `ConfigFile` stores plain
+            // `PathBuf`s, which discard that metadata. Merge a tiny patch right after each config
+            // file so tool paths are made absolute while they still know which file declared them.
+            if let Some(path_patch) = tool_path_patch(&config_file)? {
+                figment = figment.merge(Serialized::defaults(path_patch));
+            }
         }
 
         // Extract merged config file values (no CLI overrides applied yet via Figment)
@@ -1434,6 +1556,143 @@ mod tests {
         assert!(
             !error.contains("did not match any variant"),
             "error was the opaque untagged message:\n{error}"
+        );
+    }
+
+    fn toml_path(path: &Path) -> String {
+        path.display().to_string().replace('\\', "\\\\")
+    }
+
+    fn patched_tool_path(patch: &ConfigFile, tool_name: &str) -> PathBuf {
+        let tools = patch.tools.as_ref().unwrap();
+        match tools.get(tool_name) {
+            Some(ToolConfig::Detailed(ToolConfigDetailed { path: Some(path), .. })) => path.clone(),
+            other => panic!("expected detailed tool path for {tool_name}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_path_patch_resolves_relative_path_from_config_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let project_dir = temp_dir.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let config_path = project_dir.join("cgx.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [tools]
+            local-tool = { path = "tools/local-tool" }
+            "#,
+        )
+        .unwrap();
+
+        let patch = tool_path_patch(&config_path).unwrap().unwrap();
+
+        assert_eq!(
+            patched_tool_path(&patch, "local-tool"),
+            project_dir.join("tools/local-tool")
+        );
+    }
+
+    #[test]
+    fn tool_path_patch_leaves_absolute_path_unchanged() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let absolute_path = temp_dir.path().join("tools").join("local-tool");
+        let config_path = temp_dir.path().join("cgx.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+            [tools]
+            local-tool = {{ path = "{}" }}
+            "#,
+                toml_path(&absolute_path)
+            ),
+        )
+        .unwrap();
+
+        let patch = tool_path_patch(&config_path).unwrap().unwrap();
+
+        assert_eq!(patched_tool_path(&patch, "local-tool"), absolute_path);
+    }
+
+    #[test]
+    fn tool_path_patch_ignores_tools_without_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("cgx.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [tools]
+            string-tool = "1"
+            detailed-tool = { version = "1" }
+            "#,
+        )
+        .unwrap();
+
+        let patch = tool_path_patch(&config_path).unwrap();
+
+        assert!(patch.is_none());
+    }
+
+    #[test]
+    fn tool_path_patch_does_not_hide_unknown_tool_fields() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("cgx.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [tools]
+            local-tool = { path = "tools/local-tool", versio = "1" }
+            "#,
+        )
+        .unwrap();
+
+        let patch = tool_path_patch(&config_path).unwrap().unwrap();
+        let figment = Figment::new()
+            .merge(Serialized::defaults(ConfigFile::base_config()))
+            .merge(Toml::file(&config_path))
+            .merge(Serialized::defaults(patch));
+
+        assert_matches!(figment.extract::<ConfigFile>(), Err(_));
+    }
+
+    #[test]
+    fn config_hierarchy_merges_parent_path_with_child_version() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(
+            parent.join("cgx.toml"),
+            r#"
+            [tools]
+            local-tool = { path = "tools/local-tool" }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            child.join("cgx.toml"),
+            r#"
+            [tools]
+            local-tool = { version = "1" }
+            "#,
+        )
+        .unwrap();
+
+        let config_overrides = with_isolated_global_config(
+            Cli::parse_from_test_args(["local-tool"]).to_config_overrides(),
+            temp_dir.path(),
+        );
+        let config = Config::load_from_dir(&child, &config_overrides).unwrap();
+
+        assert_matches!(
+            config.tools.get("local-tool"),
+            Some(ToolConfig::Detailed(ToolConfigDetailed {
+                version: Some(version),
+                path: Some(path),
+                ..
+            })) if version == "1" && path == &parent.join("tools/local-tool")
         );
     }
 

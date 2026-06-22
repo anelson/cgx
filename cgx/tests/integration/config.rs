@@ -159,6 +159,55 @@ ripgrep = "13.0"
         .stdout(predicates::str::contains("ripgrep-13.0"));
 }
 
+#[test]
+fn relative_tool_path_in_parent_config_is_resolved_from_config_file() {
+    let mut cgx = Cgx::with_test_fs();
+
+    let project_dir = cgx.test_fs().cwd.child("project");
+    let tool_dir = project_dir.child("tools").child("simple-bin-no-deps");
+    let subdir = project_dir.child("subdir");
+    tool_dir.child("src").create_dir_all().unwrap();
+    subdir.create_dir_all().unwrap();
+
+    tool_dir
+        .child("Cargo.toml")
+        .write_str(
+            r#"
+[package]
+edition = "2024"
+name = "simple-bin-no-deps"
+version = "0.1.0"
+
+[dependencies]
+"#,
+        )
+        .unwrap();
+    tool_dir
+        .child("src")
+        .child("main.rs")
+        .write_str("fn main() {}\n")
+        .unwrap();
+
+    project_dir
+        .child("cgx.toml")
+        .write_str(
+            r#"
+[tools]
+simple-bin-no-deps = { path = "tools/simple-bin-no-deps" }
+"#,
+        )
+        .unwrap();
+
+    cgx.cmd
+        .current_dir(subdir.path())
+        .arg("--unlocked")
+        .arg("--list-targets")
+        .arg("simple-bin-no-deps")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("bin: simple-bin-no-deps"));
+}
+
 /// Test alias resolution from config.
 ///
 /// Config files can define aliases that map convenient short names to actual crate names.
