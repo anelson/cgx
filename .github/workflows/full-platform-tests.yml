@@ -60,7 +60,7 @@ jobs:
     if: needs.should-run.outputs.should-run == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - &install-rust
         uses: dtolnay/rust-toolchain@master
@@ -116,7 +116,7 @@ jobs:
             cache_key: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - *install-rust
 
@@ -157,7 +157,7 @@ jobs:
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - *install-rust
 
@@ -202,7 +202,7 @@ jobs:
             cache_key: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.3
 
       - *install-rust
 
@@ -243,7 +243,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.3
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
@@ -252,7 +252,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz
-        uses: release-plz/action@v0.5.129
+        uses: release-plz/action@v0.5.130
         with:
           command: release-pr
         env:
