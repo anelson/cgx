@@ -1643,7 +1643,7 @@ mod tests {
             &config_path,
             r#"
             [tools]
-            local-tool = { path = "tools/local-tool", versio = "1" }
+            local-tool = { path = "tools/local-tool", versio = "1" } # spellchecker:disable-line
             "#,
         )
         .unwrap();
