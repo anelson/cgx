@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: action-smoke-${{ github.ref }}
@@ -204,11 +205,11 @@ jobs:
 
   # Caching round-trip: prove cgx's on-disk state survives a save+restore. The
   # seed job installs cgx, runs a tool to populate the store, and saves the cache
-  # on its post-job step. The restore job (which `needs` the seed, so it starts
-  # only after that save) restores the same entry and runs the tool with
-  # --offline, which can only succeed if the binary + resolve cache really came
-  # back from the cache. A dedicated cache-key-prefix isolates these caches from
-  # the `setup` jobs' caches in the same run.
+  # on its post-job step. The restore job waits for that cache to become visible,
+  # restores it through the action, and runs the tool with --offline, which can
+  # only succeed if the binary + resolve cache really came back from the cache.
+  # A dedicated cache-key-prefix isolates these caches from the `setup` jobs'
+  # caches in the same run.
   cache-roundtrip-seed:
     name: cache round-trip (seed + save)
     runs-on: ubuntu-24.04
@@ -230,22 +231,45 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6.0.3
+      # In at least one case, this this smoke test failed as if the cache were not restored properly, although a re-run
+      # of the same test subsequently succeeded.  It appears that the GHA cache mechanism may be eventually
+      # consistent, such that we cannot safely assume that a previously saved cache entry is always immediately
+      # available to subsequent jobs.  This step tries to work around this, assuming that the "eventual" in
+      # "eventually consistent" is a matter of seconds as opposed to hours.
+      - name: Wait for seed cache to become visible
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CACHE_KEY: cgx-roundtrip-state-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          CACHE_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          while (( SECONDS < deadline )); do
+            found="$(
+              gh cache list \
+                --repo "$GITHUB_REPOSITORY" \
+                --ref "$CACHE_REF" \
+                --key "$CACHE_KEY" \
+                --limit 1 \
+                --json key \
+                --jq '.[0].key // ""'
+            )"
+            if [ "$found" = "$CACHE_KEY" ]; then
+              echo "Found seed cache: $CACHE_KEY"
+              sleep 5
+              exit 0
+            fi
+            echo "Waiting for seed cache: $CACHE_KEY"
+            sleep 5
+          done
+          echo "::error::seed cache did not become visible for ref $CACHE_REF: $CACHE_KEY"
+          exit 1
       - name: Install cgx (should restore the seed job's cache)
         uses: ./
         with:
           cache-key-prefix: cgx-roundtrip
           prefetch-all: "false"
-      - name: Assert the store was restored from cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The restore must repopulate the tool-binary dir before we run anything;
-          # an empty bins dir means the save+restore round-trip did not work.
-          test -d "$CGX_APP_DIR/bins"
-          if ! find "$CGX_APP_DIR/bins" -type f | grep -q .; then
-            echo "::error::cgx bins dir is empty - cache was not restored"
-            exit 1
-          fi
       - name: Assert the cached tool resolves offline (no re-download)
         shell: bash
         run: cgx --offline ripgrep@14 -- --version
