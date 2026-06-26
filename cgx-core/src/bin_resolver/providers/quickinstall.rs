@@ -7,7 +7,7 @@ use snafu::ResultExt;
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::{BinaryResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedCrate,
     downloader::DownloadedCrate,
@@ -47,20 +47,31 @@ impl QuickinstallProvider {
 }
 
 impl Provider for QuickinstallProvider {
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>> {
+    fn kind(&self) -> BinaryProvider {
+        BinaryProvider::Quickinstall
+    }
+
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
         let url = Self::construct_url(&krate.resolved, platform);
 
         self.reporter
             .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Quickinstall));
 
-        let Ok(Some(data)) = self.download_file(&url) else {
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::Quickinstall,
-                    "download failed or binary not found",
-                )
-            });
-            return Ok(None);
+        let data = match self.download_file(&url) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::provider_has_no_binary(
+                        BinaryProvider::Quickinstall,
+                        "binary not found",
+                    )
+                });
+                return Ok(BinaryResolution::Nonexistent);
+            }
+            Err(e) if e.is_transient_http_error() => {
+                return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
+            }
+            Err(e) => return Err(e),
         };
 
         // TODO(#80): verify .sig (minisign) signatures when support is added
@@ -109,7 +120,7 @@ impl Provider for QuickinstallProvider {
             })?;
         }
 
-        Ok(Some(ResolvedBinary {
+        Ok(BinaryResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::Quickinstall,
             path: final_path,

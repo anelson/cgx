@@ -1,8 +1,6 @@
 use std::{
-    collections::hash_map::DefaultHasher,
     fs,
-    hash::{Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -30,6 +28,7 @@ use crate::{
 /// This generic wrapper is used for any cached data that has an expiration policy.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct CacheEntry<T> {
+    #[serde(flatten)]
     value: T,
     cached_at: DateTime<Utc>,
 }
@@ -59,6 +58,32 @@ impl<T> CacheEntry<T> {
 
 /// A cache entry for a resolved crate specification.
 type CrateResolveCacheEntry = CacheEntry<ResolvedCrate>;
+
+/// A cached binary-resolution outcome.
+///
+/// Only conclusive outcomes should be cached; a transient/inconclusive resolution failure should
+/// never be persisted.
+///
+/// The two variants distinguish a positive result (a pre-built binary was resolved) from a
+/// conclusive negative (we determined no pre-built binary is available).  Theoretically it's
+/// possible that we could have checked at exactly the moment when a crate was just published but
+/// artifacts not yet released, or that a maintainer could go back and publish artifacts for older
+/// versions long after release, but both of these are highly unlikely.  By caching this result, we
+/// can speed up subsequent runs and avoid the many network requests (and potential throttling)
+/// that would be required to check for a pre-built binary every time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "only a handful of these exist at a time (one per resolved crate); the size disparity between \
+              Found and Nonexistent does not matter and boxing would only add indirection"
+)]
+pub(crate) enum BinaryCacheEntry {
+    /// A pre-built binary was resolved.
+    Found(ResolvedBinary),
+    /// We conclusively determined that no pre-built binary is available.
+    Nonexistent,
+}
 
 /// Manages the various caches that cgx uses to operate.
 ///
@@ -175,95 +200,6 @@ impl Cache {
         }
     }
 
-    /// Get a cached binary resolution result, or resolve it using the provided resolver function.
-    ///
-    /// Binary resolution results never expire because crates are immutable. Once we determine
-    /// whether a binary exists for a specific version on a specific platform, that answer remains
-    /// valid forever. We cache both positive (binary found) and negative (no binary) results to
-    /// avoid repeatedly checking providers.
-    ///
-    /// Unlike crate resolution, there is no TTL check - the cache entry is permanent.
-    ///
-    /// # Arguments
-    ///
-    /// * `krate` - The resolved crate to find a binary for
-    /// * `resolver` - Function that attempts to find and download a pre-built binary
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Some(ResolvedBinary))` - Found a pre-built binary (either cached or freshly resolved)
-    /// * `Ok(None)` - No pre-built binary available (either cached negative result or resolver
-    ///   returned None)
-    /// * `Err(...)` - An error occurred during resolution
-    pub(crate) fn get_or_resolve_binary<F>(
-        &self,
-        krate: &ResolvedCrate,
-        resolver: F,
-    ) -> Result<Option<ResolvedBinary>>
-    where
-        F: FnOnce() -> Result<Option<ResolvedBinary>>,
-    {
-        // Check cache unless refresh mode is enabled
-        let use_cache = !self.inner.config.refresh;
-
-        if use_cache {
-            self.inner
-                .reporter
-                .report(|| PrebuiltBinaryMessage::cache_lookup(krate));
-
-            if let Ok(Some(entry)) = self.get_cached_binary(krate) {
-                match &entry.value {
-                    Some(binary) => {
-                        self.inner
-                            .reporter
-                            .report(|| PrebuiltBinaryMessage::cache_hit(&binary.path, binary.provider));
-                    }
-                    None => {
-                        // Negative cache hit - we previously determined no binary was available
-                        self.inner.reporter.report(|| {
-                            PrebuiltBinaryMessage::no_binary_found(
-                                krate,
-                                vec!["negative cache hit - no binary available".to_string()],
-                            )
-                        });
-                    }
-                }
-                // Return the cached result whether it's Some or None
-                return Ok(entry.value);
-            }
-
-            self.inner
-                .reporter
-                .report(|| PrebuiltBinaryMessage::cache_miss(krate));
-        }
-
-        // Call the resolver to attempt finding a binary
-        match resolver() {
-            Ok(result) => {
-                // Cache the result (whether Some or None)
-                let _ = self.put_cached_binary(krate, &result);
-
-                if let Some(ref _binary) = result {
-                    if let Ok(cache_path) = self.binary_cache_path(krate) {
-                        self.inner
-                            .reporter
-                            .report(|| PrebuiltBinaryMessage::cache_stored(&cache_path));
-                    }
-                } else {
-                    // Also report when we cache a negative result
-                    if let Ok(cache_path) = self.binary_cache_path(krate) {
-                        self.inner
-                            .reporter
-                            .report(|| PrebuiltBinaryMessage::cache_stored(&cache_path));
-                    }
-                }
-
-                Ok(result)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     /// Get a cached crate source code package, or download it using the provided downloader
     /// function.
     ///
@@ -279,7 +215,7 @@ impl Cache {
         downloader: F,
     ) -> Result<DownloadedCrate>
     where
-        F: FnOnce(&std::path::Path) -> Result<()>,
+        F: FnOnce(&Path) -> Result<()>,
     {
         self.inner
             .reporter
@@ -404,30 +340,44 @@ impl Cache {
         Ok(())
     }
 
-    /// Get a cached binary resolution result for the given [`ResolvedCrate`], if one exists.
+    /// Get the cached binary resolution outcome for the given [`ResolvedCrate`], if one exists.
     ///
-    /// Returns `None` if there is no cached entry or if reading the cache fails.
-    /// Note that a cached entry can contain `Some(ResolvedBinary)` or `None` - we cache
-    /// both positive and negative results.
-    fn get_cached_binary(&self, krate: &ResolvedCrate) -> Result<Option<CacheEntry<Option<ResolvedBinary>>>> {
-        let cache_file = self.binary_cache_path(krate)?;
-        if !cache_file.exists() {
-            return Ok(None);
+    /// Binary resolution results never expire because crates are immutable. Once we determine
+    /// whether a binary exists for a specific version on a specific platform, that answer remains
+    /// valid forever. We cache both positive (binary found) and negative (no binary) results to
+    /// avoid repeatedly checking providers.
+    ///
+    /// Unlike crate resolution, there is no TTL check - the cache entry is permanent.
+    ///
+    /// Returns `Ok(None)` when there is no cache entry for the crate, or `Ok(Some(entry))` carrying
+    /// the cached resolution outcome.
+    pub(crate) fn get_cached_binary(&self, krate: &ResolvedCrate) -> Result<Option<BinaryCacheEntry>> {
+        self.inner
+            .reporter
+            .report(|| PrebuiltBinaryMessage::cache_lookup(krate));
+
+        let entry = self.read_binary_cache_entry(krate);
+
+        match &entry {
+            Some(BinaryCacheEntry::Found(binary)) => self
+                .inner
+                .reporter
+                .report(|| PrebuiltBinaryMessage::positive_cache_hit(krate, &binary.path, binary.provider)),
+            Some(BinaryCacheEntry::Nonexistent) => self
+                .inner
+                .reporter
+                .report(|| PrebuiltBinaryMessage::negative_cache_hit(krate)),
+            None => self
+                .inner
+                .reporter
+                .report(|| PrebuiltBinaryMessage::cache_miss(krate)),
         }
 
-        let contents = fs::read_to_string(&cache_file).with_context(|_| error::IoSnafu {
-            path: cache_file.clone(),
-        })?;
-        let entry: CacheEntry<Option<ResolvedBinary>> =
-            serde_json::from_str(&contents).context(error::JsonSnafu)?;
-
-        Ok(Some(entry))
+        Ok(entry)
     }
 
-    /// Store a binary resolution result in the cache for the given [`ResolvedCrate`].
-    ///
-    /// This stores both positive results (Some(ResolvedBinary)) and negative results (None).
-    fn put_cached_binary(&self, krate: &ResolvedCrate, result: &Option<ResolvedBinary>) -> Result<()> {
+    /// Store a conclusive binary resolution outcome in the cache for the given [`ResolvedCrate`].
+    pub(crate) fn put_cached_binary(&self, krate: &ResolvedCrate, entry: &BinaryCacheEntry) -> Result<()> {
         let cache_file = self.binary_cache_path(krate)?;
 
         if let Some(parent) = cache_file.parent() {
@@ -436,14 +386,62 @@ impl Cache {
             })?;
         }
 
-        let entry = CacheEntry::new(result.clone());
+        let entry = CacheEntry::new(entry);
 
         let json = serde_json::to_string_pretty(&entry).context(error::JsonSnafu)?;
         fs::write(&cache_file, json).with_context(|_| error::IoSnafu {
             path: cache_file.clone(),
         })?;
 
+        self.inner
+            .reporter
+            .report(|| PrebuiltBinaryMessage::cache_stored(&cache_file));
+
         Ok(())
+    }
+
+    /// Read and deserialize the binary cache entry for the crate `krate`, returning `None` if the
+    /// cache entry is absent or unreadable.
+    ///
+    /// A corrupt or stale-format entry is treated as a miss (it will be re-resolved and
+    /// overwritten).
+    #[instrument(skip_all, fields(krate = %krate.name, version = %krate.version))]
+    fn read_binary_cache_entry(&self, krate: &ResolvedCrate) -> Option<BinaryCacheEntry> {
+        let cache_file = match self.binary_cache_path(krate) {
+            Ok(cache_file) => cache_file,
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    "failed to compute binary cache path; this should not ever happen"
+                );
+                return None;
+            }
+        };
+
+        if !cache_file.exists() {
+            return None;
+        }
+
+        let contents = match fs::read_to_string(&cache_file) {
+            Ok(contents) => contents,
+            Err(e) => {
+                debug!(
+                    path = %cache_file.display(),
+                    error = %e,
+                    "ignoring unreadable binary cache entry");
+                return None;
+            }
+        };
+
+        match serde_json::from_str::<CacheEntry<BinaryCacheEntry>>(&contents) {
+            Ok(entry) => Some(entry.into_inner()),
+            Err(e) => {
+                debug!(path = %cache_file.display(),
+                    error = %e,
+                    "ignoring unparsable binary cache entry");
+                None
+            }
+        }
     }
 
     /// Get the filesystem path for the binary resolution cache file for a given [`ResolvedCrate`].
@@ -452,7 +450,7 @@ impl Cache {
     /// This ensures that binaries are cached per-platform, which is essential since pre-built
     /// binaries are platform-specific.
     fn binary_cache_path(&self, krate: &ResolvedCrate) -> Result<PathBuf> {
-        let hash = Self::compute_binary_cache_hash(krate)?;
+        let hash = Self::compute_binary_cache_hash(krate, build_context::TARGET)?;
         Ok(self
             .inner
             .config
@@ -467,10 +465,11 @@ impl Cache {
     /// - Crate name
     /// - Crate version
     /// - Resolved source (crates.io vs git vs forge, etc.)
-    /// - Current platform triple
+    /// - The target platform triple
     ///
-    /// This ensures that the same crate on different platforms gets different cache entries.
-    fn compute_binary_cache_hash(krate: &ResolvedCrate) -> Result<String> {
+    /// `platform` is a parameter so the hash is distinct and testable for a fixed platform. This
+    /// ensures the same crate on different platforms gets different cache entries.
+    fn compute_binary_cache_hash(krate: &ResolvedCrate, platform: &str) -> Result<String> {
         #[derive(Serialize)]
         struct BinaryCacheKey<'a> {
             name: &'a str,
@@ -483,7 +482,7 @@ impl Cache {
             name: &krate.name,
             version: &krate.version,
             source: &krate.source,
-            platform: build_context::TARGET,
+            platform,
         };
 
         let json = serde_json::to_string(&key).context(error::JsonSnafu)?;
@@ -764,35 +763,19 @@ impl Cache {
     ///
     /// Different sources (crates.io vs git vs forge) will produce different hashes
     /// even for the same crate name and version.
+    ///
+    /// Uses SHA-256 over the source's JSON serialization, so the resulting build-cache paths are
+    /// stable across toolchains and platforms (presuming, of course, that the JSON serialized
+    /// representation of the source is itself stable across toolchains and platforms, which we
+    /// hope that it is).
     fn compute_source_hash(source: &ResolvedSource) -> String {
-        let mut hasher = DefaultHasher::new();
-        match source {
-            ResolvedSource::CratesIo => {
-                "crates-io".hash(&mut hasher);
-            }
-            ResolvedSource::Registry { source: registry } => {
-                "registry".hash(&mut hasher);
-                match registry {
-                    RegistrySource::Named(name) => name.hash(&mut hasher),
-                    RegistrySource::IndexUrl(url) => url.as_str().hash(&mut hasher),
-                }
-            }
-            ResolvedSource::Git { repo, commit } => {
-                "git".hash(&mut hasher);
-                repo.hash(&mut hasher);
-                commit.hash(&mut hasher);
-            }
-            ResolvedSource::Forge { forge, commit } => {
-                "forge".hash(&mut hasher);
-                // Format Debug output of forge for hashing
-                format!("{:?}", forge).hash(&mut hasher);
-                commit.hash(&mut hasher);
-            }
-            ResolvedSource::LocalDir { .. } => {
-                panic!("BUG: Should not compute hash for LocalDir sources");
-            }
+        // It makes absolutely no sense to try to cache a local dir source!  Higher-level code
+        // should have already bypassed the cache for this source.
+        if matches!(source, ResolvedSource::LocalDir { .. }) {
+            panic!("BUG: Should not compute a build-cache hash for LocalDir sources");
         }
-        format!("{:016x}", hasher.finish())
+
+        source.source_hash()
     }
 
     /// Compute a hash of build options that affect the output binary.
@@ -807,29 +790,42 @@ impl Cache {
     /// Features are sorted before hashing to ensure consistent cache keys
     /// regardless of the order they're specified.
     fn compute_build_hash(options: &BuildOptions) -> String {
-        let mut hasher = DefaultHasher::new();
-
         // Sort features for consistency - order shouldn't matter for cache key
         let mut features = options.features.clone();
         features.sort();
-        features.hash(&mut hasher);
 
-        options.all_features.hash(&mut hasher);
-        options.no_default_features.hash(&mut hasher);
-        options.profile.hash(&mut hasher);
-        options.target.hash(&mut hasher);
-        options.build_target.hash(&mut hasher);
-        options.toolchain.hash(&mut hasher);
+        // Only the options that actually change the built binary are part of the key. `offline`,
+        // `jobs`, and `ignore_rust_version` affect build behavior but not output and are excluded;
+        // `locked` IS included because it affects dependency resolution (hence the binary).
+        //
+        // The key is serialized to JSON  and hashed with SHA-256 so build-cache paths are stable
+        // across toolchains.
+        #[derive(Serialize)]
+        struct BuildCacheKey<'a> {
+            features: &'a [String],
+            all_features: bool,
+            no_default_features: bool,
+            profile: &'a Option<String>,
+            target: &'a Option<String>,
+            build_target: &'a BuildTarget,
+            toolchain: &'a Option<String>,
+            locked: bool,
+        }
 
-        // locked affects dependency resolution, which affects the binary
-        options.locked.hash(&mut hasher);
+        let key = BuildCacheKey {
+            features: &features,
+            all_features: options.all_features,
+            no_default_features: options.no_default_features,
+            profile: &options.profile,
+            target: &options.target,
+            build_target: &options.build_target,
+            toolchain: &options.toolchain,
+            locked: options.locked,
+        };
 
-        // Explicitly NOT hashing these fields as they don't affect the binary output:
-        // - offline: affects network access, not binary
-        // - jobs: affects build parallelism, not binary
-        // - ignore_rust_version: affects cargo checks, not binary
-
-        format!("{:016x}", hasher.finish())
+        let json =
+            serde_json::to_string(&key).expect("serializing a BuildCacheKey of plain fields cannot fail");
+        Self::compute_hash(json.as_bytes())
     }
 
     /// Compute the expected binary name based on the build target.
@@ -920,6 +916,532 @@ mod tests {
             name: "serde".to_string(),
             version: Version::parse("1.0.1").unwrap(),
             source: ResolvedSource::CratesIo,
+        }
+    }
+
+    /// On-disk format / cache-key compatibility checks.
+    ///
+    /// These tests assert contents and paths that are persistent on disk, to detect when we've
+    /// made any changes that will break compatibility with existing cache entries.
+    ///
+    /// A test failure here isn't automatically a bug that you have to fix.  The consequences for
+    /// broken compat are pretty low: a cache miss followed by some otherwise-unnecessary rework
+    /// like crate resolution or maybe even rebuilding from source.  That's not the end of the
+    /// world, but if we're going to break compat we must do so deliberately; that's what these
+    /// tests are here for.
+    ///
+    /// If you have decided to make a breaking change, update the tests here so that they pass with
+    /// your new changes.  But that must always be a conscious decision.  God help you if I find
+    /// out you vibe-coded some change and your clanker blithely updated these tests to ignore the
+    /// break!
+    mod compat {
+        use chrono::{DateTime, Utc};
+
+        use super::*;
+        use crate::config::BinaryProvider;
+
+        /// A fixed timestamp so serialized output is deterministic.
+        fn fixed_cached_at() -> DateTime<Utc> {
+            "2024-01-15T12:30:00Z".parse().unwrap()
+        }
+
+        /// The binary resolution cache, which stores both positive and negative results for
+        /// whether a pre-built binary exists for a given crate.
+        mod resolved_binary {
+            use super::*;
+
+            /// A positive entry: a resolved binary was found and cached.
+            fn positive_entry() -> CacheEntry<BinaryCacheEntry> {
+                CacheEntry {
+                    value: BinaryCacheEntry::Found(ResolvedBinary {
+                        krate: ResolvedCrate {
+                            name: "eza".to_string(),
+                            version: Version::parse("0.23.1").unwrap(),
+                            source: ResolvedSource::CratesIo,
+                        },
+                        provider: BinaryProvider::GithubReleases,
+                        path: PathBuf::from("/cache/bin/eza"),
+                    }),
+                    cached_at: fixed_cached_at(),
+                }
+            }
+
+            /// A negative entry: we conclusively determined no binary is available.
+            fn negative_entry() -> CacheEntry<BinaryCacheEntry> {
+                CacheEntry {
+                    value: BinaryCacheEntry::Nonexistent,
+                    cached_at: fixed_cached_at(),
+                }
+            }
+
+            const POSITIVE_JSON: &str = r#"{
+  "outcome": "found",
+  "krate": {
+    "name": "eza",
+    "version": "0.23.1",
+    "source": "crates_io"
+  },
+  "provider": "github-releases",
+  "path": "/cache/bin/eza",
+  "cached_at": "2024-01-15T12:30:00Z"
+}"#;
+
+            const NEGATIVE_JSON: &str = r#"{
+  "outcome": "nonexistent",
+  "cached_at": "2024-01-15T12:30:00Z"
+}"#;
+
+            #[test]
+            fn positive_entry_serializes_to_expected_json() {
+                assert_eq!(
+                    serde_json::to_string_pretty(&positive_entry()).unwrap(),
+                    POSITIVE_JSON
+                );
+            }
+
+            #[test]
+            fn negative_entry_serializes_to_expected_json() {
+                assert_eq!(
+                    serde_json::to_string_pretty(&negative_entry()).unwrap(),
+                    NEGATIVE_JSON
+                );
+            }
+
+            #[test]
+            fn positive_entry_round_trips() {
+                let original = positive_entry();
+                let json = serde_json::to_string_pretty(&original).unwrap();
+                let back: CacheEntry<BinaryCacheEntry> = serde_json::from_str(&json).unwrap();
+                assert_eq!(back, original);
+                let from_literal: CacheEntry<BinaryCacheEntry> = serde_json::from_str(POSITIVE_JSON).unwrap();
+                assert_eq!(from_literal, original);
+            }
+
+            #[test]
+            fn negative_entry_round_trips() {
+                let original = negative_entry();
+                let json = serde_json::to_string_pretty(&original).unwrap();
+                let back: CacheEntry<BinaryCacheEntry> = serde_json::from_str(&json).unwrap();
+                assert_eq!(back, original);
+                let from_literal: CacheEntry<BinaryCacheEntry> = serde_json::from_str(NEGATIVE_JSON).unwrap();
+                assert_eq!(from_literal, original);
+            }
+        }
+
+        /// The crate resolution cache, which stores the resolved crate identity (name, version,
+        /// source) for a given [`CrateSpec`].  Since the resolved crate also has a
+        /// [`ResolvedSource`], this test also covers compat testing for that type as well.
+        mod resolved_crate {
+            use super::*;
+
+            fn crate_with(source: ResolvedSource) -> ResolvedCrate {
+                ResolvedCrate {
+                    name: "demo".to_string(),
+                    version: Version::parse("1.2.3").unwrap(),
+                    source,
+                }
+            }
+
+            const ON_DISK_JSON: &str = r#"{
+  "name": "demo",
+  "version": "1.2.3",
+  "source": "crates_io",
+  "cached_at": "2024-01-15T12:30:00Z"
+}"#;
+
+            #[test]
+            fn on_disk_cache_entry_round_trips_to_expected_json() {
+                let entry = CacheEntry {
+                    value: crate_with(ResolvedSource::CratesIo),
+                    cached_at: fixed_cached_at(),
+                };
+                assert_eq!(serde_json::to_string_pretty(&entry).unwrap(), ON_DISK_JSON);
+                let back: CacheEntry<ResolvedCrate> = serde_json::from_str(ON_DISK_JSON).unwrap();
+                assert_eq!(back, entry);
+            }
+
+            /// Assert a `ResolvedSource` serializes to exactly `expected` and round-trips back.
+            fn check(source: ResolvedSource, expected: &str) {
+                assert_eq!(serde_json::to_string_pretty(&source).unwrap(), expected);
+                let back: ResolvedSource = serde_json::from_str(expected).unwrap();
+                assert_eq!(back, source);
+            }
+
+            #[test]
+            fn crates_io() {
+                check(ResolvedSource::CratesIo, r#""crates_io""#);
+            }
+
+            #[test]
+            fn registry_named() {
+                check(
+                    ResolvedSource::Registry {
+                        source: RegistrySource::Named("my-registry".to_string()),
+                    },
+                    r#"{
+  "registry": {
+    "source": {
+      "named": "my-registry"
+    }
+  }
+}"#,
+                );
+            }
+
+            #[test]
+            fn registry_index_url() {
+                check(
+                    ResolvedSource::Registry {
+                        source: RegistrySource::IndexUrl(
+                            url::Url::parse("https://example.com/index").unwrap(),
+                        ),
+                    },
+                    r#"{
+  "registry": {
+    "source": {
+      "index_url": "https://example.com/index"
+    }
+  }
+}"#,
+                );
+            }
+
+            #[test]
+            fn git() {
+                check(
+                    ResolvedSource::Git {
+                        repo: "https://github.com/owner/repo.git".to_string(),
+                        commit: "abc123".to_string(),
+                    },
+                    r#"{
+  "git": {
+    "repo": "https://github.com/owner/repo.git",
+    "commit": "abc123"
+  }
+}"#,
+                );
+            }
+
+            #[test]
+            fn forge_github() {
+                check(
+                    ResolvedSource::Forge {
+                        forge: Forge::GitHub {
+                            custom_url: None,
+                            owner: "owner".to_string(),
+                            repo: "repo".to_string(),
+                        },
+                        commit: "abc123".to_string(),
+                    },
+                    r#"{
+  "forge": {
+    "forge": {
+      "git_hub": {
+        "custom_url": null,
+        "owner": "owner",
+        "repo": "repo"
+      }
+    },
+    "commit": "abc123"
+  }
+}"#,
+                );
+            }
+
+            #[test]
+            fn forge_gitlab() {
+                check(
+                    ResolvedSource::Forge {
+                        forge: Forge::GitLab {
+                            custom_url: None,
+                            owner: "owner".to_string(),
+                            repo: "repo".to_string(),
+                        },
+                        commit: "def456".to_string(),
+                    },
+                    r#"{
+  "forge": {
+    "forge": {
+      "git_lab": {
+        "custom_url": null,
+        "owner": "owner",
+        "repo": "repo"
+      }
+    },
+    "commit": "def456"
+  }
+}"#,
+                );
+            }
+
+            #[test]
+            fn local_dir() {
+                check(
+                    ResolvedSource::LocalDir {
+                        path: PathBuf::from("/some/local/path"),
+                    },
+                    r#"{
+  "local_dir": {
+    "path": "/some/local/path"
+  }
+}"#,
+                );
+            }
+        }
+
+        /// The resolve-cache key, which is a hash computed from a crate spec and used to construct
+        /// entries.
+        mod crate_spec_hash {
+            use semver::VersionReq;
+
+            use super::*;
+            use crate::git::GitSelector;
+
+            #[test]
+            fn crates_io() {
+                let spec = CrateSpec::CratesIo {
+                    name: "serde".to_string(),
+                    version: Some(VersionReq::parse("=1.0.0").unwrap()),
+                };
+                assert_eq!(
+                    Cache::compute_spec_hash(&spec).unwrap(),
+                    "79b48b0d3feee138ee1ea1f22108170f85431c6240de6571ed3693c1001a9974"
+                );
+            }
+
+            #[test]
+            fn registry_named() {
+                let spec = CrateSpec::Registry {
+                    source: RegistrySource::Named("my-registry".to_string()),
+                    name: "serde".to_string(),
+                    version: None,
+                };
+                assert_eq!(
+                    Cache::compute_spec_hash(&spec).unwrap(),
+                    "7a3b4789c6780ca2b848cc536fbb0ea1e034128e2e492ada1a31ce7f633c4f52"
+                );
+            }
+
+            #[test]
+            fn git() {
+                let spec = CrateSpec::Git {
+                    repo: "https://github.com/owner/repo.git".to_string(),
+                    selector: GitSelector::Tag("v1.0.0".to_string()),
+                    name: None,
+                    version: None,
+                };
+                assert_eq!(
+                    Cache::compute_spec_hash(&spec).unwrap(),
+                    "5d8eebf800c54c1e46ed66e72ff8b1c9bd7bfc88325aa2473b068aa69d9466a4"
+                );
+            }
+
+            #[test]
+            fn forge_github() {
+                let spec = CrateSpec::Forge {
+                    forge: Forge::GitHub {
+                        custom_url: None,
+                        owner: "owner".to_string(),
+                        repo: "repo".to_string(),
+                    },
+                    selector: GitSelector::DefaultBranch,
+                    name: None,
+                    version: None,
+                };
+                assert_eq!(
+                    Cache::compute_spec_hash(&spec).unwrap(),
+                    "9338fcc8761b894c6681a9100281143350ad2ded6bce067a4b39d2a787972ef2"
+                );
+            }
+
+            #[test]
+            fn local_dir() {
+                let spec = CrateSpec::LocalDir {
+                    path: PathBuf::from("/some/local/path"),
+                    name: None,
+                    version: None,
+                };
+                assert_eq!(
+                    Cache::compute_spec_hash(&spec).unwrap(),
+                    "e87d6dd1b220d02006524fbaac4d7c654b55eff1bd9a1332fd52a5e738a8fca5"
+                );
+            }
+        }
+
+        /// The binary-resolution-cache key, which is a hash computed from a resolved crate and the
+        /// target platform.
+        mod binary_cache_hash {
+            use super::*;
+
+            const PLATFORM: &str = "x86_64-unknown-linux-gnu";
+
+            #[test]
+            fn crates_io() {
+                let krate = ResolvedCrate {
+                    name: "eza".to_string(),
+                    version: Version::parse("0.23.1").unwrap(),
+                    source: ResolvedSource::CratesIo,
+                };
+                assert_eq!(
+                    Cache::compute_binary_cache_hash(&krate, PLATFORM).unwrap(),
+                    "e73c84363ece02d92a3dfe4ff390dcbe0dbe3381f050280505a1adb3916fad78"
+                );
+            }
+
+            #[test]
+            fn platform_changes_the_hash() {
+                let krate = ResolvedCrate {
+                    name: "eza".to_string(),
+                    version: Version::parse("0.23.1").unwrap(),
+                    source: ResolvedSource::CratesIo,
+                };
+                assert_ne!(
+                    Cache::compute_binary_cache_hash(&krate, "x86_64-unknown-linux-gnu").unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, "aarch64-apple-darwin").unwrap(),
+                );
+            }
+        }
+
+        /// The build-cache key, a hash computed from the resolved source and build options that
+        /// affect the output binary.
+        mod build_cache_hash {
+            use super::*;
+            use crate::builder::{BuildOptions, BuildTarget};
+
+            #[test]
+            fn source_hash_crates_io() {
+                assert_eq!(
+                    Cache::compute_source_hash(&ResolvedSource::CratesIo),
+                    "797cfdcfdf4d45ed0d3963577b0e549fe0c37295320d320d7173bfcf7bc42842"
+                );
+            }
+
+            #[test]
+            fn build_hash_default_options() {
+                assert_eq!(
+                    Cache::compute_build_hash(&BuildOptions::default()),
+                    "115fc6c55136730f0dbc99c9d90074d669d03b8ab9c61ccad2b76cb535f688af"
+                );
+            }
+
+            #[test]
+            fn build_hash_with_options() {
+                let options = BuildOptions {
+                    features: vec!["json".to_string(), "tls".to_string()],
+                    all_features: false,
+                    no_default_features: true,
+                    profile: Some("release".to_string()),
+                    target: Some("x86_64-unknown-linux-gnu".to_string()),
+                    build_target: BuildTarget::Bin("mybin".to_string()),
+                    toolchain: Some("stable".to_string()),
+                    locked: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    Cache::compute_build_hash(&options),
+                    "122238fafcf514ae03c828f2b94c68a787ec9b3c69854aff6b51ae4b7f732c85"
+                );
+            }
+        }
+
+        /// The crate source cache directory layout, where crate source code is cached for reuse
+        /// across builds.
+        mod source_cache_paths {
+            use super::*;
+
+            fn assert_source_path(source: ResolvedSource, expected_suffix: &[&str]) {
+                let (cache, _temp) = test_cache();
+                let resolved = ResolvedCrate {
+                    name: "demo".to_string(),
+                    version: Version::parse("1.2.3").unwrap(),
+                    source,
+                };
+                let mut expected = cache.inner.config.cache_dir.join("sources");
+                for component in expected_suffix {
+                    expected = expected.join(component);
+                }
+                assert_eq!(cache.crate_source_cache_path(&resolved).unwrap(), expected);
+            }
+
+            #[test]
+            fn crates_io() {
+                assert_source_path(ResolvedSource::CratesIo, &["crates-io", "demo", "1.2.3"]);
+            }
+
+            #[test]
+            fn registry_named() {
+                assert_source_path(
+                    ResolvedSource::Registry {
+                        source: RegistrySource::Named("my-registry".to_string()),
+                    },
+                    &["registry", "my-registry", "demo", "1.2.3"],
+                );
+            }
+
+            #[test]
+            fn registry_index_url() {
+                assert_source_path(
+                    ResolvedSource::Registry {
+                        source: RegistrySource::IndexUrl(
+                            url::Url::parse("https://example.com/index").unwrap(),
+                        ),
+                    },
+                    &[
+                        "registry-index",
+                        "bf2749857dd97af7bf8b1b035bd103caee1276d7cf54cd24ea19dc9167bb0918",
+                        "demo",
+                        "1.2.3",
+                    ],
+                );
+            }
+
+            #[test]
+            fn git() {
+                // `sources/git/{sha256(repo_url)}/{commit}` (no name/version component)
+                assert_source_path(
+                    ResolvedSource::Git {
+                        repo: "https://github.com/owner/repo.git".to_string(),
+                        commit: "abc123".to_string(),
+                    },
+                    &[
+                        "git",
+                        "bc40893b43beea6303cb93d2e61df787840b4e09dcf293506e68491b9a082686",
+                        "abc123",
+                    ],
+                );
+            }
+
+            #[test]
+            fn forge_github() {
+                // `sources/github/{owner}/{repo}/{commit}` (no name/version component)
+                assert_source_path(
+                    ResolvedSource::Forge {
+                        forge: Forge::GitHub {
+                            custom_url: None,
+                            owner: "owner".to_string(),
+                            repo: "repo".to_string(),
+                        },
+                        commit: "abc123".to_string(),
+                    },
+                    &["github", "owner", "repo", "abc123"],
+                );
+            }
+
+            #[test]
+            fn forge_gitlab() {
+                // `sources/gitlab/{owner}/{repo}/{commit}` (no name/version component)
+                assert_source_path(
+                    ResolvedSource::Forge {
+                        forge: Forge::GitLab {
+                            custom_url: None,
+                            owner: "owner".to_string(),
+                            repo: "repo".to_string(),
+                        },
+                        commit: "def456".to_string(),
+                    },
+                    &["gitlab", "owner", "repo", "def456"],
+                );
+            }
         }
     }
 
@@ -1579,7 +2101,7 @@ mod tests {
         #[test]
         fn source_hash_distinguishes_crates_io() {
             let hash = Cache::compute_source_hash(&ResolvedSource::CratesIo);
-            assert_eq!(hash.len(), 16, "Hash should be 16 hex chars");
+            assert_eq!(hash.len(), 64, "SHA-256 hash should be 64 hex chars");
         }
 
         #[test]
@@ -1683,134 +2205,6 @@ mod tests {
             let hash2 = Cache::compute_spec_hash(&spec2).unwrap();
 
             assert_ne!(hash1, hash2);
-        }
-
-        #[test]
-        fn cache_path_format_crates_io() {
-            let (cache, _temp) = test_cache();
-            let resolved = test_resolved();
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("crates-io"));
-            assert!(path_str.contains("serde"));
-            assert!(path_str.contains("1.0.0"));
-        }
-
-        #[test]
-        fn cache_path_format_git() {
-            let (cache, _temp) = test_cache();
-            let resolved = ResolvedCrate {
-                name: "test".to_string(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: ResolvedSource::Git {
-                    repo: "https://github.com/test/test.git".to_string(),
-                    commit: "abc123".to_string(),
-                },
-            };
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("git"));
-            assert!(path_str.contains("abc123"));
-        }
-
-        #[test]
-        fn cache_path_format_github() {
-            let (cache, _temp) = test_cache();
-            let resolved = ResolvedCrate {
-                name: "test".to_string(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: ResolvedSource::Forge {
-                    forge: Forge::GitHub {
-                        custom_url: None,
-                        owner: "owner".to_string(),
-                        repo: "repo".to_string(),
-                    },
-                    commit: "abc123".to_string(),
-                },
-            };
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("github"));
-            assert!(path_str.contains("owner"));
-            assert!(path_str.contains("repo"));
-            assert!(path_str.contains("abc123"));
-        }
-
-        #[test]
-        fn cache_path_format_gitlab() {
-            let (cache, _temp) = test_cache();
-            let resolved = ResolvedCrate {
-                name: "test".to_string(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: ResolvedSource::Forge {
-                    forge: Forge::GitLab {
-                        custom_url: None,
-                        owner: "owner".to_string(),
-                        repo: "repo".to_string(),
-                    },
-                    commit: "def456".to_string(),
-                },
-            };
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("gitlab"));
-            assert!(path_str.contains("owner"));
-            assert!(path_str.contains("repo"));
-            assert!(path_str.contains("def456"));
-        }
-
-        #[test]
-        fn cache_path_format_registry_named() {
-            let (cache, _temp) = test_cache();
-            let resolved = ResolvedCrate {
-                name: "test".to_string(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: ResolvedSource::Registry {
-                    source: RegistrySource::Named("my-registry".to_string()),
-                },
-            };
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("registry"));
-            assert!(path_str.contains("my-registry"));
-            assert!(path_str.contains("test"));
-            assert!(path_str.contains("1.0.0"));
-        }
-
-        #[test]
-        fn cache_path_format_registry_index_url() {
-            let (cache, _temp) = test_cache();
-            let index_url = url::Url::parse("https://example.com/index").unwrap();
-            let resolved = ResolvedCrate {
-                name: "test".to_string(),
-                version: Version::parse("1.0.0").unwrap(),
-                source: ResolvedSource::Registry {
-                    source: RegistrySource::IndexUrl(index_url),
-                },
-            };
-
-            let path = cache.crate_source_cache_path(&resolved).unwrap();
-            let path_str = path.to_string_lossy();
-
-            assert!(path_str.contains("sources"));
-            assert!(path_str.contains("registry-index"));
-            assert!(path_str.contains("test"));
-            assert!(path_str.contains("1.0.0"));
         }
     }
 }

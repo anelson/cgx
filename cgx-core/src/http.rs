@@ -107,7 +107,7 @@ impl HttpClient {
 
         operation
             .retry(backoff)
-            .when(Self::is_retryable_error)
+            .when(error::Error::is_retryable_http_error)
             .notify(|err, dur| {
                 tracing::debug!("HTTP request failed, retrying in {:?}: {:?}", dur, err);
             })
@@ -137,7 +137,7 @@ impl HttpClient {
 
         operation
             .retry(backoff)
-            .when(Self::is_retryable_error)
+            .when(error::Error::is_retryable_http_error)
             .notify(|err, dur| {
                 tracing::debug!("HTTP HEAD request failed, retrying in {:?}: {:?}", dur, err);
             })
@@ -172,19 +172,6 @@ impl HttpClient {
             .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
 
         Ok(Some(bytes))
-    }
-
-    /// Check if an error indicates a connection/timeout failure (vs a logical HTTP error).
-    ///
-    /// This is used by the GitLab provider to bail early when the server is unreachable,
-    /// rather than continuing to probe ~160 candidate URLs against a dead server.
-    pub fn is_connection_error(err: &error::Error) -> bool {
-        match err {
-            error::Error::HttpRequest { source, .. } => {
-                source.is_connect() || source.is_timeout() || source.is_request()
-            }
-            _ => false,
-        }
     }
 
     fn build_backoff(&self) -> ExponentialBuilder {
@@ -223,18 +210,6 @@ impl HttpClient {
 
         // All other responses (including 4xx other than 429) are returned as-is
         Ok(response)
-    }
-
-    fn is_retryable_error(err: &error::Error) -> bool {
-        match err {
-            error::Error::HttpStatus { status, .. } => {
-                *status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16() || *status >= 500
-            }
-            error::Error::HttpRequest { source, .. } => {
-                source.is_connect() || source.is_timeout() || source.is_request()
-            }
-            _ => false,
-        }
     }
 }
 
@@ -291,22 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_connection_error() {
-        // HttpStatus is not a connection error
-        let status_err = error::Error::HttpStatus {
-            url: "http://example.com".to_string(),
-            status: 500,
-        };
-        assert!(!HttpClient::is_connection_error(&status_err));
-
-        // HttpClientBuild is not a connection error
-        let build_err = error::Error::HttpClientBuild {
-            message: "test".to_string(),
-        };
-        assert!(!HttpClient::is_connection_error(&build_err));
-    }
-
-    #[test]
     fn test_construction_with_custom_timeout() {
         let config = HttpConfig {
             timeout: Duration::from_secs(120),
@@ -340,34 +299,6 @@ mod tests {
             ..Default::default()
         };
         HttpClient::new(&config).unwrap();
-    }
-
-    #[test]
-    fn test_is_connection_error_various_non_http_errors() {
-        let errors: Vec<error::Error> = vec![
-            error::Error::HttpStatus {
-                url: "http://example.com".to_string(),
-                status: 429,
-            },
-            error::Error::HttpStatus {
-                url: "http://example.com".to_string(),
-                status: 503,
-            },
-            error::Error::HttpClientBuild {
-                message: "bad config".to_string(),
-            },
-            error::Error::InvalidHttpTimeout {
-                value: "not-a-duration".to_string(),
-                source: humantime::parse_duration("not-a-duration").unwrap_err(),
-            },
-        ];
-        for err in &errors {
-            assert!(
-                !HttpClient::is_connection_error(err),
-                "Expected false for {:?}",
-                err
-            );
-        }
     }
 
     fn fast_retry_config() -> HttpConfig {

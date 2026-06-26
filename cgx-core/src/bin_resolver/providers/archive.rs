@@ -17,6 +17,16 @@ pub(in crate::bin_resolver) enum ArchiveFormat {
     TarZst,
     TarBz2,
     Zip,
+    /// A single executable compressed with gzip (no tar wrapper).
+    Gz,
+    /// A single executable compressed with xz (no tar wrapper).
+    Xz,
+    /// A single executable compressed with zstd (no tar wrapper).
+    Zst,
+    /// A single executable compressed with bzip2 (no tar wrapper).
+    Bz2,
+
+    /// The release artifact itself is just the naked binary, with no compression.
     NakedBinary,
 }
 
@@ -30,6 +40,10 @@ impl ArchiveFormat {
             Self::TarZst => "archive.tar.zst",
             Self::TarBz2 => "archive.tar.bz2",
             Self::Zip => "archive.zip",
+            Self::Gz => "archive.gz",
+            Self::Xz => "archive.xz",
+            Self::Zst => "archive.zst",
+            Self::Bz2 => "archive.bz2",
             Self::NakedBinary => {
                 if cfg!(windows) {
                     "archive.exe"
@@ -52,6 +66,10 @@ impl ArchiveFormat {
                 (Self::TarZst, ".tar.zst"),
                 (Self::TarBz2, ".tar.bz2"),
                 (Self::Zip, ".zip"),
+                (Self::Gz, ".gz"),
+                (Self::Xz, ".xz"),
+                (Self::Zst, ".zst"),
+                (Self::Bz2, ".bz2"),
                 (Self::NakedBinary, ".exe"),
             ]
         }
@@ -65,6 +83,10 @@ impl ArchiveFormat {
                 (Self::TarZst, ".tar.zst"),
                 (Self::TarBz2, ".tar.bz2"),
                 (Self::Zip, ".zip"),
+                (Self::Gz, ".gz"),
+                (Self::Xz, ".xz"),
+                (Self::Zst, ".zst"),
+                (Self::Bz2, ".bz2"),
                 (Self::NakedBinary, ""),
             ]
         }
@@ -87,8 +109,75 @@ pub(in crate::bin_resolver) fn extract_binary(
         ArchiveFormat::TarZst => extract_tar_zst(archive_path, expected_binary_name, dest_dir),
         ArchiveFormat::TarBz2 => extract_tar_bz2(archive_path, expected_binary_name, dest_dir),
         ArchiveFormat::Zip => extract_zip(archive_path, expected_binary_name, dest_dir),
+        ArchiveFormat::Gz | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Bz2 => {
+            extract_naked_compressed(archive_path, format, expected_binary_name, dest_dir)
+        }
         ArchiveFormat::NakedBinary => extract_naked_binary(archive_path, expected_binary_name, dest_dir),
     }
+}
+
+/// Extract a single executable compressed without a tar wrapper (e.g. a bare `.gz`).
+///
+/// Unlike the `tar.*` formats, the decompressed stream *is* the binary, so there is no archive tree
+/// to search with [`find_binary_in_dir`]: the bytes are written directly to
+/// `dest_dir/{binary_name}{EXE_SUFFIX}` and marked executable.
+fn extract_naked_compressed(
+    archive_path: &Path,
+    format: ArchiveFormat,
+    binary_name: &str,
+    dest_dir: &Path,
+) -> Result<PathBuf> {
+    let file = std::fs::File::open(archive_path).with_context(|_| error::IoSnafu {
+        path: archive_path.to_path_buf(),
+    })?;
+
+    let mut reader: Box<dyn std::io::Read> = match format {
+        ArchiveFormat::Gz => Box::new(GzDecoder::new(file)),
+        ArchiveFormat::Xz => Box::new(XzDecoder::new(file)),
+        ArchiveFormat::Bz2 => Box::new(BzDecoder::new(file)),
+        ArchiveFormat::Zst => Box::new(zstd::stream::read::Decoder::new(file).map_err(|e| {
+            error::Error::ArchiveExtractionFailed {
+                source: Box::new(e) as Box<dyn std::error::Error + Send + Sync>,
+            }
+        })?),
+        ArchiveFormat::Tar
+        | ArchiveFormat::TarGz
+        | ArchiveFormat::TarXz
+        | ArchiveFormat::TarZst
+        | ArchiveFormat::TarBz2
+        | ArchiveFormat::Zip
+        | ArchiveFormat::NakedBinary => {
+            unreachable!("BUG: extract_naked_compressed only handles the naked compressed formats")
+        }
+    };
+
+    std::fs::create_dir_all(dest_dir).with_context(|_| error::IoSnafu {
+        path: dest_dir.to_path_buf(),
+    })?;
+
+    let dest_path = dest_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+    let mut dest_file = std::fs::File::create(&dest_path).with_context(|_| error::IoSnafu {
+        path: dest_path.clone(),
+    })?;
+
+    std::io::copy(&mut reader, &mut dest_file).map_err(|e| error::Error::ArchiveExtractionFailed {
+        source: Box::new(e) as Box<dyn std::error::Error + Send + Sync>,
+    })?;
+
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&dest_path)
+            .with_context(|_| error::IoSnafu {
+                path: dest_path.clone(),
+            })?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&dest_path, perms).with_context(|_| error::IoSnafu {
+            path: dest_path.clone(),
+        })?;
+    }
+
+    Ok(dest_path)
 }
 
 fn extract_tar(archive_path: &Path, binary_name: &str, dest_dir: &Path) -> Result<PathBuf> {
@@ -268,6 +357,10 @@ mod tests {
                 Self::TarZst => ".tar.zst",
                 Self::TarBz2 => ".tar.bz2",
                 Self::Zip => ".zip",
+                Self::Gz => ".gz",
+                Self::Xz => ".xz",
+                Self::Zst => ".zst",
+                Self::Bz2 => ".bz2",
                 Self::NakedBinary => {
                     if cfg!(windows) {
                         ".exe"
@@ -538,6 +631,44 @@ mod tests {
         let binary_path = result.unwrap();
         assert!(binary_path.exists());
         assert!(binary_path.to_string_lossy().contains("testbin"));
+
+        #[cfg(unix)]
+        {
+            let perms = fs::metadata(&binary_path).unwrap().permissions();
+            assert_eq!(perms.mode() & 0o777, 0o755, "Binary should have 755 permissions");
+        }
+    }
+
+    /// A bare `.gz` (a single binary gzipped without a tar wrapper, as published by e.g. taplo)
+    /// decompresses directly to the named binary, executable, with no archive tree to search.
+    #[test]
+    fn test_extract_naked_gz() {
+        let payload = b"#!/bin/sh\necho test";
+
+        let mut gz_data = Vec::new();
+        {
+            let mut encoder = GzEncoder::new(&mut gz_data, Compression::default());
+            encoder.write_all(payload).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let temp_archive = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp_archive.path(), &gz_data).unwrap();
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let binary_path =
+            extract_binary(temp_archive.path(), ArchiveFormat::Gz, "taplo", dest_dir.path()).unwrap();
+
+        assert!(binary_path.exists());
+        assert_eq!(
+            binary_path.file_name().unwrap().to_string_lossy(),
+            format!("taplo{}", std::env::consts::EXE_SUFFIX)
+        );
+        assert_eq!(
+            fs::read(&binary_path).unwrap(),
+            payload,
+            "decompressed bytes are the binary"
+        );
 
         #[cfg(unix)]
         {

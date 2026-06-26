@@ -11,8 +11,15 @@ use crate::{bin_resolver::ResolvedBinary, config::BinaryProvider, crate_resolver
 pub enum PrebuiltBinaryMessage {
     /// Looking up prebuilt binary resolution in cache
     CacheLookup { krate: ResolvedCrate },
-    /// Found cached prebuilt binary resolution
-    CacheHit { path: PathBuf, provider: BinaryProvider },
+    /// A positive prebuilt binary cache hit: a previously-resolved binary was found in the cache.
+    PositiveCacheHit {
+        krate: ResolvedCrate,
+        path: PathBuf,
+        provider: BinaryProvider,
+    },
+    /// A negative prebuilt binary cache hit: we previously determined, conclusively, that no
+    /// prebuilt binary is available for this crate.
+    NegativeCacheHit { krate: ResolvedCrate },
     /// No cached prebuilt binary resolution found
     CacheMiss { krate: ResolvedCrate },
     /// Checking a specific binary provider for prebuilt binaries
@@ -40,6 +47,10 @@ pub enum PrebuiltBinaryMessage {
         krate: ResolvedCrate,
         reasons: Vec<String>,
     },
+    /// Prebuilt binary resolution was inconclusive: a transient failure (such as a rate limit or
+    /// network error) prevented at least one provider from providing a definitive answer, so the
+    /// result is not cached and the crate falls back to building from source.
+    ResolutionInconclusive { reason: String },
     /// Prebuilt binary cannot be used due to build customization
     DisqualifiedDueToCustomization { reason: String },
     /// Prebuilt binaries are disabled in config
@@ -51,11 +62,20 @@ impl PrebuiltBinaryMessage {
         Self::CacheLookup { krate: krate.clone() }
     }
 
-    pub fn cache_hit(path: &std::path::Path, provider: BinaryProvider) -> Self {
-        Self::CacheHit {
+    pub fn positive_cache_hit(
+        krate: &ResolvedCrate,
+        path: &std::path::Path,
+        provider: BinaryProvider,
+    ) -> Self {
+        Self::PositiveCacheHit {
+            krate: krate.clone(),
             path: path.to_path_buf(),
             provider,
         }
+    }
+
+    pub fn negative_cache_hit(krate: &ResolvedCrate) -> Self {
+        Self::NegativeCacheHit { krate: krate.clone() }
     }
 
     pub fn cache_miss(krate: &ResolvedCrate) -> Self {
@@ -109,6 +129,12 @@ impl PrebuiltBinaryMessage {
         Self::NoBinaryFound {
             krate: krate.clone(),
             reasons,
+        }
+    }
+
+    pub fn resolution_inconclusive(reason: impl Into<String>) -> Self {
+        Self::ResolutionInconclusive {
+            reason: reason.into(),
         }
     }
 

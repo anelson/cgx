@@ -9,7 +9,7 @@ use snafu::ResultExt;
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::{BinaryResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     downloader::DownloadedCrate,
@@ -227,7 +227,11 @@ impl BinstallProvider {
 }
 
 impl Provider for BinstallProvider {
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>> {
+    fn kind(&self) -> BinaryProvider {
+        BinaryProvider::Binstall
+    }
+
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
         let resolved = &krate.resolved;
 
         let Some(meta) = Self::read_binstall_metadata(krate, platform)? else {
@@ -237,7 +241,7 @@ impl Provider for BinstallProvider {
                     "no [package.metadata.binstall] in Cargo.toml",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         let Some(ref pkg_url_template) = meta.pkg_url else {
@@ -247,7 +251,7 @@ impl Provider for BinstallProvider {
                     "binstall metadata has no pkg-url",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         let pkg_fmt = meta.pkg_fmt.as_deref();
@@ -259,6 +263,7 @@ impl Provider for BinstallProvider {
 
         let mut last_url = String::new();
         let mut data = None;
+        let mut transient: Option<Box<error::Error>> = None;
 
         for suffix in suffixes {
             let ctx = TemplateContext {
@@ -276,23 +281,44 @@ impl Provider for BinstallProvider {
             self.reporter
                 .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Binstall));
 
-            if let Some(bytes) = self.try_download(&url)? {
-                data = Some(bytes);
-                last_url = url;
-                break;
+            match self.try_download(&url) {
+                Ok(Some(bytes)) => {
+                    data = Some(bytes);
+                    last_url = url;
+                    break;
+                }
+                Ok(None) => {
+                    last_url = url;
+                }
+                Err(e) if e.is_transient_http_error() => {
+                    transient = Some(Box::new(e));
+                    last_url = url;
+                    break;
+                }
+                Err(e) => return Err(e),
             }
-
-            last_url = url;
         }
 
         let Some(data) = data else {
+            if let Some(source) = transient {
+                // If even one provider failed with a transient error, we consider the resolution inconclusive.
+                // This transient error is just what went wrong that prevented at least one provider
+                // from being able to provide a definitive answer.
+                //
+                // Report the error as part of the resolution for diagnostic purposes.
+                return Ok(BinaryResolution::Inconclusive { source });
+            }
+
+            // If not binary found and no transient error then it just means this crate legit
+            // doesn't have a prebuilt binary for this platform in any of the places we know to
+            // look.
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::Binstall,
                     format!("download failed: {}", last_url),
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
         let url = last_url;
 
@@ -343,7 +369,7 @@ impl Provider for BinstallProvider {
             })?;
         }
 
-        Ok(Some(ResolvedBinary {
+        Ok(BinaryResolution::Found(ResolvedBinary {
             krate: resolved.clone(),
             provider: BinaryProvider::Binstall,
             path: final_path,

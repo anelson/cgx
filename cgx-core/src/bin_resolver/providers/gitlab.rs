@@ -8,7 +8,7 @@ use snafu::ResultExt;
 use super::{ArchiveFormat, CandidateFilename, Provider};
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::{BinaryResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     cratespec::Forge,
@@ -68,11 +68,13 @@ impl GitlabProvider {
     /// for both `v{version}` and `{version}` tags.
     fn generate_urls(
         repo_url: &str,
-        name: &str,
+        crate_name: &str,
+        extra_binary_names: &[&str],
         version: &str,
         platform: &str,
     ) -> Vec<(String, ArchiveFormat)> {
-        let candidates = super::generate_candidate_filenames(name, version, platform);
+        let candidates =
+            super::generate_candidate_filenames(crate_name, extra_binary_names, version, platform);
         let tags = [format!("v{}", version), version.to_string()];
 
         let mut urls = Vec::new();
@@ -144,7 +146,11 @@ impl GitlabProvider {
 }
 
 impl Provider for GitlabProvider {
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>> {
+    fn kind(&self) -> BinaryProvider {
+        BinaryProvider::GitlabReleases
+    }
+
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -154,19 +160,34 @@ impl Provider for GitlabProvider {
                     "no repository URL available",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
+        let crate_name = krate.resolved.name.as_str();
+        let binary_names = krate.binary_names()?;
+        let extra_binary_names: Vec<&str> = binary_names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| *n != crate_name)
+            .collect();
         let urls = Self::generate_urls(
             &repo_url,
-            &krate.resolved.name,
+            crate_name,
+            &extra_binary_names,
             &krate.resolved.version.to_string(),
             platform,
         );
 
-        // Probe sequentially with HEAD requests; stop at the first 200.
-        // If we hit a connection/timeout error, bail immediately rather than continuing
-        // to probe all ~160 candidate URLs against a dead server.
+        // Probe sequentially with HEAD requests
+        //
+        // If we hit a connection/timeout error, bail immediately rather than continuing to probe
+        // every candidate URL against a broken/unresponsive server. The candidate set is the full
+        // cross-product of names (crate + binary), platform aliases, archive formats, and tag
+        // variants, so the worst-case (no asset exists) is on the order of ~1,400 sequential
+        // HEADs. That only happens for a crate actually hosted on gitlab.com whose release lacks
+        // any matching asset (a slow fallback to a source build); `get_repo_url` short-circuits to
+        // `None` for every non-GitLab crate, which is the overwhelming majority and does zero
+        // probes.
         let mut found = None;
         for (url, format) in &urls {
             match self.head_probe(url) {
@@ -174,15 +195,13 @@ impl Provider for GitlabProvider {
                     found = Some((url.clone(), *format));
                     break;
                 }
-                Err(e) if HttpClient::is_connection_error(&e) => {
-                    tracing::debug!("GitLab HEAD probe failed with connection error, bailing: {:?}", e);
-                    self.reporter.report(|| {
-                        PrebuiltBinaryMessage::provider_has_no_binary(
-                            BinaryProvider::GitlabReleases,
-                            "server unreachable",
-                        )
-                    });
-                    return Ok(None);
+
+                // A transient probe failure (connection/timeout, rate limit, 5xx) means we cannot
+                // determine whether the asset exists. Stop probing rather than hammering a flaky or
+                // dead server, and report the result as inconclusive.
+                Err(e) if e.is_transient_http_error() => {
+                    tracing::debug!("GitLab HEAD probe failed transiently, bailing: {:?}", e);
+                    return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
                 }
                 Ok(false) | Err(_) => continue,
             }
@@ -194,22 +213,27 @@ impl Provider for GitlabProvider {
                     "no matching release found",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         self.reporter
             .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::GitlabReleases));
 
-        let data = if let Some(data) = self.try_download(&url)? {
-            data
-        } else {
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::GitlabReleases,
-                    format!("failed to download asset: {}", url),
-                )
-            });
-            return Ok(None);
+        let data = match self.try_download(&url) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::provider_has_no_binary(
+                        BinaryProvider::GitlabReleases,
+                        format!("Release asset not found: {}", url),
+                    )
+                });
+                return Ok(BinaryResolution::Nonexistent);
+            }
+            Err(e) if e.is_transient_http_error() => {
+                return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
+            }
+            Err(e) => return Err(e),
         };
 
         if self.verify_checksums {
@@ -259,7 +283,7 @@ impl Provider for GitlabProvider {
             })?;
         }
 
-        Ok(Some(ResolvedBinary {
+        Ok(BinaryResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::GitlabReleases,
             path: final_path,
@@ -282,6 +306,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -295,6 +320,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -308,6 +334,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -323,6 +350,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -340,6 +368,14 @@ mod tests {
                 assert_eq!(*format, ArchiveFormat::Tar);
             } else if url.ends_with(".zip") {
                 assert_eq!(*format, ArchiveFormat::Zip);
+            } else if url.ends_with(".gz") {
+                assert_eq!(*format, ArchiveFormat::Gz);
+            } else if url.ends_with(".xz") {
+                assert_eq!(*format, ArchiveFormat::Xz);
+            } else if url.ends_with(".zst") {
+                assert_eq!(*format, ArchiveFormat::Zst);
+            } else if url.ends_with(".bz2") {
+                assert_eq!(*format, ArchiveFormat::Bz2);
             } else {
                 assert_eq!(*format, ArchiveFormat::NakedBinary);
             }

@@ -9,7 +9,7 @@ use snafu::ResultExt;
 use super::Provider;
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::{BinaryResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     cratespec::Forge,
@@ -102,16 +102,15 @@ impl GithubProvider {
 
     /// List release assets for a given tag from the GitHub Releases API.
     ///
-    /// Returns a vec of `(asset_name, download_url)` pairs.
-    /// If the request fails, returns a non-success status, or cannot be parsed, treats the release
-    /// as having no usable assets.
+    /// Returns a vec of `(asset_name, download_url)` pairs. A 404 (no release for the tag) is a
+    /// conclusive absence and maps to `Ok(empty)`. Any other failure  is returned as `Err`.
     fn list_release_assets(
         &self,
         api_base: &str,
         owner: &str,
         repo: &str,
         tag: &str,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>> {
         let url = format!("{}/repos/{}/{}/releases/tags/{}", api_base, owner, repo, tag);
 
         let mut headers = HeaderMap::new();
@@ -122,30 +121,34 @@ impl GithubProvider {
             }
         }
 
-        let response = match self.http_client.get_with_headers(&url, &headers) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+        let response = self.http_client.get_with_headers(&url, &headers)?;
 
         if !response.status().is_success() {
-            return Vec::new();
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                // The API call worked, and Github is telling us that there are not release assets
+                // for this resource.  From the caller's perspective that isn't an error at all, it
+                // is a conclusive, negative result.
+                return Ok(Vec::new());
+            }
+
+            return error::HttpStatusSnafu {
+                url: url.clone(),
+                status: response.status().as_u16(),
+            }
+            .fail();
         }
 
-        let text = match response.text() {
-            Ok(t) => t,
-            Err(_) => return Vec::new(),
-        };
+        let text = response
+            .text()
+            .with_context(|_| error::HttpRequestSnafu { url: url.clone() })?;
 
-        let release: ReleaseResponse = match serde_json::from_str(&text) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+        let release: ReleaseResponse = serde_json::from_str(&text).context(error::JsonSnafu)?;
 
-        release
+        Ok(release
             .assets
             .into_iter()
             .map(|a| (a.name, a.browser_download_url))
-            .collect()
+            .collect())
     }
 
     /// Download a file from the given URL.
@@ -195,7 +198,11 @@ impl GithubProvider {
 }
 
 impl Provider for GithubProvider {
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>> {
+    fn kind(&self) -> BinaryProvider {
+        BinaryProvider::GithubReleases
+    }
+
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -205,7 +212,7 @@ impl Provider for GithubProvider {
                     "no repository URL available",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         let Some((owner, repo)) = Self::parse_owner_repo(&repo_url) else {
@@ -215,7 +222,7 @@ impl Provider for GithubProvider {
                     format!("could not parse owner/repo from URL: {}", repo_url),
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         let Some(api_base) = Self::api_base(&repo_url) else {
@@ -225,32 +232,58 @@ impl Provider for GithubProvider {
                     format!("could not determine API base for URL: {}", repo_url),
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         let version = krate.resolved.version.to_string();
 
-        // Try both v{version} and {version} tags; stop at the first that returns assets.
+        // Try both v{version} and {version} tags; stop at the first that returns assets. A transient
+        // failure (rate limit, network) on a tag is remembered: if no tag yields assets and at least
+        // one lookup failed transiently, the result is inconclusive.  To produce a definitive
+        // negative result, all lookups must succeed and return no assets.
         let tags = [format!("v{}", version), version.clone()];
         let mut assets = Vec::new();
+        let mut transient: Option<Box<error::Error>> = None;
         for tag in &tags {
-            assets = self.list_release_assets(&api_base, owner, repo, tag);
-            if !assets.is_empty() {
-                break;
+            match self.list_release_assets(&api_base, owner, repo, tag) {
+                Ok(a) if !a.is_empty() => {
+                    assets = a;
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) if e.is_transient_http_error() => {
+                    if transient.is_none() {
+                        transient = Some(Box::new(e));
+                    }
+                }
+                Err(e) => return Err(e),
             }
         }
 
         if assets.is_empty() {
+            if let Some(source) = transient {
+                tracing::debug!(error = %source,
+                    "GitHub release lookup failed transiently; result is inconclusive");
+                return Ok(BinaryResolution::Inconclusive { source });
+            }
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::GithubReleases,
                     "no release found for any tag variant",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         }
 
-        let candidates = super::generate_candidate_filenames(&krate.resolved.name, &version, platform);
+        let crate_name = krate.resolved.name.as_str();
+        let binary_names = krate.binary_names()?;
+        let extra_binary_names: Vec<&str> = binary_names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| *n != crate_name)
+            .collect();
+        let candidates =
+            super::generate_candidate_filenames(crate_name, &extra_binary_names, &version, platform);
 
         let asset_map: std::collections::HashMap<&str, &str> = assets
             .iter()
@@ -270,23 +303,28 @@ impl Provider for GithubProvider {
                     "no matching asset found in release",
                 )
             });
-            return Ok(None);
+            return Ok(BinaryResolution::Nonexistent);
         };
 
         self.reporter.report(|| {
             PrebuiltBinaryMessage::downloading_binary(download_url, BinaryProvider::GithubReleases)
         });
 
-        let data = if let Some(data) = self.try_download(download_url)? {
-            data
-        } else {
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::GithubReleases,
-                    format!("failed to download asset: {}", download_url),
-                )
-            });
-            return Ok(None);
+        let data = match self.try_download(download_url) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::provider_has_no_binary(
+                        BinaryProvider::GithubReleases,
+                        format!("Release artifact not found: {}", download_url),
+                    )
+                });
+                return Ok(BinaryResolution::Nonexistent);
+            }
+            Err(e) if e.is_transient_http_error() => {
+                return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
+            }
+            Err(e) => return Err(e),
         };
 
         if self.verify_checksums {
@@ -336,7 +374,7 @@ impl Provider for GithubProvider {
             })?;
         }
 
-        Ok(Some(ResolvedBinary {
+        Ok(BinaryResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::GithubReleases,
             path: final_path,

@@ -298,10 +298,11 @@ fn cache_flow_switching_modes() {
 
     // Verify we hit the binary resolution cache and reused the prebuilt binary on the third run.
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheHit { .. }))),
-        "Expected PrebuiltBinaryMessage::CacheHit on third run"
+        messages.iter().any(|m| matches!(
+            m,
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::PositiveCacheHit { .. })
+        )),
+        "Expected PrebuiltBinaryMessage::PositiveCacheHit on third run"
     );
     assert_prebuilt(&messages);
 }
@@ -425,6 +426,15 @@ fn negative_cache_persists() {
             Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheLookup { .. })
         )),
         "Expected PrebuiltBinary::CacheLookup on second run"
+    );
+
+    // The second run should be a negative cache hit (we previously determined no binary exists)
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::NegativeCacheHit { .. })
+        )),
+        "Expected PrebuiltBinary::NegativeCacheHit on second run"
     );
 
     // Should NOT see provider checking messages (proves we used the cache)
@@ -578,6 +588,56 @@ fn github_provider_resolves_binary() {
     });
     let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
     assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "Should not have BuildMessage::Started when using prebuilt binary"
+    );
+}
+
+/// Regression test for #206: `taplo-cli` resolves its prebuilt binary from GitHub releases.
+///
+/// This exercises all three of the asset-matching heuristics the fix added: the asset is named after
+/// the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform token
+/// (`taplo-linux-x86_64`, not the full triple), and on Linux/macOS is a bare `.gz` (a gzipped
+/// binary, not a tarball). `--no-exec` runs the full download+extract path — so the naked-`.gz`
+/// extraction is covered end to end — without executing the binary, sidestepping any glibc/musl
+/// run-host mismatch. Gated to the OS/arch combinations for which taplo publishes an asset that the
+/// `{os}-{arch}` alias matches.
+#[test]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", target_os = "windows"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn github_provider_resolves_taplo_cli_via_binary_name() {
+    let mut cgx = Cgx::with_test_fs();
+
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("--prebuilt-binary")
+        .arg("always")
+        .arg("--prebuilt-binary-sources")
+        .arg("github-releases")
+        .arg("--no-exec")
+        .arg("taplo-cli@=0.10.0")
+        .assert_with_messages();
+
+    // `--no-exec` prints the resolved binary path; it is named after the `taplo` binary target.
+    assert.success().stdout(predicates::str::contains("taplo"));
+
+    let binary = messages
+        .iter()
+        .find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        })
+        .expect("Expected PrebuiltBinaryMessage::Resolved");
+    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+    assert_prebuilt(&messages);
 
     assert!(
         !messages
@@ -1025,10 +1085,11 @@ fn prebuilt_binary_second_invocation_fully_cached() {
     );
 
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheHit { .. }))),
-        "Expected PrebuiltBinaryMessage::CacheHit: proves binary resolution was served from cache"
+        messages.iter().any(|m| matches!(
+            m,
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::PositiveCacheHit { .. })
+        )),
+        "Expected PrebuiltBinaryMessage::PositiveCacheHit: proves binary resolution was served from cache"
     );
 
     // --- Absence of network activity: what MUST NOT be present ---
@@ -1105,4 +1166,96 @@ fn default_resolves_via_quickinstall() {
             .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
         "Should not have BuildMessage::Started when using prebuilt binary"
     );
+}
+
+/// Live regression test for the transient-failure caching bug (filed alongside the #206 taplo fix):
+/// a GitHub rate-limit (throttle) during prebuilt-binary resolution must NOT be cached as a
+/// negative, so a later authenticated run still resolves the prebuilt binary instead of being stuck
+/// with a poisoned "no binary" answer.
+///
+/// This is the automated form of the manual check that initially discovered the bug. It is
+/// `#[ignore]` by default because it deliberately exhausts GitHub's unauthenticated per-IP rate
+/// limit and requires a real `GITHUB_TOKEN` in the environment. Run it explicitly (re-running
+/// needs the hourly limit to have reset):
+///
+/// ```sh
+/// GITHUB_TOKEN=$(gh auth token) \
+///   cargo test -p cgx --test integration -- --ignored transient_throttle_is_not_cached_as_negative
+/// ```
+#[test]
+#[ignore = "exhausts GitHub's unauthenticated rate limit and requires a real GITHUB_TOKEN; run manually"]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos", target_os = "windows"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn transient_throttle_is_not_cached_as_negative() {
+    let token = std::env::var("GITHUB_TOKEN")
+        .expect("this test requires a real GITHUB_TOKEN to prove the non-caching behavior");
+
+    // Provoke a throttle: run unauthenticated against a fresh cache until GitHub rate-limits us.
+    // taplo-cli@0.10.0 publishes a GitHub binary, so an un-throttled unauthenticated run *succeeds*
+    // (and we discard its cache); the first run that *fails* is the throttled one, whose cache we
+    // keep for the verification step. `--prebuilt-binary always` makes a throttle surface as a
+    // non-zero exit (PrebuiltBinaryResolutionFailed) rather than a slow fall-back to a source build.
+    const MAX_WARMUP_RUNS: usize = 80;
+    let mut throttled = None;
+    for _ in 0..MAX_WARMUP_RUNS {
+        let mut cgx = Cgx::with_test_fs();
+        let assert = cgx
+            .cmd
+            .env_remove("GITHUB_TOKEN")
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("--no-exec")
+            .arg("taplo-cli@=0.10.0")
+            .assert();
+        let output = assert.get_output();
+        if output.status.success() {
+            // Not throttled yet; discard this cache and keep warming up.
+            continue;
+        }
+
+        // Confirm we actually hit the inconclusive (throttle) path, not some other failure: the
+        // `always`-mode inconclusive error is PrebuiltBinaryResolutionFailed.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("resolution could not be completed"),
+            "expected an inconclusive resolution failure (throttle), got stderr: {stderr}"
+        );
+        throttled = Some(cgx);
+        break;
+    }
+
+    let throttled = throttled
+        .expect("GitHub never rate-limited us within the warmup budget; cannot exercise the throttle path");
+
+    // Verify the throttle was not cached as a negative: reuse the throttled run's cache, now WITH a
+    // token, and confirm the prebuilt binary resolves. Under the old bug the throttle would have
+    // cached a negative and this run would instead fail / fall back to a source build.
+    let mut cgx = throttled.reset();
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .env("GITHUB_TOKEN", &token)
+        .arg("--prebuilt-binary")
+        .arg("always")
+        .arg("--prebuilt-binary-sources")
+        .arg("github-releases")
+        .arg("--no-exec")
+        .arg("taplo-cli@=0.10.0")
+        .assert_with_messages();
+
+    assert.success().stdout(predicates::str::contains("taplo"));
+
+    let binary = messages
+        .iter()
+        .find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        })
+        .expect("expected PrebuiltBinaryMessage::Resolved after the throttle was not cached");
+    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+    assert_prebuilt(&messages);
 }
