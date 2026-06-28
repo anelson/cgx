@@ -45,7 +45,7 @@ pub(super) struct CandidateFilename {
 /// Produces naming patterns common across GitHub, GitLab, and elsewhere, combining candidate
 /// names, various forms of the platform string, the version, and archive suffixes with various
 /// separators. Each candidate carries its [`ArchiveFormat`] representing what the expected format
-/// would be for a given candiate file, if it is found to exist.
+/// would be for a given candidate file, if it is found to exist.
 ///
 /// Names are tried in priority order: `crate_name` first, then any `extra_binary_names` — binaries
 /// the crate declares whose name differs from the crate name. This is what lets, for example,

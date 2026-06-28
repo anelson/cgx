@@ -13,7 +13,7 @@ use tracing::*;
 
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::BinaryCacheEntry,
     builder::{BuildOptions, BuildTarget},
     config::Config,
     crate_resolver::{ResolvedCrate, ResolvedSource},
@@ -58,32 +58,6 @@ impl<T> CacheEntry<T> {
 
 /// A cache entry for a resolved crate specification.
 type CrateResolveCacheEntry = CacheEntry<ResolvedCrate>;
-
-/// A cached binary-resolution outcome.
-///
-/// Only conclusive outcomes should be cached; a transient/inconclusive resolution failure should
-/// never be persisted.
-///
-/// The two variants distinguish a positive result (a pre-built binary was resolved) from a
-/// conclusive negative (we determined no pre-built binary is available).  Theoretically it's
-/// possible that we could have checked at exactly the moment when a crate was just published but
-/// artifacts not yet released, or that a maintainer could go back and publish artifacts for older
-/// versions long after release, but both of these are highly unlikely.  By caching this result, we
-/// can speed up subsequent runs and avoid the many network requests (and potential throttling)
-/// that would be required to check for a pre-built binary every time.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "only a handful of these exist at a time (one per resolved crate); the size disparity between \
-              Found and Nonexistent does not matter and boxing would only add indirection"
-)]
-pub(crate) enum BinaryCacheEntry {
-    /// A pre-built binary was resolved.
-    Found(ResolvedBinary),
-    /// We conclusively determined that no pre-built binary is available.
-    Nonexistent,
-}
 
 /// Manages the various caches that cgx uses to operate.
 ///
@@ -357,27 +331,17 @@ impl Cache {
             .report(|| PrebuiltBinaryMessage::cache_lookup(krate));
 
         let entry = self.read_binary_cache_entry(krate);
-
-        match &entry {
-            Some(BinaryCacheEntry::Found(binary)) => self
-                .inner
+        if entry.is_none() {
+            self.inner
                 .reporter
-                .report(|| PrebuiltBinaryMessage::positive_cache_hit(krate, &binary.path, binary.provider)),
-            Some(BinaryCacheEntry::Nonexistent) => self
-                .inner
-                .reporter
-                .report(|| PrebuiltBinaryMessage::negative_cache_hit(krate)),
-            None => self
-                .inner
-                .reporter
-                .report(|| PrebuiltBinaryMessage::cache_miss(krate)),
+                .report(|| PrebuiltBinaryMessage::cache_miss(krate));
         }
 
         Ok(entry)
     }
 
-    /// Store a conclusive binary resolution outcome in the cache for the given [`ResolvedCrate`].
-    pub(crate) fn put_cached_binary(&self, krate: &ResolvedCrate, entry: &BinaryCacheEntry) -> Result<()> {
+    /// Store a binary-resolution cache entry for the given [`ResolvedCrate`].
+    pub(crate) fn put_cached_binary(&self, krate: &ResolvedCrate, entry: BinaryCacheEntry) -> Result<()> {
         let cache_file = self.binary_cache_path(krate)?;
 
         if let Some(parent) = cache_file.parent() {
@@ -862,6 +826,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::bin_resolver::{BinaryCacheEntry, ConclusiveResolution, ResolvedBinary};
 
     fn test_cache() -> (Cache, TempDir) {
         test_cache_with_timeout(Duration::from_secs(3600))
@@ -953,15 +918,23 @@ mod tests {
             /// A positive entry: a resolved binary was found and cached.
             fn positive_entry() -> CacheEntry<BinaryCacheEntry> {
                 CacheEntry {
-                    value: BinaryCacheEntry::Found(ResolvedBinary {
-                        krate: ResolvedCrate {
-                            name: "eza".to_string(),
-                            version: Version::parse("0.23.1").unwrap(),
-                            source: ResolvedSource::CratesIo,
-                        },
-                        provider: BinaryProvider::GithubReleases,
-                        path: PathBuf::from("/cache/bin/eza"),
-                    }),
+                    value: BinaryCacheEntry {
+                        outcome: ConclusiveResolution::Found(ResolvedBinary {
+                            krate: ResolvedCrate {
+                                name: "eza".to_string(),
+                                version: Version::parse("0.23.1").unwrap(),
+                                source: ResolvedSource::CratesIo,
+                            },
+                            provider: BinaryProvider::GithubReleases,
+                            path: PathBuf::from("/cache/bin/eza"),
+                        }),
+                        enabled_providers: vec![
+                            BinaryProvider::Binstall,
+                            BinaryProvider::GithubReleases,
+                            BinaryProvider::GitlabReleases,
+                            BinaryProvider::Quickinstall,
+                        ],
+                    },
                     cached_at: fixed_cached_at(),
                 }
             }
@@ -969,7 +942,13 @@ mod tests {
             /// A negative entry: we conclusively determined no binary is available.
             fn negative_entry() -> CacheEntry<BinaryCacheEntry> {
                 CacheEntry {
-                    value: BinaryCacheEntry::Nonexistent,
+                    value: BinaryCacheEntry {
+                        outcome: ConclusiveResolution::Nonexistent,
+                        enabled_providers: vec![
+                            BinaryProvider::GithubReleases,
+                            BinaryProvider::GitlabReleases,
+                        ],
+                    },
                     cached_at: fixed_cached_at(),
                 }
             }
@@ -983,11 +962,21 @@ mod tests {
   },
   "provider": "github-releases",
   "path": "/cache/bin/eza",
+  "enabled_providers": [
+    "binstall",
+    "github-releases",
+    "gitlab-releases",
+    "quickinstall"
+  ],
   "cached_at": "2024-01-15T12:30:00Z"
 }"#;
 
             const NEGATIVE_JSON: &str = r#"{
   "outcome": "nonexistent",
+  "enabled_providers": [
+    "github-releases",
+    "gitlab-releases"
+  ],
   "cached_at": "2024-01-15T12:30:00Z"
 }"#;
 
@@ -2205,6 +2194,65 @@ mod tests {
             let hash2 = Cache::compute_spec_hash(&spec2).unwrap();
 
             assert_ne!(hash1, hash2);
+        }
+    }
+
+    /// The cache's job for binary entries is pretty dumb at this level; just get and put cache
+    /// entry structs.
+    mod binary_cache {
+        use super::*;
+        use crate::config::BinaryProvider;
+
+        #[test]
+        fn put_then_get_round_trips_outcome_and_providers() {
+            let (cache, _temp) = test_cache();
+            let krate = test_resolved();
+            let providers = vec![BinaryProvider::Binstall, BinaryProvider::GithubReleases];
+
+            assert_matches!(cache.get_cached_binary(&krate), Ok(None));
+
+            cache
+                .put_cached_binary(
+                    &krate,
+                    BinaryCacheEntry {
+                        outcome: ConclusiveResolution::Nonexistent,
+                        enabled_providers: providers.clone(),
+                    },
+                )
+                .unwrap();
+
+            let entry = cache.get_cached_binary(&krate).unwrap().unwrap();
+            assert_eq!(entry.outcome, ConclusiveResolution::Nonexistent);
+            assert_eq!(entry.enabled_providers, providers);
+        }
+
+        #[test]
+        fn put_overwrites_previous_entry() {
+            let (cache, _temp) = test_cache();
+            let krate = test_resolved();
+
+            cache
+                .put_cached_binary(
+                    &krate,
+                    BinaryCacheEntry {
+                        outcome: ConclusiveResolution::Nonexistent,
+                        enabled_providers: vec![BinaryProvider::GitlabReleases],
+                    },
+                )
+                .unwrap();
+
+            let found = BinaryCacheEntry {
+                outcome: ConclusiveResolution::Found(ResolvedBinary {
+                    krate: test_resolved(),
+                    provider: BinaryProvider::GithubReleases,
+                    path: PathBuf::from("/cache/bin/serde"),
+                }),
+                enabled_providers: vec![BinaryProvider::GithubReleases],
+            };
+            cache.put_cached_binary(&krate, found.clone()).unwrap();
+
+            let entry = cache.get_cached_binary(&krate).unwrap().unwrap();
+            assert_eq!(entry, found);
         }
     }
 }

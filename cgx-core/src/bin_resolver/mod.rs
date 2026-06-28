@@ -10,13 +10,13 @@ use snafu::{IntoError, ResultExt};
 use crate::{
     Result,
     builder::{BuildOptions, BuildTarget},
-    cache::{BinaryCacheEntry, Cache},
+    cache::Cache,
     config::{BinaryProvider, Config, UsePrebuiltBinaries},
     crate_resolver::ResolvedCrate,
     downloader::DownloadedCrate,
     error::{self, Error},
     http::HttpClient,
-    messages::{MessageReporter, PrebuiltBinaryMessage},
+    messages::{MessageReporter, PrebuiltBinaryMessage, ProviderChangeReason},
 };
 
 /// A resolved binary is a pre-built executable that cgx found and prepared, so the crate can run
@@ -50,7 +50,50 @@ pub trait BinaryResolver {
     ) -> Result<Option<ResolvedBinary>>;
 }
 
-/// The outcome of attempting to resolve a pre-built binary
+/// A conclusive binary-resolution outcome: the cacheable subset of [`BinaryResolution`].
+///
+/// The two variants distinguish a positive result (a pre-built binary was resolved) from a
+/// conclusive negative (we determined no pre-built binary is available).  Theoretically it's
+/// possible that we could have checked at exactly the moment when a crate was just published but
+/// artifacts not yet released, or that a maintainer could go back and publish artifacts for older
+/// versions long after release, but both of these are highly unlikely.  By caching this result, we
+/// can speed up subsequent runs and avoid the many network requests (and potential throttling)
+/// that would be required to check for a pre-built binary every time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "only a handful of these exist at a time (one per resolved crate); the size disparity between \
+              Found and Nonexistent does not matter and boxing would only add indirection"
+)]
+pub(crate) enum ConclusiveResolution {
+    /// A pre-built binary was resolved.
+    Found(ResolvedBinary),
+    /// We conclusively determined that no pre-built binary is available.
+    Nonexistent,
+}
+
+/// The persisted form of a binary-resolution outcome: a [`ConclusiveResolution`] paired with the
+/// set of binary providers that were enabled when it was produced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct BinaryCacheEntry {
+    #[serde(flatten)]
+    pub(crate) outcome: ConclusiveResolution,
+    /// The binary providers that were enabled for the resolution that produced [`Self::outcome`].
+    pub(crate) enabled_providers: Vec<BinaryProvider>,
+}
+
+/// Create the default [`BinaryResolver`] implementation, respecting the given config and using the
+/// provided cache.
+pub(crate) fn create_resolver(
+    config: Config,
+    cache: Cache,
+    reporter: MessageReporter,
+    http_client: HttpClient,
+) -> impl BinaryResolver {
+    DefaultBinaryResolver::new(config, cache, reporter, http_client)
+}
+
 #[derive(Debug)]
 #[expect(
     clippy::large_enum_variant,
@@ -68,20 +111,25 @@ enum BinaryResolution {
     Inconclusive { source: Box<Error> },
 }
 
-/// Create the default [`BinaryResolver`] implementation, respecting the given config and using the
-/// provided cache.
-pub(crate) fn create_resolver(
-    config: Config,
-    cache: Cache,
-    reporter: MessageReporter,
-    http_client: HttpClient,
-) -> impl BinaryResolver {
-    BinaryResolverImpl::new(config, cache, reporter, http_client)
+impl BinaryResolution {
+    /// Map this binary resolution to the [`ConclusiveResolution`] (if any) that should be written
+    /// to the binary cache to record this resolution for future runs.
+    ///
+    /// `Found`/`Nonexistent` are conclusive and cacheable; `Inconclusive` returns `None` and is
+    /// never cached. This is the core invariant that prevents a transient failure from being
+    /// persisted as a negative.
+    fn to_cacheable(&self) -> Option<ConclusiveResolution> {
+        match self {
+            BinaryResolution::Found(binary) => Some(ConclusiveResolution::Found(binary.clone())),
+            BinaryResolution::Nonexistent => Some(ConclusiveResolution::Nonexistent),
+            BinaryResolution::Inconclusive { .. } => None,
+        }
+    }
 }
 
 /// The prod [`BinaryResolver`] implementation, which delegates to the configured providers and
 /// integrates with the cache to avoid repeated expensive provider calls.
-struct BinaryResolverImpl {
+struct DefaultBinaryResolver {
     config: Config,
     cache: Cache,
     reporter: MessageReporter,
@@ -89,7 +137,7 @@ struct BinaryResolverImpl {
     providers: Vec<Box<dyn Provider + Send + Sync>>,
 }
 
-impl BinaryResolverImpl {
+impl DefaultBinaryResolver {
     fn new(config: Config, cache: Cache, reporter: MessageReporter, http_client: HttpClient) -> Self {
         let providers = {
             let cache_dir = &config.cache_dir;
@@ -191,7 +239,7 @@ impl BinaryResolverImpl {
     /// cannot rule out a binary), keeping the first inconclusive error; only if every provider
     /// conclusively reported no binary is the result `Nonexistent`. An empty iterator yields
     /// `Nonexistent`.
-    fn combine(resolutions: impl IntoIterator<Item = BinaryResolution>) -> BinaryResolution {
+    fn combine_resolutions(resolutions: impl IntoIterator<Item = BinaryResolution>) -> BinaryResolution {
         let mut inconclusive: Option<Box<Error>> = None;
         for resolution in resolutions {
             match resolution {
@@ -205,20 +253,6 @@ impl BinaryResolverImpl {
         match inconclusive {
             Some(source) => BinaryResolution::Inconclusive { source },
             None => BinaryResolution::Nonexistent,
-        }
-    }
-
-    /// Map a binary resolution to the [`BinaryCacheEntry`] (if any) that should be written to the
-    /// binary cache.
-    ///
-    /// `Found`/`Nonexistent` are conclusive and cacheable; `Inconclusive` returns `None` and is
-    /// never cached. This is the core invariant that prevents a transient failure from being
-    /// persisted as a negative.
-    fn cacheable(resolution: &BinaryResolution) -> Option<BinaryCacheEntry> {
-        match resolution {
-            BinaryResolution::Found(binary) => Some(BinaryCacheEntry::Found(binary.clone())),
-            BinaryResolution::Nonexistent => Some(BinaryCacheEntry::Nonexistent),
-            BinaryResolution::Inconclusive { .. } => None,
         }
     }
 
@@ -262,8 +296,66 @@ impl BinaryResolverImpl {
         }
     }
 
+    /// Look up a cached binary-resolution outcome for `krate`, honoring it only if it is still
+    /// valid for the config.
+    ///
+    /// Each cached entry records the providers that were enabled when it was written. A cached
+    /// outcome is used only when:
+    ///
+    /// - every currently-enabled provider was among those recorded. A newly-enabled provider that
+    ///   wasn't accounted for could change the outcome (a negative might become a positive, or a
+    ///   higher-precedence provider might now win), so the entry is stale and we should resolve the
+    ///   binary anew with all currently enabled providers. An entry that recorded *more* providers
+    ///   than are currently enabled stays valid.
+    /// - (positive entries only) the provider that produced the cached binary is still enabled. A
+    ///   binary must never be served from a provider the user has disabled.
+    ///
+    /// Returns `None` (so resolution falls through to the providers) when there is no entry or it
+    /// is stale for the current configuration.
+    fn get_cached_resolution(&self, krate: &ResolvedCrate) -> Option<ConclusiveResolution> {
+        let entry = self.cache.get_cached_binary(krate).ok()??;
+        let enabled = &self.config.prebuilt_binaries.binary_providers;
+
+        // If a provider that is enabled now was not enabled when this cache entry was written, then we
+        // consider the cache entry stale and must not use it.
+        if let Some(missing) = enabled.iter().find(|p| !entry.enabled_providers.contains(p)) {
+            self.reporter.report(|| {
+                PrebuiltBinaryMessage::cache_invalidated_by_provider_change(
+                    krate,
+                    ProviderChangeReason::RequiredProviderNotEnabled(*missing),
+                )
+            });
+            return None;
+        }
+
+        // If the cached entry is a positive hit but it uses a provider that the user has currently
+        // disabled, then obviously we will not use that binary and the cache entry is considered stale.
+        if let ConclusiveResolution::Found(binary) = &entry.outcome {
+            if !enabled.contains(&binary.provider) {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::cache_invalidated_by_provider_change(
+                        krate,
+                        ProviderChangeReason::SourceProviderDisabled(binary.provider),
+                    )
+                });
+                return None;
+            }
+        }
+
+        match &entry.outcome {
+            ConclusiveResolution::Found(binary) => self
+                .reporter
+                .report(|| PrebuiltBinaryMessage::positive_cache_hit(krate, &binary.path, binary.provider)),
+            ConclusiveResolution::Nonexistent => self
+                .reporter
+                .report(|| PrebuiltBinaryMessage::negative_cache_hit(krate)),
+        }
+
+        Some(entry.outcome)
+    }
+
     /// Consult each configured provider in order, short-circuiting on the first `Found`, and fold
-    /// the results with [`Self::combine`].
+    /// the results with [`Self::combine_resolutions`].
     fn resolve_via_providers(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
         if self.providers.is_empty() {
             return error::NoProvidersConfiguredSnafu.fail();
@@ -282,13 +374,13 @@ impl BinaryResolverImpl {
             }
         }
 
-        Ok(Self::combine(results))
+        Ok(Self::combine_resolutions(results))
     }
 
-    /// Relocate a resolved binary from the provider's cache to the `bin_dir` structure.
+    /// Relocate a resolved binary from the provider's internal path to the `bin_dir` structure.
     ///
     /// Pre-built binaries are copied into `bin_dir` so the path cgx returns is stable and separate
-    /// from provider-specific cache directories.
+    /// from provider-specific download/cache directories.
     fn relocate_to_bin_dir(
         &self,
         mut binary: ResolvedBinary,
@@ -340,7 +432,7 @@ impl BinaryResolverImpl {
     }
 }
 
-impl BinaryResolver for BinaryResolverImpl {
+impl BinaryResolver for DefaultBinaryResolver {
     fn resolve(
         &self,
         krate: &DownloadedCrate,
@@ -382,19 +474,20 @@ impl BinaryResolver for BinaryResolverImpl {
         // outcomes are ever stored, so a cache hit is always authoritative. The cache itself reports
         // the lookup/hit/miss events; here we only translate a hit into a resolution outcome.
         if !self.config.refresh {
-            if let Ok(Some(cached)) = self.cache.get_cached_binary(resolved_krate) {
-                let resolution = if let BinaryCacheEntry::Found(binary) = cached {
-                    BinaryResolution::Found(binary)
-                } else {
-                    // The cache already reported the negative hit.  There is no reason to try to
-                    // find a prebuilt binary again.
-                    self.reporter.report(|| {
-                        PrebuiltBinaryMessage::no_binary_found(
-                            resolved_krate,
-                            vec!["negative cache hit - no binary available".to_string()],
-                        )
-                    });
-                    BinaryResolution::Nonexistent
+            if let Some(cached) = self.get_cached_resolution(resolved_krate) {
+                let resolution = match cached {
+                    ConclusiveResolution::Found(binary) => BinaryResolution::Found(binary),
+                    ConclusiveResolution::Nonexistent => {
+                        // `cached_resolution` already reported the negative hit.  There is no reason
+                        // to try to find a prebuilt binary again.
+                        self.reporter.report(|| {
+                            PrebuiltBinaryMessage::no_binary_found(
+                                resolved_krate,
+                                vec!["negative cache hit - no binary available".to_string()],
+                            )
+                        });
+                        BinaryResolution::Nonexistent
+                    }
                 };
                 return Self::apply_mode(resolution, self.mode, resolved_krate);
             }
@@ -431,9 +524,15 @@ impl BinaryResolver for BinaryResolverImpl {
             }
         };
 
-        // Persist only conclusive outcomes; an inconclusive result is structurally uncacheable.
-        if let Some(entry) = Self::cacheable(&resolution) {
-            self.cache.put_cached_binary(resolved_krate, &entry)?;
+        // Persist only conclusive outcomes; an inconclusive result is structurally uncacheable. The
+        // entry records the providers enabled for this resolution so a future run can tell whether the
+        // cached answer still applies (see [`Self::cached_resolution`]).
+        if let Some(outcome) = resolution.to_cacheable() {
+            let entry = BinaryCacheEntry {
+                outcome,
+                enabled_providers: self.config.prebuilt_binaries.binary_providers.clone(),
+            };
+            self.cache.put_cached_binary(resolved_krate, entry)?;
         }
 
         Self::apply_mode(resolution, self.mode, resolved_krate)
@@ -460,117 +559,6 @@ mod tests {
         crate_resolver::ResolvedSource,
     };
 
-    /// Test that default build options are not disqualified
-    #[test]
-    fn test_disqualification_default_options_ok() {
-        let options = BuildOptions::default();
-        assert_eq!(BinaryResolverImpl::is_disqualified(&options), None);
-    }
-
-    /// Test that explicit --bin flag disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_explicit_bin() {
-        let options = BuildOptions {
-            build_target: BuildTarget::Bin("specific-bin".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("explicit --bin or --example specified")
-        );
-    }
-
-    /// Test that explicit --example flag disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_explicit_example() {
-        let options = BuildOptions {
-            build_target: BuildTarget::Example("my-example".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("explicit --bin or --example specified")
-        );
-    }
-
-    /// Test that custom features disqualify pre-built binaries
-    #[test]
-    fn test_disqualification_custom_features() {
-        let options = BuildOptions {
-            features: vec!["serde".to_string(), "json".to_string()],
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("custom features specified")
-        );
-    }
-
-    /// Test that --all-features disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_all_features() {
-        let options = BuildOptions {
-            all_features: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("--all-features specified")
-        );
-    }
-
-    /// Test that --no-default-features disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_no_default_features() {
-        let options = BuildOptions {
-            no_default_features: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("--no-default-features specified")
-        );
-    }
-
-    /// Test that custom profile disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_custom_profile() {
-        let options = BuildOptions {
-            profile: Some("release-with-debug".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("custom profile specified")
-        );
-    }
-
-    /// Test that custom target disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_custom_target() {
-        let options = BuildOptions {
-            target: Some("x86_64-unknown-linux-musl".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("custom target specified")
-        );
-    }
-
-    /// Test that custom toolchain disqualifies pre-built binaries
-    #[test]
-    fn test_disqualification_custom_toolchain() {
-        let options = BuildOptions {
-            toolchain: Some("nightly".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            BinaryResolverImpl::is_disqualified(&options),
-            Some("custom toolchain specified")
-        );
-    }
-
     /// The canned outcome a [`StubProvider`] returns.
     #[expect(
         clippy::large_enum_variant,
@@ -587,6 +575,28 @@ mod tests {
     struct StubProvider {
         outcome: StubOutcome,
         calls: Arc<AtomicUsize>,
+    }
+
+    impl StubProvider {
+        /// A `Found` stub whose binary's `provider` (and therefore the cached finder) is
+        /// `provider`, with a real on-disk file at `path` so relocation succeeds.
+        fn found(provider: BinaryProvider, path: PathBuf) -> Self {
+            Self {
+                outcome: StubOutcome::Found(ResolvedBinary {
+                    krate: test_downloaded_crate().resolved,
+                    provider,
+                    path,
+                }),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn nonexistent() -> Self {
+            Self {
+                outcome: StubOutcome::Nonexistent,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
     }
 
     impl Provider for StubProvider {
@@ -632,7 +642,7 @@ mod tests {
         config: Config,
         mode: UsePrebuiltBinaries,
         outcome: StubOutcome,
-    ) -> (BinaryResolverImpl, Arc<AtomicUsize>) {
+    ) -> (DefaultBinaryResolver, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut config = config;
         config.prebuilt_binaries.use_prebuilt_binaries = mode;
@@ -641,9 +651,24 @@ mod tests {
             calls: calls.clone(),
         })];
         (
-            BinaryResolverImpl::with_providers(config, cache, MessageReporter::null(), providers),
+            DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), providers),
             calls,
         )
+    }
+
+    /// Build an `auto`-mode resolver whose enabled provider list (the set recorded in / checked
+    /// against the cache) is `enabled`, backed by the given stub `providers` (which only supply
+    /// outcomes; their `kind()` is irrelevant to the cache's provider-set checks).
+    fn resolver_with_enabled_providers(
+        cache: Cache,
+        config: Config,
+        enabled: Vec<BinaryProvider>,
+        providers: Vec<Box<dyn Provider + Send + Sync>>,
+    ) -> DefaultBinaryResolver {
+        let mut config = config;
+        config.prebuilt_binaries.use_prebuilt_binaries = UsePrebuiltBinaries::Auto;
+        config.prebuilt_binaries.binary_providers = enabled;
+        DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), providers)
     }
 
     fn test_downloaded_crate() -> DownloadedCrate {
@@ -665,24 +690,136 @@ mod tests {
         }
     }
 
+    /// Test that default build options are not disqualified
+    #[test]
+    fn test_disqualification_default_options_ok() {
+        let options = BuildOptions::default();
+        assert_eq!(DefaultBinaryResolver::is_disqualified(&options), None);
+    }
+
+    /// Test that explicit --bin flag disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_explicit_bin() {
+        let options = BuildOptions {
+            build_target: BuildTarget::Bin("specific-bin".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("explicit --bin or --example specified")
+        );
+    }
+
+    /// Test that explicit --example flag disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_explicit_example() {
+        let options = BuildOptions {
+            build_target: BuildTarget::Example("my-example".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("explicit --bin or --example specified")
+        );
+    }
+
+    /// Test that custom features disqualify pre-built binaries
+    #[test]
+    fn test_disqualification_custom_features() {
+        let options = BuildOptions {
+            features: vec!["serde".to_string(), "json".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("custom features specified")
+        );
+    }
+
+    /// Test that --all-features disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_all_features() {
+        let options = BuildOptions {
+            all_features: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("--all-features specified")
+        );
+    }
+
+    /// Test that --no-default-features disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_no_default_features() {
+        let options = BuildOptions {
+            no_default_features: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("--no-default-features specified")
+        );
+    }
+
+    /// Test that custom profile disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_custom_profile() {
+        let options = BuildOptions {
+            profile: Some("release-with-debug".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("custom profile specified")
+        );
+    }
+
+    /// Test that custom target disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_custom_target() {
+        let options = BuildOptions {
+            target: Some("x86_64-unknown-linux-musl".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("custom target specified")
+        );
+    }
+
+    /// Test that custom toolchain disqualifies pre-built binaries
+    #[test]
+    fn test_disqualification_custom_toolchain() {
+        let options = BuildOptions {
+            toolchain: Some("nightly".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            DefaultBinaryResolver::is_disqualified(&options),
+            Some("custom toolchain specified")
+        );
+    }
     #[test]
     fn combine_empty_is_nonexistent() {
         assert_matches!(
-            BinaryResolverImpl::combine(Vec::<BinaryResolution>::new()),
+            DefaultBinaryResolver::combine_resolutions(Vec::<BinaryResolution>::new()),
             BinaryResolution::Nonexistent
         );
     }
 
     #[test]
     fn combine_all_nonexistent_is_nonexistent() {
-        let combined =
-            BinaryResolverImpl::combine([BinaryResolution::Nonexistent, BinaryResolution::Nonexistent]);
+        let combined = DefaultBinaryResolver::combine_resolutions([
+            BinaryResolution::Nonexistent,
+            BinaryResolution::Nonexistent,
+        ]);
         assert_matches!(combined, BinaryResolution::Nonexistent);
     }
 
     #[test]
     fn combine_any_found_wins() {
-        let combined = BinaryResolverImpl::combine([
+        let combined = DefaultBinaryResolver::combine_resolutions([
             BinaryResolution::Inconclusive {
                 source: boxed_transient(),
             },
@@ -694,7 +831,7 @@ mod tests {
 
     #[test]
     fn combine_inconclusive_beats_nonexistent() {
-        let combined = BinaryResolverImpl::combine([
+        let combined = DefaultBinaryResolver::combine_resolutions([
             BinaryResolution::Nonexistent,
             BinaryResolution::Inconclusive {
                 source: boxed_transient(),
@@ -707,17 +844,18 @@ mod tests {
     #[test]
     fn cacheable_found_and_nonexistent_but_never_inconclusive() {
         assert_matches!(
-            BinaryResolverImpl::cacheable(&BinaryResolution::Found(test_resolved_binary())),
-            Some(BinaryCacheEntry::Found(_))
+            BinaryResolution::Found(test_resolved_binary()).to_cacheable(),
+            Some(ConclusiveResolution::Found(_))
         );
         assert_matches!(
-            BinaryResolverImpl::cacheable(&BinaryResolution::Nonexistent),
-            Some(BinaryCacheEntry::Nonexistent)
+            BinaryResolution::Nonexistent.to_cacheable(),
+            Some(ConclusiveResolution::Nonexistent)
         );
         assert_matches!(
-            BinaryResolverImpl::cacheable(&BinaryResolution::Inconclusive {
+            BinaryResolution::Inconclusive {
                 source: boxed_transient()
-            }),
+            }
+            .to_cacheable(),
             None
         );
     }
@@ -726,7 +864,7 @@ mod tests {
     fn apply_mode_found_returns_binary_in_any_mode() {
         let resolved = test_downloaded_crate().resolved;
         for mode in [UsePrebuiltBinaries::Auto, UsePrebuiltBinaries::Always] {
-            let out = BinaryResolverImpl::apply_mode(
+            let out = DefaultBinaryResolver::apply_mode(
                 BinaryResolution::Found(test_resolved_binary()),
                 mode,
                 &resolved,
@@ -740,7 +878,7 @@ mod tests {
     fn apply_mode_nonexistent_is_none_in_auto_but_errors_in_always() {
         let resolved = test_downloaded_crate().resolved;
         assert_matches!(
-            BinaryResolverImpl::apply_mode(
+            DefaultBinaryResolver::apply_mode(
                 BinaryResolution::Nonexistent,
                 UsePrebuiltBinaries::Auto,
                 &resolved
@@ -748,7 +886,7 @@ mod tests {
             Ok(None)
         );
         assert_matches!(
-            BinaryResolverImpl::apply_mode(
+            DefaultBinaryResolver::apply_mode(
                 BinaryResolution::Nonexistent,
                 UsePrebuiltBinaries::Always,
                 &resolved
@@ -761,7 +899,7 @@ mod tests {
     fn apply_mode_inconclusive_is_none_in_auto_but_errors_with_source_in_always() {
         let resolved = test_downloaded_crate().resolved;
         assert_matches!(
-            BinaryResolverImpl::apply_mode(
+            DefaultBinaryResolver::apply_mode(
                 BinaryResolution::Inconclusive {
                     source: boxed_transient()
                 },
@@ -770,7 +908,7 @@ mod tests {
             ),
             Ok(None)
         );
-        let err = BinaryResolverImpl::apply_mode(
+        let err = DefaultBinaryResolver::apply_mode(
             BinaryResolution::Inconclusive {
                 source: boxed_transient(),
             },
@@ -982,7 +1120,10 @@ mod tests {
 
         assert_matches!(
             cache.get_cached_binary(&test_downloaded_crate().resolved),
-            Ok(Some(BinaryCacheEntry::Nonexistent))
+            Ok(Some(BinaryCacheEntry {
+                outcome: ConclusiveResolution::Nonexistent,
+                ..
+            }))
         );
     }
 
@@ -1008,6 +1149,181 @@ mod tests {
         assert_matches!(
             cache.get_cached_binary(&test_downloaded_crate().resolved),
             Ok(None)
+        );
+    }
+
+    /// The reported bug: a negative result cached when only GitLab was enabled must be re-resolved
+    /// once GitHub is also enabled, and GitHub (which has the binary) must actually be consulted.
+    #[test]
+    fn negative_cache_invalidated_when_new_provider_enabled() {
+        let (cache, config, temp) = test_env();
+
+        // Phase 1: only GitLab enabled, no binary -> caches Nonexistent with providers = [GitLab].
+        let gitlab1 = StubProvider::nonexistent();
+        let gitlab1_calls = gitlab1.calls.clone();
+        let r1 = resolver_with_enabled_providers(
+            cache.clone(),
+            config.clone(),
+            vec![BinaryProvider::GitlabReleases],
+            vec![Box::new(gitlab1)],
+        );
+        assert_matches!(
+            r1.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(None)
+        );
+        assert_eq!(gitlab1_calls.load(Ordering::SeqCst), 1);
+
+        // Phase 2: GitLab + GitHub enabled, and GitHub has a binary.
+        let src = temp.path().join("serde");
+        std::fs::write(&src, b"binary").unwrap();
+        let gitlab2 = StubProvider::nonexistent();
+        let github = StubProvider::found(BinaryProvider::GithubReleases, src);
+        let github_calls = github.calls.clone();
+        let r2 = resolver_with_enabled_providers(
+            cache.clone(),
+            config,
+            vec![BinaryProvider::GitlabReleases, BinaryProvider::GithubReleases],
+            vec![Box::new(gitlab2), Box::new(github)],
+        );
+
+        let result = r2
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap();
+
+        assert_matches!(result, Some(_));
+        assert!(
+            github_calls.load(Ordering::SeqCst) >= 1,
+            "GitHub must be consulted once the stale negative entry is invalidated"
+        );
+    }
+
+    /// An identical provider set across runs must NOT invalidate: the second run is a cache hit and
+    /// the providers are not consulted again.
+    #[test]
+    fn identical_provider_set_is_cache_hit() {
+        let (cache, config, _temp) = test_env();
+        let enabled = vec![BinaryProvider::GitlabReleases, BinaryProvider::GithubReleases];
+
+        let gl1 = StubProvider::nonexistent();
+        let gh1 = StubProvider::nonexistent();
+        let (gl1_calls, gh1_calls) = (gl1.calls.clone(), gh1.calls.clone());
+        let r1 = resolver_with_enabled_providers(
+            cache.clone(),
+            config.clone(),
+            enabled.clone(),
+            vec![Box::new(gl1), Box::new(gh1)],
+        );
+        assert_matches!(
+            r1.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(None)
+        );
+        assert_eq!(gl1_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(gh1_calls.load(Ordering::SeqCst), 1);
+
+        let gl2 = StubProvider::nonexistent();
+        let gh2 = StubProvider::nonexistent();
+        let (gl2_calls, gh2_calls) = (gl2.calls.clone(), gh2.calls.clone());
+        let r2 = resolver_with_enabled_providers(cache, config, enabled, vec![Box::new(gl2), Box::new(gh2)]);
+        assert_matches!(
+            r2.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(None)
+        );
+        assert_eq!(
+            gl2_calls.load(Ordering::SeqCst),
+            0,
+            "cache hit must not re-consult providers"
+        );
+        assert_eq!(
+            gh2_calls.load(Ordering::SeqCst),
+            0,
+            "cache hit must not re-consult providers"
+        );
+    }
+
+    /// Removing a provider that did NOT produce the cached binary keeps the positive entry valid
+    /// (coverage still holds and the finder is still enabled): cache hit, no re-consultation.
+    #[test]
+    fn removing_non_finder_provider_keeps_positive_entry() {
+        let (cache, config, temp) = test_env();
+        let src = temp.path().join("serde");
+        std::fs::write(&src, b"binary").unwrap();
+
+        // Phase 1: GitHub (the finder) + Quickinstall enabled; GitHub is first and is found.
+        let github = StubProvider::found(BinaryProvider::GithubReleases, src);
+        let quick = StubProvider::nonexistent();
+        let r1 = resolver_with_enabled_providers(
+            cache.clone(),
+            config.clone(),
+            vec![BinaryProvider::GithubReleases, BinaryProvider::Quickinstall],
+            vec![Box::new(github), Box::new(quick)],
+        );
+        assert_matches!(
+            r1.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(Some(_))
+        );
+
+        // Phase 2: drop the non-finder Quickinstall; GitHub remains enabled -> still a cache hit.
+        let github2 = StubProvider::nonexistent();
+        let github2_calls = github2.calls.clone();
+        let r2 = resolver_with_enabled_providers(
+            cache,
+            config,
+            vec![BinaryProvider::GithubReleases],
+            vec![Box::new(github2)],
+        );
+        let result = r2
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap();
+        assert_matches!(result, Some(_));
+        assert_eq!(
+            github2_calls.load(Ordering::SeqCst),
+            0,
+            "a still-valid positive entry must not re-consult providers"
+        );
+    }
+
+    /// Disabling the exact provider that produced the cached binary invalidates the positive entry:
+    /// the binary must not be served, and the crate is re-resolved.
+    #[test]
+    fn disabling_finder_invalidates_positive_entry() {
+        let (cache, config, temp) = test_env();
+        let src = temp.path().join("serde");
+        std::fs::write(&src, b"binary").unwrap();
+
+        // Phase 1: GitLab + GitHub enabled; GitHub (second) is found, so the finder is GitHub.
+        let gitlab = StubProvider::nonexistent();
+        let github = StubProvider::found(BinaryProvider::GithubReleases, src);
+        let r1 = resolver_with_enabled_providers(
+            cache.clone(),
+            config.clone(),
+            vec![BinaryProvider::GitlabReleases, BinaryProvider::GithubReleases],
+            vec![Box::new(gitlab), Box::new(github)],
+        );
+        assert_matches!(
+            r1.resolve(&test_downloaded_crate(), &BuildOptions::default()),
+            Ok(Some(_))
+        );
+
+        // Phase 2: GitHub (the finder) disabled, only GitLab enabled (which has no binary).
+        let gitlab2 = StubProvider::nonexistent();
+        let gitlab2_calls = gitlab2.calls.clone();
+        let r2 = resolver_with_enabled_providers(
+            cache,
+            config,
+            vec![BinaryProvider::GitlabReleases],
+            vec![Box::new(gitlab2)],
+        );
+        let result = r2
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap();
+        assert_eq!(
+            result, None,
+            "a binary from a now-disabled provider must not be served"
+        );
+        assert_eq!(
+            gitlab2_calls.load(Ordering::SeqCst),
+            1,
+            "must re-resolve once the finder is disabled"
         );
     }
 }

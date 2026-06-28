@@ -14,7 +14,7 @@ pub use build_cache::BuildCacheMessage;
 pub use cgx::{CgxMessage, Provenance};
 pub use crate_resolution::CrateResolutionMessage;
 pub use git::GitMessage;
-pub use prebuilt_binary::PrebuiltBinaryMessage;
+pub use prebuilt_binary::{PrebuiltBinaryMessage, ProviderChangeReason};
 pub use runner::RunnerMessage;
 use serde::{Deserialize, Serialize};
 pub use source::SourceMessage;

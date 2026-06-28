@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 use super::Message;
 use crate::{bin_resolver::ResolvedBinary, config::BinaryProvider, crate_resolver::ResolvedCrate};
 
+/// Why a cached binary-resolution entry was discarded because the enabled set of binary providers
+/// changed since the entry was written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderChangeReason {
+    /// A provider is now enabled that was not enabled when the cache entry was created, so the
+    /// cached outcome might no longer be correct (this provider was never consulted).
+    RequiredProviderNotEnabled(BinaryProvider),
+    /// The provider that produced the cached binary is no longer enabled, so the binary must not be
+    /// served.
+    SourceProviderDisabled(BinaryProvider),
+}
+
 /// Messages related to prebuilt binary resolution and binary resolution cache operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -22,6 +35,12 @@ pub enum PrebuiltBinaryMessage {
     NegativeCacheHit { krate: ResolvedCrate },
     /// No cached prebuilt binary resolution found
     CacheMiss { krate: ResolvedCrate },
+    /// A cached prebuilt binary resolution existed but was discarded because the enabled set of
+    /// binary providers changed, so the crate will be re-resolved.
+    CacheInvalidatedByProviderChange {
+        krate: ResolvedCrate,
+        reason: ProviderChangeReason,
+    },
     /// Checking a specific binary provider for prebuilt binaries
     CheckingProvider {
         krate: ResolvedCrate,
@@ -80,6 +99,13 @@ impl PrebuiltBinaryMessage {
 
     pub fn cache_miss(krate: &ResolvedCrate) -> Self {
         Self::CacheMiss { krate: krate.clone() }
+    }
+
+    pub fn cache_invalidated_by_provider_change(krate: &ResolvedCrate, reason: ProviderChangeReason) -> Self {
+        Self::CacheInvalidatedByProviderChange {
+            krate: krate.clone(),
+            reason,
+        }
     }
 
     pub fn checking_provider(krate: &ResolvedCrate, provider: BinaryProvider) -> Self {

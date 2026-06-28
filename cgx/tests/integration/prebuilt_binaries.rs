@@ -599,8 +599,8 @@ fn github_provider_resolves_binary() {
 
 /// Regression test for #206: `taplo-cli` resolves its prebuilt binary from GitHub releases.
 ///
-/// This exercises all three of the asset-matching heuristics the fix added: the asset is named after
-/// the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform token
+/// This exercises all three of the asset-matching heuristics the fix added: the asset is named
+/// after the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform token
 /// (`taplo-linux-x86_64`, not the full triple), and on Linux/macOS is a bare `.gz` (a gzipped
 /// binary, not a tarball). `--no-exec` runs the full download+extract path — so the naked-`.gz`
 /// extraction is covered end to end — without executing the binary, sidestepping any glibc/musl

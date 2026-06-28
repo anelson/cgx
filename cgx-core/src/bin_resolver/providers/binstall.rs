@@ -301,9 +301,9 @@ impl Provider for BinstallProvider {
 
         let Some(data) = data else {
             if let Some(source) = transient {
-                // If even one provider failed with a transient error, we consider the resolution inconclusive.
-                // This transient error is just what went wrong that prevented at least one provider
-                // from being able to provide a definitive answer.
+                // If even one provider failed with a transient error, we consider the resolution
+                // inconclusive. This transient error is just what went wrong that prevented
+                // at least one provider from being able to provide a definitive answer.
                 //
                 // Report the error as part of the resolution for diagnostic purposes.
                 return Ok(BinaryResolution::Inconclusive { source });
