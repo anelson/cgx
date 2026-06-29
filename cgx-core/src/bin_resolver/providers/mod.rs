@@ -12,7 +12,9 @@ pub(super) use github::GithubProvider;
 pub(super) use gitlab::GitlabProvider;
 pub(super) use quickinstall::QuickinstallProvider;
 
-use crate::{Result, bin_resolver::BinaryResolution, config::BinaryProvider, downloader::DownloadedCrate};
+use crate::{
+    Result, bin_resolver::ConclusiveResolution, config::BinaryProvider, downloader::DownloadedCrate,
+};
 
 /// Trait for providers that can resolve pre-built binaries.
 pub(super) trait Provider {
@@ -22,12 +24,17 @@ pub(super) trait Provider {
     /// metadata and the crate source directory. Providers that only need the metadata (like
     /// heuristic URL probers) can access it via `krate.resolved`.
     ///
-    /// Returns a [`BinaryResolution`]: [`Found`](BinaryResolution::Found) with the binary,
-    /// [`Nonexistent`](BinaryResolution::Nonexistent) if this provider conclusively has no binary
-    /// for the crate, or [`Inconclusive`](BinaryResolution::Inconclusive) if a transient failure
-    /// (rate limit, network error) prevented a definitive answer. `Err` is reserved for genuinely
-    /// fatal or unexpected failures that should stop binary resolution entirely.
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution>;
+    /// Returns [`ConclusiveResolution::Found`] with the binary,
+    /// [`ConclusiveResolution::Nonexistent`] if this provider conclusively has no binary for
+    /// the crate, or `Err` if the provider could not determine a conclusive outcome.
+    ///
+    /// If the provider returns `Err`, the resolution of the crate for this provider will be
+    /// considered inconclusive, that is to say it is not cached as either a positive or negative
+    /// result.  Providers should strive to produce only conclusive results, but of course
+    /// providers to fallible things like network I/O and parsing of data, in which case those
+    /// providers should return `Err` to indicate that they could not determine a conclusive
+    /// outcome.
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution>;
 
     /// The kind of this provider, used for progress reporting.
     fn kind(&self) -> BinaryProvider;

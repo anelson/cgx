@@ -50,7 +50,8 @@ pub trait BinaryResolver {
     ) -> Result<Option<ResolvedBinary>>;
 }
 
-/// A conclusive binary-resolution outcome: the cacheable subset of [`BinaryResolution`].
+/// A conclusive provider outcome: a binary was found, or this provider determined
+/// no binary is available.
 ///
 /// The two variants distinguish a positive result (a pre-built binary was resolved) from a
 /// conclusive negative (we determined no pre-built binary is available).  Theoretically it's
@@ -123,6 +124,15 @@ impl BinaryResolution {
             BinaryResolution::Found(binary) => Some(ConclusiveResolution::Found(binary.clone())),
             BinaryResolution::Nonexistent => Some(ConclusiveResolution::Nonexistent),
             BinaryResolution::Inconclusive { .. } => None,
+        }
+    }
+}
+
+impl From<ConclusiveResolution> for BinaryResolution {
+    fn from(value: ConclusiveResolution) -> Self {
+        match value {
+            ConclusiveResolution::Found(binary) => Self::Found(binary),
+            ConclusiveResolution::Nonexistent => Self::Nonexistent,
         }
     }
 }
@@ -366,7 +376,24 @@ impl DefaultBinaryResolver {
         for provider in &self.providers {
             self.reporter
                 .report(|| PrebuiltBinaryMessage::checking_provider(resolved, provider.kind()));
-            let resolution = provider.try_resolve(krate, platform)?;
+
+            // Invoke the provider, and based on the outcome construct the BinaryResolution result.
+            //
+            // If a single provide fails with any kind of error, we consider that an inconclusive
+            // result.  Under normal circumstances, providers should not be failing; if the
+            // provider determines the binary isn't found that should be an Ok response.  However,
+            // the providers do a lot of fallible things, including making API calls that can be
+            // throttled, parsing formats that could be invalid, etc.
+            //
+            // If a provider fails for a given crate input, that is likely a bug in the provider
+            // code somewhere, but such a bug should not cause the binary resolution process itself
+            // to return an error, nor should it result in a permanent negative cache entry.
+            let resolution = match provider.try_resolve(krate, platform) {
+                Ok(resolution) => BinaryResolution::from(resolution),
+                Err(source) => BinaryResolution::Inconclusive {
+                    source: Box::new(source),
+                },
+            };
             let found = matches!(resolution, BinaryResolution::Found(_));
             results.push(resolution);
             if found {
@@ -567,10 +594,10 @@ mod tests {
     enum StubOutcome {
         Found(ResolvedBinary),
         Nonexistent,
-        Inconclusive,
+        Error,
     }
 
-    /// A [`Provider`] standing in for a real provider, returning a canned [`BinaryResolution`] and
+    /// A [`Provider`] standing in for a real provider, returning a canned provider result and
     /// counting how often it is consulted (so tests can assert short-circuiting and cache hits).
     struct StubProvider {
         outcome: StubOutcome,
@@ -597,6 +624,13 @@ mod tests {
                 calls: Arc::new(AtomicUsize::new(0)),
             }
         }
+
+        fn error() -> Self {
+            Self {
+                outcome: StubOutcome::Error,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
     }
 
     impl Provider for StubProvider {
@@ -604,27 +638,27 @@ mod tests {
             BinaryProvider::GithubReleases
         }
 
-        fn try_resolve(&self, _krate: &DownloadedCrate, _platform: &str) -> Result<BinaryResolution> {
+        fn try_resolve(&self, _krate: &DownloadedCrate, _platform: &str) -> Result<ConclusiveResolution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(match &self.outcome {
-                StubOutcome::Found(binary) => BinaryResolution::Found(binary.clone()),
-                StubOutcome::Nonexistent => BinaryResolution::Nonexistent,
-                StubOutcome::Inconclusive => BinaryResolution::Inconclusive {
-                    source: boxed_transient(),
-                },
-            })
+            match &self.outcome {
+                StubOutcome::Found(binary) => Ok(ConclusiveResolution::Found(binary.clone())),
+                StubOutcome::Nonexistent => Ok(ConclusiveResolution::Nonexistent),
+                StubOutcome::Error => Err(transient_error()),
+            }
         }
     }
 
-    /// A boxed transient (HTTP 429) error, standing in for a rate limit error / network glitch.
+    /// A transient-looking HTTP 429 error, standing in for a rate limit error / network glitch.
+    fn transient_error() -> Error {
+        error::HttpStatusSnafu {
+            url: "https://api.github.com/repos/x/y/releases/tags/v1.0.0".to_string(),
+            status: 429u16,
+        }
+        .build()
+    }
+
     fn boxed_transient() -> Box<Error> {
-        Box::new(
-            error::HttpStatusSnafu {
-                url: "https://api.github.com/repos/x/y/releases/tags/v1.0.0".to_string(),
-                status: 429u16,
-            }
-            .build(),
-        )
+        Box::new(transient_error())
     }
 
     fn test_env() -> (Cache, Config, TempDir) {
@@ -1087,7 +1121,7 @@ mod tests {
             cache.clone(),
             config,
             UsePrebuiltBinaries::Auto,
-            StubOutcome::Inconclusive,
+            StubOutcome::Error,
         );
 
         let result = resolver
@@ -1101,6 +1135,33 @@ mod tests {
             Ok(None),
             "an inconclusive resolution must not be persisted"
         );
+    }
+
+    #[test]
+    fn auto_mode_continues_after_provider_error_and_returns_later_found() {
+        let (cache, config, temp) = test_env();
+        let src = temp.path().join("serde");
+        std::fs::write(&src, b"binary").unwrap();
+
+        let first = StubProvider::error();
+        let first_calls = first.calls.clone();
+        let second = StubProvider::found(BinaryProvider::GithubReleases, src);
+        let second_calls = second.calls.clone();
+        let resolver = resolver_with_enabled_providers(
+            cache,
+            config,
+            vec![BinaryProvider::GitlabReleases, BinaryProvider::GithubReleases],
+            vec![Box::new(first), Box::new(second)],
+        );
+
+        let result = resolver
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result.provider, BinaryProvider::GithubReleases);
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
     }
 
     /// A conclusive absence IS cached (as a negative entry), so later runs skip the providers.
@@ -1136,14 +1197,15 @@ mod tests {
             cache.clone(),
             config,
             UsePrebuiltBinaries::Always,
-            StubOutcome::Inconclusive,
+            StubOutcome::Error,
         );
 
         let result = resolver.resolve(&test_downloaded_crate(), &BuildOptions::default());
 
         assert_matches!(
             result,
-            Err(Error::PrebuiltBinaryResolutionFailed { ref name, .. }) if name == "serde"
+            Err(Error::PrebuiltBinaryResolutionFailed { ref name, ref source, .. })
+                if name == "serde" && matches!(source.as_ref(), Error::HttpStatus { status: 429, .. })
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_matches!(

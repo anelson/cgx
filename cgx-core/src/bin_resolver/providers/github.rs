@@ -2,6 +2,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use reqwest::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
@@ -9,7 +10,7 @@ use snafu::ResultExt;
 use super::Provider;
 use crate::{
     Result,
-    bin_resolver::{BinaryResolution, ResolvedBinary},
+    bin_resolver::{ConclusiveResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     cratespec::Forge,
@@ -121,21 +122,19 @@ impl GithubProvider {
             }
         }
 
-        let response = self.http_client.get_with_headers(&url, &headers)?;
+        let response =
+            self.http_client
+                .get_with_headers_retrying_status(&url, &headers, Self::should_retry_status)?;
 
         if !response.status().is_success() {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            if response.status() == StatusCode::NOT_FOUND {
                 // The API call worked, and Github is telling us that there are not release assets
                 // for this resource.  From the caller's perspective that isn't an error at all, it
                 // is a conclusive, negative result.
                 return Ok(Vec::new());
             }
 
-            return error::HttpStatusSnafu {
-                url: url.clone(),
-                status: response.status().as_u16(),
-            }
-            .fail();
+            return Self::non_success_response_error(&url, response);
         }
 
         let text = response
@@ -156,7 +155,102 @@ impl GithubProvider {
     /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource
     /// does not exist), or `Err` for any other failure (network errors, non-404 HTTP errors).
     fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
-        self.http_client.try_download(url)
+        let response = self
+            .http_client
+            .get_retrying_status(url, Self::should_retry_status)?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            return Self::non_success_response_error(url, response);
+        }
+
+        let bytes = response
+            .bytes()
+            .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
+
+        Ok(Some(bytes))
+    }
+
+    /// GitHub rate limiting can be reported as HTTP 403 or 429, and callers should not retry
+    /// errors that are indicative of rate limiting. Let those statuses return to this provider so
+    /// [`Self::non_success_response_error`] can decide whether they are throttle responses; keep
+    /// ordinary server errors retryable through [`HttpClient`].
+    fn should_retry_status(status: StatusCode) -> bool {
+        status.is_server_error()
+    }
+
+    /// Classify a non-success GitHub API or release-asset response.
+    ///
+    /// GitHub uses HTTP 404 for an absent release tag or asset, which callers handle before this
+    /// function. This helper checks the remaining GitHub-specific throttle signals on HTTP 403/429
+    /// and otherwise preserves the response as a normal HTTP status error.
+    fn non_success_response_error<T>(url: &str, response: reqwest::blocking::Response) -> Result<T> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = if status == StatusCode::FORBIDDEN && !Self::is_throttled_response(status, &headers, None)
+        {
+            Some(
+                response
+                    .text()
+                    .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?,
+            )
+        } else {
+            None
+        };
+
+        if Self::is_throttled_response(status, &headers, body.as_deref()) {
+            return Err(Self::provider_throttled_error(url, status));
+        }
+
+        error::HttpStatusSnafu {
+            url: url.to_string(),
+            status: status.as_u16(),
+        }
+        .fail()
+    }
+
+    /// Return whether a GitHub HTTP response represents API throttling rather than an ordinary
+    /// authorization or client error.
+    ///
+    /// GitHub can report rate limiting with HTTP 429 directly, or with HTTP 403 plus headers such
+    /// as `retry-after` / `x-ratelimit-remaining: 0`, or with a rate-limit message in the response
+    /// body.
+    fn is_throttled_response(status: StatusCode, headers: &HeaderMap, body: Option<&str>) -> bool {
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return true;
+        }
+
+        status == StatusCode::FORBIDDEN
+            && (Self::header_value(headers, "retry-after").is_some()
+                || Self::header_value(headers, "x-ratelimit-remaining").as_deref() == Some("0")
+                || body.is_some_and(Self::is_rate_limit_body))
+    }
+
+    /// Detect GitHub's textual rate-limit responses when the HTTP 403 headers alone are not enough
+    /// to distinguish throttling from ordinary forbidden access.
+    fn is_rate_limit_body(body: &str) -> bool {
+        let body = body.to_ascii_lowercase();
+        body.contains("rate limit") || body.contains("rate-limit") || body.contains("too many requests")
+    }
+
+    /// Build the provider-throttle error after GitHub-specific response classification has already
+    /// decided that the status represents rate limiting.
+    fn provider_throttled_error(url: &str, status: StatusCode) -> error::Error {
+        error::ProviderThrottledSnafu {
+            url: url.to_string(),
+            status: status.as_u16(),
+        }
+        .build()
+    }
+
+    fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
     }
 
     fn verify_checksum(&self, data: &[u8], url: &str) -> Result<()> {
@@ -202,7 +296,7 @@ impl Provider for GithubProvider {
         BinaryProvider::GithubReleases
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -212,7 +306,7 @@ impl Provider for GithubProvider {
                     "no repository URL available",
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         let Some((owner, repo)) = Self::parse_owner_repo(&repo_url) else {
@@ -222,7 +316,7 @@ impl Provider for GithubProvider {
                     format!("could not parse owner/repo from URL: {}", repo_url),
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         let Some(api_base) = Self::api_base(&repo_url) else {
@@ -232,47 +326,35 @@ impl Provider for GithubProvider {
                     format!("could not determine API base for URL: {}", repo_url),
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         let version = krate.resolved.version.to_string();
 
-        // Try both v{version} and {version} tags; stop at the first that returns assets. A transient
-        // failure (rate limit, network) on a tag is remembered: if no tag yields assets and at least
-        // one lookup failed transiently, the result is inconclusive.  To produce a definitive
-        // negative result, all lookups must succeed and return no assets.
+        // Try both v{version} and {version} tags; stop at the first that returns assets.
         let tags = [format!("v{}", version), version.clone()];
         let mut assets = Vec::new();
-        let mut transient: Option<Box<error::Error>> = None;
         for tag in &tags {
+            // `list_release_assets` already handles 404 and just returns an empty vec, so we can
+            // just check if the result is empty or not.
             match self.list_release_assets(&api_base, owner, repo, tag) {
                 Ok(a) if !a.is_empty() => {
                     assets = a;
                     break;
                 }
                 Ok(_) => {}
-                Err(e) if e.is_transient_http_error() => {
-                    if transient.is_none() {
-                        transient = Some(Box::new(e));
-                    }
-                }
                 Err(e) => return Err(e),
             }
         }
 
         if assets.is_empty() {
-            if let Some(source) = transient {
-                tracing::debug!(error = %source,
-                    "GitHub release lookup failed transiently; result is inconclusive");
-                return Ok(BinaryResolution::Inconclusive { source });
-            }
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::GithubReleases,
                     "no release found for any tag variant",
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         }
 
         let crate_name = krate.resolved.name.as_str();
@@ -303,7 +385,7 @@ impl Provider for GithubProvider {
                     "no matching asset found in release",
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         self.reporter.report(|| {
@@ -319,10 +401,7 @@ impl Provider for GithubProvider {
                         format!("Release artifact not found: {}", download_url),
                     )
                 });
-                return Ok(BinaryResolution::Nonexistent);
-            }
-            Err(e) if e.is_transient_http_error() => {
-                return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
+                return Ok(ConclusiveResolution::Nonexistent);
             }
             Err(e) => return Err(e),
         };
@@ -374,7 +453,7 @@ impl Provider for GithubProvider {
             })?;
         }
 
-        Ok(BinaryResolution::Found(ResolvedBinary {
+        Ok(ConclusiveResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::GithubReleases,
             path: final_path,
@@ -384,13 +463,41 @@ impl Provider for GithubProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, time::Duration};
 
+    use assert_matches::assert_matches;
+    use httpmock::prelude::*;
     use semver::Version;
     use url::Url;
 
     use super::*;
-    use crate::{crate_resolver::ResolvedSource, cratespec::Forge};
+    use crate::{
+        config::HttpConfig, crate_resolver::ResolvedSource, cratespec::Forge, error::Error,
+        messages::MessageReporter,
+    };
+
+    fn fast_retry_config() -> HttpConfig {
+        HttpConfig {
+            retries: 2,
+            backoff_base: Duration::from_millis(1),
+            backoff_max: Duration::from_millis(10),
+            ..Default::default()
+        }
+    }
+
+    fn test_provider() -> (GithubProvider, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let http_client = HttpClient::new(&fast_retry_config()).unwrap();
+        (
+            GithubProvider::new(
+                MessageReporter::null(),
+                temp_dir.path().to_path_buf(),
+                false,
+                http_client,
+            ),
+            temp_dir,
+        )
+    }
 
     #[test]
     fn test_parse_owner_repo_standard() {
@@ -596,5 +703,54 @@ repository = "https://github.com/owner/mytool"
 
         let url = GithubProvider::get_repo_url(&krate).unwrap();
         assert_eq!(url, Some("https://github.com/owner/mytool".to_string()));
+    }
+
+    #[test]
+    fn list_release_assets_429_is_not_retried_and_becomes_provider_throttled() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/repos/owner/repo/releases/tags/v1.0.0");
+            then.status(429).header("retry-after", "60");
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let result = provider.list_release_assets(&server.base_url(), "owner", "repo", "v1.0.0");
+
+        assert_matches!(result, Err(Error::ProviderThrottled { status: 429, .. }));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn list_release_assets_403_with_zero_remaining_becomes_provider_throttled() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/repos/owner/repo/releases/tags/v1.0.0");
+            then.status(403)
+                .header("x-ratelimit-remaining", "0")
+                .header("x-ratelimit-reset", "1710000000");
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let result = provider.list_release_assets(&server.base_url(), "owner", "repo", "v1.0.0");
+
+        assert_matches!(result, Err(Error::ProviderThrottled { status: 403, .. }));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn list_release_assets_404_returns_empty_assets() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/repos/owner/repo/releases/tags/v1.0.0");
+            then.status(404);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let assets = provider
+            .list_release_assets(&server.base_url(), "owner", "repo", "v1.0.0")
+            .unwrap();
+
+        assert!(assets.is_empty());
+        mock.assert_calls(1);
     }
 }

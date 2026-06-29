@@ -7,7 +7,7 @@ use snafu::ResultExt;
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
-    bin_resolver::{BinaryResolution, ResolvedBinary},
+    bin_resolver::{ConclusiveResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedCrate,
     downloader::DownloadedCrate,
@@ -51,7 +51,7 @@ impl Provider for QuickinstallProvider {
         BinaryProvider::Quickinstall
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
         let url = Self::construct_url(&krate.resolved, platform);
 
         self.reporter
@@ -66,10 +66,7 @@ impl Provider for QuickinstallProvider {
                         "binary not found",
                     )
                 });
-                return Ok(BinaryResolution::Nonexistent);
-            }
-            Err(e) if e.is_transient_http_error() => {
-                return Ok(BinaryResolution::Inconclusive { source: Box::new(e) });
+                return Ok(ConclusiveResolution::Nonexistent);
             }
             Err(e) => return Err(e),
         };
@@ -120,7 +117,7 @@ impl Provider for QuickinstallProvider {
             })?;
         }
 
-        Ok(BinaryResolution::Found(ResolvedBinary {
+        Ok(ConclusiveResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::Quickinstall,
             path: final_path,

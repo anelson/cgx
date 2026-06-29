@@ -9,7 +9,7 @@ use snafu::ResultExt;
 use super::{ArchiveFormat, Provider};
 use crate::{
     Result,
-    bin_resolver::{BinaryResolution, ResolvedBinary},
+    bin_resolver::{ConclusiveResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     downloader::DownloadedCrate,
@@ -231,7 +231,7 @@ impl Provider for BinstallProvider {
         BinaryProvider::Binstall
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
         let resolved = &krate.resolved;
 
         let Some(meta) = Self::read_binstall_metadata(krate, platform)? else {
@@ -241,7 +241,7 @@ impl Provider for BinstallProvider {
                     "no [package.metadata.binstall] in Cargo.toml",
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         let Some(ref pkg_url_template) = meta.pkg_url else {
@@ -251,7 +251,7 @@ impl Provider for BinstallProvider {
                     "binstall metadata has no pkg-url",
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         let pkg_fmt = meta.pkg_fmt.as_deref();
@@ -263,7 +263,6 @@ impl Provider for BinstallProvider {
 
         let mut last_url = String::new();
         let mut data = None;
-        let mut transient: Option<Box<error::Error>> = None;
 
         for suffix in suffixes {
             let ctx = TemplateContext {
@@ -290,25 +289,11 @@ impl Provider for BinstallProvider {
                 Ok(None) => {
                     last_url = url;
                 }
-                Err(e) if e.is_transient_http_error() => {
-                    transient = Some(Box::new(e));
-                    last_url = url;
-                    break;
-                }
                 Err(e) => return Err(e),
             }
         }
 
         let Some(data) = data else {
-            if let Some(source) = transient {
-                // If even one provider failed with a transient error, we consider the resolution
-                // inconclusive. This transient error is just what went wrong that prevented
-                // at least one provider from being able to provide a definitive answer.
-                //
-                // Report the error as part of the resolution for diagnostic purposes.
-                return Ok(BinaryResolution::Inconclusive { source });
-            }
-
             // If not binary found and no transient error then it just means this crate legit
             // doesn't have a prebuilt binary for this platform in any of the places we know to
             // look.
@@ -318,7 +303,7 @@ impl Provider for BinstallProvider {
                     format!("download failed: {}", last_url),
                 )
             });
-            return Ok(BinaryResolution::Nonexistent);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
         let url = last_url;
 
@@ -369,7 +354,7 @@ impl Provider for BinstallProvider {
             })?;
         }
 
-        Ok(BinaryResolution::Found(ResolvedBinary {
+        Ok(ConclusiveResolution::Found(ResolvedBinary {
             krate: resolved.clone(),
             provider: BinaryProvider::Binstall,
             path: final_path,

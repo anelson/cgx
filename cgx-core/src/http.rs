@@ -2,8 +2,11 @@ use std::time::Duration;
 
 use backon::{BlockingRetryable, ExponentialBuilder};
 pub use bytes::Bytes;
-use reqwest::blocking::{Client, Response};
 pub use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::{
+    StatusCode,
+    blocking::{Client, Response},
+};
 use snafu::ResultExt;
 
 use crate::{Result, config::HttpConfig, error};
@@ -88,6 +91,31 @@ impl HttpClient {
     /// Returns the response even if the status is non-success (except for retryable statuses);
     /// callers must inspect the status and handle non-2xx as needed.
     pub fn get_with_headers(&self, url: &str, headers: &HeaderMap) -> Result<Response> {
+        self.get_with_headers_retrying_status(url, headers, Self::standard_should_retry_status)
+    }
+
+    /// Perform a GET request with a custom status retry policy.
+    ///
+    /// Transport errors continue to use the standard retry policy; `should_retry_status` controls
+    /// only HTTP response statuses.
+    pub(crate) fn get_retrying_status(
+        &self,
+        url: &str,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<Response> {
+        self.get_with_headers_retrying_status(url, &HeaderMap::new(), should_retry_status)
+    }
+
+    /// Perform a GET request with custom headers and a custom status retry policy.
+    ///
+    /// Transport errors continue to use the standard retry policy; `should_retry_status` controls
+    /// only HTTP response statuses.
+    pub(crate) fn get_with_headers_retrying_status(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<Response> {
         let backoff = self.build_backoff();
         let url_owned = url.to_string();
         let headers = headers.clone();
@@ -102,7 +130,7 @@ impl HttpClient {
                 url: url_owned.clone(),
             })?;
 
-            Self::classify_retryable_status(response, &url_owned)
+            Self::classify_retryable_status(response, &url_owned, should_retry_status)
         };
 
         operation
@@ -120,6 +148,18 @@ impl HttpClient {
     /// Returns the response even if the status is non-success (except for retryable statuses);
     /// callers must inspect the status and handle non-2xx as needed.
     pub fn head(&self, url: &str) -> Result<Response> {
+        self.head_retrying_status(url, Self::standard_should_retry_status)
+    }
+
+    /// Perform a HEAD request with a custom status retry policy.
+    ///
+    /// Transport errors continue to use the standard retry policy; `should_retry_status` controls
+    /// only HTTP response statuses.
+    pub(crate) fn head_retrying_status(
+        &self,
+        url: &str,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<Response> {
         let backoff = self.build_backoff();
         let url_owned = url.to_string();
 
@@ -132,7 +172,7 @@ impl HttpClient {
                     url: url_owned.clone(),
                 })?;
 
-            Self::classify_retryable_status(response, &url_owned)
+            Self::classify_retryable_status(response, &url_owned, should_retry_status)
         };
 
         operation
@@ -155,7 +195,7 @@ impl HttpClient {
     pub fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
         let response = self.get(url)?;
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
 
@@ -182,16 +222,24 @@ impl HttpClient {
             .with_jitter()
     }
 
+    /// Return whether a status should be retried by the default HTTP policy.
+    pub(crate) fn standard_should_retry_status(status: StatusCode) -> bool {
+        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+    }
+
     /// Convert retryable HTTP status codes into errors that trigger retry.
     ///
     /// Returns `Err(HttpStatus)` only for status codes that we consider retriable, so the
     /// retry policy can act on them. `Ok(response)` does not imply success; it only
     /// means the response is not retryable and should be handled by the caller.
-    fn classify_retryable_status(response: Response, url: &str) -> Result<Response> {
+    fn classify_retryable_status(
+        response: Response,
+        url: &str,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<Response> {
         let status = response.status();
 
-        // 429 Too Many Requests - retryable
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if should_retry_status(status) {
             return error::HttpStatusSnafu {
                 url: url.to_string(),
                 status: status.as_u16(),
@@ -199,16 +247,7 @@ impl HttpClient {
             .fail();
         }
 
-        // 5xx Server Errors - retryable
-        if status.is_server_error() {
-            return error::HttpStatusSnafu {
-                url: url.to_string(),
-                status: status.as_u16(),
-            }
-            .fail();
-        }
-
-        // All other responses (including 4xx other than 429) are returned as-is
+        // All other responses are returned as-is.
         Ok(response)
     }
 }
@@ -314,6 +353,14 @@ mod tests {
         use httpmock::prelude::*;
 
         use super::*;
+
+        fn retry_server_errors_only(status: StatusCode) -> bool {
+            status.is_server_error()
+        }
+
+        fn never_retry_status(_: StatusCode) -> bool {
+            false
+        }
 
         #[test]
         fn test_get_200_returned_directly() {
@@ -449,6 +496,87 @@ mod tests {
             let result = client.get(&server.url("/once"));
             assert_matches!(result, Err(error::Error::HttpStatus { status: 500, .. }));
             mock.assert_calls(1);
+        }
+
+        #[test]
+        fn test_custom_status_retry_predicate_returns_429_without_retrying() {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(GET).path("/ratelimit");
+                then.status(429);
+            });
+
+            let client = HttpClient::new(&fast_retry_config()).unwrap();
+            let response = client
+                .get_retrying_status(&server.url("/ratelimit"), retry_server_errors_only)
+                .unwrap();
+            assert_eq!(response.status(), 429);
+            mock.assert_calls(1);
+        }
+
+        #[test]
+        fn test_custom_status_retry_predicate_still_retries_5xx() {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(GET).path("/error");
+                then.status(500);
+            });
+
+            let config = HttpConfig {
+                retries: 1,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(10),
+                ..Default::default()
+            };
+            let client = HttpClient::new(&config).unwrap();
+            let result = client.get_retrying_status(&server.url("/error"), retry_server_errors_only);
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 500, .. }));
+            mock.assert_calls(2);
+        }
+
+        #[test]
+        fn test_custom_status_retry_predicate_still_retries_transport_errors() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/closed", listener.local_addr().unwrap());
+            let request_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let accepting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let request_count_for_thread = std::sync::Arc::clone(&request_count);
+            let accepting_for_thread = std::sync::Arc::clone(&accepting);
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while accepting_for_thread.load(std::sync::atomic::Ordering::SeqCst)
+                    && std::time::Instant::now() < deadline
+                {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            request_count_for_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            drop(stream);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let config = HttpConfig {
+                retries: 1,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(10),
+                ..Default::default()
+            };
+            let client = HttpClient::new(&config).unwrap();
+            let result = client.get_retrying_status(&url, never_retry_status);
+            accepting.store(false, std::sync::atomic::Ordering::SeqCst);
+            server.join().unwrap();
+
+            assert_matches!(result, Err(error::Error::HttpRequest { .. }));
+            assert!(
+                request_count.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+                "transport errors should still use the standard retry path"
+            );
         }
     }
 
@@ -599,6 +727,26 @@ mod tests {
             let client = HttpClient::new(&config).unwrap();
             let result = client.head(&server.url("/head-ratelimit"));
             assert_matches!(result, Err(error::Error::HttpStatus { status: 429, .. }));
+            mock.assert_calls(2);
+        }
+
+        #[test]
+        fn test_head_retries_on_5xx() {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(HEAD).path("/head-error");
+                then.status(500);
+            });
+
+            let config = HttpConfig {
+                retries: 1,
+                backoff_base: Duration::from_millis(1),
+                backoff_max: Duration::from_millis(10),
+                ..Default::default()
+            };
+            let client = HttpClient::new(&config).unwrap();
+            let result = client.head(&server.url("/head-error"));
+            assert_matches!(result, Err(error::Error::HttpStatus { status: 500, .. }));
             mock.assert_calls(2);
         }
     }

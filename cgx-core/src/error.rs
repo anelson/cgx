@@ -291,6 +291,9 @@ pub enum Error {
     #[snafu(display("HTTP {status} from {url}"))]
     HttpStatus { url: String, status: u16 },
 
+    #[snafu(display("Provider request to {url} was throttled: HTTP {status}"))]
+    ProviderThrottled { url: String, status: u16 },
+
     #[snafu(display(
         "Failed to prefetch {} configured tool(s): {}",
         failures.len(),
@@ -306,35 +309,10 @@ pub enum Error {
 }
 
 impl Error {
-    /// Check whether an error is transient: a failure whose outcome is inconclusive because a
-    /// later attempt might succeed.
-    ///
-    /// Returns `true` for connection/timeout failures and for the throttling/server HTTP statuses
-    /// that retries already target: 403 (GitHub returns this for rate limiting), 429, and any 5xx.
-    ///
-    /// This transient/not-transient distinction is important in cases where we want to know if
-    /// some operation has failed because the resource we are trying to get simply doesn't exist
-    /// (or is invalid), or if there is some transient issue (most commonly throttling on the part
-    /// of the remote HTTP endpoint, but could also be transient network glitches) that should not
-    /// be stored in the cache as a definitive "this thing doesn't exist; do not look for it again"
-    /// result.
-    pub(crate) fn is_transient_http_error(&self) -> bool {
-        match self {
-            Self::HttpRequest { source, .. } => {
-                source.is_connect() || source.is_timeout() || source.is_request()
-            }
-            Self::HttpStatus { status, .. } => *status == 403 || *status == 429 || *status >= 500,
-            _ => false,
-        }
-    }
-
-    /// Check if a given error is 1) an HTTP error, and 2) one that is retryable (i.e. a 5xx or 429
-    /// status, or a connection/timeout error).
+    /// Check whether an HTTP operation error should be retried by [`crate::http::HttpClient`].
     pub(crate) fn is_retryable_http_error(&self) -> bool {
         match self {
-            Self::HttpStatus { status, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS.as_u16() || *status >= 500
-            }
+            Self::HttpStatus { .. } => true,
             Self::HttpRequest { source, .. } => {
                 source.is_connect() || source.is_timeout() || source.is_request()
             }
@@ -352,49 +330,3 @@ impl From<crate::git::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_transient_http_statuses() {
-        // Throttling / server statuses are transient: a retry might succeed.
-        for status in [403u16, 429, 500, 503] {
-            let err = Error::HttpStatus {
-                url: "http://example.com".to_string(),
-                status,
-            };
-            assert!(err.is_transient_http_error(), "expected {status} to be transient");
-        }
-
-        // A conclusive client error (e.g. 404) is not transient.
-        let not_found = Error::HttpStatus {
-            url: "http://example.com".to_string(),
-            status: 404,
-        };
-        assert!(!not_found.is_transient_http_error());
-
-        // HttpClientBuild is not transient
-        let build_err = Error::HttpClientBuild {
-            message: "test".to_string(),
-        };
-        assert!(!build_err.is_transient_http_error());
-    }
-
-    #[test]
-    fn test_is_transient_non_http_errors_are_not_transient() {
-        let errors: Vec<Error> = vec![
-            Error::HttpClientBuild {
-                message: "bad config".to_string(),
-            },
-            Error::InvalidHttpTimeout {
-                value: "not-a-duration".to_string(),
-                source: humantime::parse_duration("not-a-duration").unwrap_err(),
-            },
-        ];
-        for err in &errors {
-            assert!(!err.is_transient_http_error(), "Expected false for {:?}", err);
-        }
-    }
-}
