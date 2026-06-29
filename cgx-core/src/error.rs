@@ -224,6 +224,16 @@ pub enum Error {
     PrebuiltBinaryRequired { name: String, version: String },
 
     #[snafu(display(
+        "Prebuilt binary required (--prebuilt-binary always) but resolution could not be completed for \
+         crate '{name}' version '{version}'"
+    ))]
+    PrebuiltBinaryResolutionFailed {
+        name: String,
+        version: String,
+        source: Box<Error>,
+    },
+
+    #[snafu(display(
         "Prebuilt binary required (--prebuilt-binary always) but {reason}, which requires building crate \
          '{name}' version '{version}' from source"
     ))]
@@ -281,6 +291,9 @@ pub enum Error {
     #[snafu(display("HTTP {status} from {url}"))]
     HttpStatus { url: String, status: u16 },
 
+    #[snafu(display("Provider request to {url} was throttled: HTTP {status}"))]
+    ProviderThrottled { url: String, status: u16 },
+
     #[snafu(display(
         "Failed to prefetch {} configured tool(s): {}",
         failures.len(),
@@ -293,6 +306,19 @@ pub enum Error {
         value: String,
         source: humantime::DurationError,
     },
+}
+
+impl Error {
+    /// Check whether an HTTP operation error should be retried by [`crate::http::HttpClient`].
+    pub(crate) fn is_retryable_http_error(&self) -> bool {
+        match self {
+            Self::HttpStatus { .. } => true,
+            Self::HttpRequest { source, .. } => {
+                source.is_connect() || source.is_timeout() || source.is_request()
+            }
+            _ => false,
+        }
+    }
 }
 
 impl From<crate::git::Error> for Error {

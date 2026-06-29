@@ -5,6 +5,7 @@ use std::{
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use snafu::OptionExt;
 
 use crate::{
@@ -67,6 +68,7 @@ pub trait CrateResolver: std::fmt::Debug + Send + Sync + 'static {
 /// selectors (like branch names or tags), [`ResolvedSource`] variants contain only concrete,
 /// immutable references (like commit hashes).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResolvedSource {
     /// A crate from Crates.io
     CratesIo,
@@ -100,6 +102,16 @@ pub enum ResolvedSource {
         /// The path to the directory containing the crate
         path: PathBuf,
     },
+}
+
+impl ResolvedSource {
+    /// Compute the stable hash used to distinguish resolved crate sources in cache paths.
+    pub(crate) fn source_hash(&self) -> String {
+        let json = serde_json::to_string(self).expect("BUG: serializing a ResolvedSource cannot fail");
+        let mut hasher = Sha256::new();
+        hasher.update(json.as_bytes());
+        crate::helpers::format_hex_lower(hasher.finalize())
+    }
 }
 
 /// Create the default [`CrateResolver`] implementation, respecting the given config and using the

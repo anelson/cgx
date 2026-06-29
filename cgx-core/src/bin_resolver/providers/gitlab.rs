@@ -2,13 +2,14 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 use snafu::ResultExt;
 
 use super::{ArchiveFormat, CandidateFilename, Provider};
 use crate::{
     Result,
-    bin_resolver::ResolvedBinary,
+    bin_resolver::{ConclusiveResolution, ResolvedBinary},
     config::BinaryProvider,
     crate_resolver::ResolvedSource,
     cratespec::Forge,
@@ -68,11 +69,13 @@ impl GitlabProvider {
     /// for both `v{version}` and `{version}` tags.
     fn generate_urls(
         repo_url: &str,
-        name: &str,
+        crate_name: &str,
+        extra_binary_names: &[&str],
         version: &str,
         platform: &str,
     ) -> Vec<(String, ArchiveFormat)> {
-        let candidates = super::generate_candidate_filenames(name, version, platform);
+        let candidates =
+            super::generate_candidate_filenames(crate_name, extra_binary_names, version, platform);
         let tags = [format!("v{}", version), version.to_string()];
 
         let mut urls = Vec::new();
@@ -87,22 +90,67 @@ impl GitlabProvider {
         urls
     }
 
-    /// Probe a URL with a HEAD request to check if the asset exists.
+    /// Probe a GitLab release download URL with a HEAD request to check if the asset exists.
     ///
-    /// Returns `Ok(true)` for a successful HTTP status, `Ok(false)` for 404 or another
-    /// non-success response, or `Err` if the request could not be completed.
-    /// The error case is used by the caller to bail early when the server is unreachable.
+    /// GitLab release asset URLs return success for existing assets. HTTP 404 and other ordinary
+    /// non-success statuses are treated as "this candidate is not present"; HTTP 429 is GitLab's
+    /// rate-limit signal and is returned as a provider throttle error.
     fn head_probe(&self, url: &str) -> Result<bool> {
-        let response = self.http_client.head(url)?;
+        let response = self
+            .http_client
+            .head_retrying_status(url, Self::should_retry_status)?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(Self::provider_throttled_error(url, response.status()));
+        }
         Ok(response.status().is_success())
     }
 
-    /// Download a file from the given URL.
+    /// Download a GitLab release asset from the given URL.
     ///
     /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource
     /// does not exist), or `Err` for any other failure (network errors, non-404 HTTP errors).
     fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
-        self.http_client.try_download(url)
+        let response = self
+            .http_client
+            .get_retrying_status(url, Self::should_retry_status)?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(Self::provider_throttled_error(url, response.status()));
+        }
+
+        if !response.status().is_success() {
+            return error::HttpStatusSnafu {
+                url: url.to_string(),
+                status: response.status().as_u16(),
+            }
+            .fail();
+        }
+
+        let bytes = response
+            .bytes()
+            .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
+
+        Ok(Some(bytes))
+    }
+
+    fn should_retry_status(status: StatusCode) -> bool {
+        // GitLab rate limiting is reported as HTTP 429, so that should not be retried.
+        // Ordinary server errors still use the standard HTTP retry path.
+        status.is_server_error()
+    }
+
+    fn provider_throttled_error(url: &str, status: StatusCode) -> error::Error {
+        // Build the provider-throttle error after GitLab-specific response classification has already
+        // identified HTTP 429 as rate limiting.
+        error::ProviderThrottledSnafu {
+            url: url.to_string(),
+            status: status.as_u16(),
+        }
+        .build()
     }
 
     fn verify_checksum(&self, data: &[u8], url: &str) -> Result<()> {
@@ -144,7 +192,11 @@ impl GitlabProvider {
 }
 
 impl Provider for GitlabProvider {
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<Option<ResolvedBinary>> {
+    fn kind(&self) -> BinaryProvider {
+        BinaryProvider::GitlabReleases
+    }
+
+    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -154,19 +206,34 @@ impl Provider for GitlabProvider {
                     "no repository URL available",
                 )
             });
-            return Ok(None);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
+        let crate_name = krate.resolved.name.as_str();
+        let binary_names = krate.binary_names()?;
+        let extra_binary_names: Vec<&str> = binary_names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| *n != crate_name)
+            .collect();
         let urls = Self::generate_urls(
             &repo_url,
-            &krate.resolved.name,
+            crate_name,
+            &extra_binary_names,
             &krate.resolved.version.to_string(),
             platform,
         );
 
-        // Probe sequentially with HEAD requests; stop at the first 200.
-        // If we hit a connection/timeout error, bail immediately rather than continuing
-        // to probe all ~160 candidate URLs against a dead server.
+        // Probe sequentially with HEAD requests
+        //
+        // If we hit a connection/timeout error, bail immediately rather than continuing to probe
+        // every candidate URL against a broken/unresponsive server. The candidate set is the full
+        // cross-product of names (crate + binary), platform aliases, archive formats, and tag
+        // variants, so the worst-case (no asset exists) is on the order of ~1,400 sequential
+        // HEADs. That only happens for a crate actually hosted on gitlab.com whose release lacks
+        // any matching asset (a slow fallback to a source build); `get_repo_url` short-circuits to
+        // `None` for every non-GitLab crate, which is the overwhelming majority and does zero
+        // probes.
         let mut found = None;
         for (url, format) in &urls {
             match self.head_probe(url) {
@@ -174,17 +241,9 @@ impl Provider for GitlabProvider {
                     found = Some((url.clone(), *format));
                     break;
                 }
-                Err(e) if HttpClient::is_connection_error(&e) => {
-                    tracing::debug!("GitLab HEAD probe failed with connection error, bailing: {:?}", e);
-                    self.reporter.report(|| {
-                        PrebuiltBinaryMessage::provider_has_no_binary(
-                            BinaryProvider::GitlabReleases,
-                            "server unreachable",
-                        )
-                    });
-                    return Ok(None);
-                }
-                Ok(false) | Err(_) => continue,
+
+                Err(e) => return Err(e),
+                Ok(false) => continue,
             }
         }
         let Some((url, format)) = found else {
@@ -194,22 +253,24 @@ impl Provider for GitlabProvider {
                     "no matching release found",
                 )
             });
-            return Ok(None);
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         self.reporter
             .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::GitlabReleases));
 
-        let data = if let Some(data) = self.try_download(&url)? {
-            data
-        } else {
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::GitlabReleases,
-                    format!("failed to download asset: {}", url),
-                )
-            });
-            return Ok(None);
+        let data = match self.try_download(&url) {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::provider_has_no_binary(
+                        BinaryProvider::GitlabReleases,
+                        format!("Release asset not found: {}", url),
+                    )
+                });
+                return Ok(ConclusiveResolution::Nonexistent);
+            }
+            Err(e) => return Err(e),
         };
 
         if self.verify_checksums {
@@ -259,7 +320,7 @@ impl Provider for GitlabProvider {
             })?;
         }
 
-        Ok(Some(ResolvedBinary {
+        Ok(ConclusiveResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::GitlabReleases,
             path: final_path,
@@ -269,19 +330,48 @@ impl Provider for GitlabProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, time::Duration};
 
+    use assert_matches::assert_matches;
+    use httpmock::{Method::HEAD, prelude::*};
     use semver::Version;
     use url::Url;
 
     use super::*;
-    use crate::{crate_resolver::ResolvedSource, cratespec::Forge};
+    use crate::{
+        config::HttpConfig, crate_resolver::ResolvedSource, cratespec::Forge, error::Error,
+        messages::MessageReporter,
+    };
+
+    fn fast_retry_config() -> HttpConfig {
+        HttpConfig {
+            retries: 2,
+            backoff_base: Duration::from_millis(1),
+            backoff_max: Duration::from_millis(10),
+            ..Default::default()
+        }
+    }
+
+    fn test_provider() -> (GitlabProvider, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let http_client = HttpClient::new(&fast_retry_config()).unwrap();
+        (
+            GitlabProvider::new(
+                MessageReporter::null(),
+                temp_dir.path().to_path_buf(),
+                false,
+                http_client,
+            ),
+            temp_dir,
+        )
+    }
 
     #[test]
     fn test_url_generation_includes_version_patterns() {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -295,6 +385,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -308,6 +399,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -323,6 +415,7 @@ mod tests {
         let urls = GitlabProvider::generate_urls(
             "https://gitlab.com/owner/repo",
             "mytool",
+            &[],
             "1.2.3",
             "x86_64-unknown-linux-gnu",
         );
@@ -340,6 +433,14 @@ mod tests {
                 assert_eq!(*format, ArchiveFormat::Tar);
             } else if url.ends_with(".zip") {
                 assert_eq!(*format, ArchiveFormat::Zip);
+            } else if url.ends_with(".gz") {
+                assert_eq!(*format, ArchiveFormat::Gz);
+            } else if url.ends_with(".xz") {
+                assert_eq!(*format, ArchiveFormat::Xz);
+            } else if url.ends_with(".zst") {
+                assert_eq!(*format, ArchiveFormat::Zst);
+            } else if url.ends_with(".bz2") {
+                assert_eq!(*format, ArchiveFormat::Bz2);
             } else {
                 assert_eq!(*format, ArchiveFormat::NakedBinary);
             }
@@ -514,5 +615,35 @@ repository = "https://gitlab.com/upstream/mytool"
 
         let url = GitlabProvider::get_repo_url(&krate).unwrap();
         assert_eq!(url, Some("https://gitlab.com/upstream/mytool".to_string()));
+    }
+
+    #[test]
+    fn head_probe_429_is_not_retried_and_becomes_provider_throttled() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/asset");
+            then.status(429).header("retry-after", "30");
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let result = provider.head_probe(&server.url("/asset"));
+
+        assert_matches!(result, Err(Error::ProviderThrottled { status: 429, .. }));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn head_probe_5xx_still_retries() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/asset");
+            then.status(500);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let result = provider.head_probe(&server.url("/asset"));
+
+        assert_matches!(result, Err(Error::HttpStatus { status: 500, .. }));
+        mock.assert_calls(3);
     }
 }

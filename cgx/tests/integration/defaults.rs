@@ -128,10 +128,11 @@ fn messages_with_prebuilt_binary() {
         "Expected CrateResolution::CacheHit on second run"
     );
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheHit { .. }))),
-        "Expected PrebuiltBinary::CacheHit on second run (pre-built binary cached)"
+        messages.iter().any(|m| matches!(
+            m,
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::PositiveCacheHit { .. })
+        )),
+        "Expected PrebuiltBinary::PositiveCacheHit on second run (pre-built binary cached)"
     );
     assert!(
         messages.iter().any(|m| matches!(

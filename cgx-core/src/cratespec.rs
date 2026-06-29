@@ -432,6 +432,7 @@ impl CrateSpec {
 /// Registries can be specified either by a named configuration in `.cargo/config.toml` or by
 /// directly providing the index URL.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RegistrySource {
     /// A named registry configured in `.cargo/config.toml` (corresponds to `--registry`).
     Named(String),
@@ -442,6 +443,7 @@ pub enum RegistrySource {
 
 /// Supported software forges where crates can be hosted
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Forge {
     GitHub {
         /// Custom URL for Github Enterprise instances; None for github.com
