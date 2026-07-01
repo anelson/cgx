@@ -1,12 +1,16 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
+use leon::{Template, Values};
 use serde::Deserialize;
 use snafu::ResultExt;
+use target_lexicon::{OperatingSystem, Triple};
 
 use super::{ArchiveFormat, Provider};
 use crate::{
@@ -20,118 +24,12 @@ use crate::{
     messages::PrebuiltBinaryMessage,
 };
 
+/// Provider for binaries described by `[package.metadata.binstall]` in a crate manifest.
 pub(in crate::bin_resolver) struct BinstallProvider {
     reporter: crate::messages::MessageReporter,
     cache_dir: PathBuf,
     verify_checksums: bool,
     http_client: HttpClient,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct BinstallMeta {
-    pkg_url: Option<String>,
-    pkg_fmt: Option<String>,
-    bin_dir: Option<String>,
-    #[serde(default)]
-    overrides: HashMap<String, BinstallOverride>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct BinstallOverride {
-    pkg_url: Option<String>,
-    pkg_fmt: Option<String>,
-    bin_dir: Option<String>,
-}
-
-impl BinstallMeta {
-    /// Merge target-specific overrides into the base metadata for the given platform.
-    fn merge_overrides(&mut self, target: &str) {
-        if let Some(overrides) = self.overrides.remove(target) {
-            if overrides.pkg_url.is_some() {
-                self.pkg_url = overrides.pkg_url;
-            }
-            if overrides.pkg_fmt.is_some() {
-                self.pkg_fmt = overrides.pkg_fmt;
-            }
-            if overrides.bin_dir.is_some() {
-                self.bin_dir = overrides.bin_dir;
-            }
-        }
-    }
-}
-
-/// Map a binstall `pkg-fmt` value to an [`ArchiveFormat`].
-///
-/// Returns [`ArchiveFormat::TarGz`] when no format is specified (the binstall spec default).
-fn archive_format_from_pkg_fmt(pkg_fmt: Option<&str>) -> Result<ArchiveFormat> {
-    match pkg_fmt {
-        Some("tar") => Ok(ArchiveFormat::Tar),
-        Some("tgz") | None => Ok(ArchiveFormat::TarGz),
-        Some("txz") => Ok(ArchiveFormat::TarXz),
-        Some("tzstd") => Ok(ArchiveFormat::TarZst),
-        Some("tbz2") => Ok(ArchiveFormat::TarBz2),
-        Some("zip") => Ok(ArchiveFormat::Zip),
-        Some("bin") => Ok(ArchiveFormat::NakedBinary),
-        Some(other) => error::UnsupportedArchiveFormatSnafu {
-            format: other.to_string(),
-        }
-        .fail(),
-    }
-}
-
-/// Return the list of `{ archive-suffix }` values to try for a given `pkg-fmt`.
-///
-/// Matches the behavior of cargo-binstall's `PkgFmt::extensions()`: each pkg-fmt has a
-/// primary (short) suffix and may have an expanded alias. The caller should try each suffix
-/// in order until a download succeeds.
-fn binstall_archive_suffixes(pkg_fmt: Option<&str>) -> &'static [&'static str] {
-    match pkg_fmt {
-        Some("tar") => &[".tar"],
-        Some("tgz") | None => &[".tgz", ".tar.gz"],
-        Some("txz") => &[".txz", ".tar.xz"],
-        Some("tzstd") => &[".tzstd", ".tzst", ".tar.zst"],
-        Some("tbz2") => &[".tbz2", ".tar.bz2"],
-        Some("zip") => &[".zip"],
-        Some("bin") => {
-            if cfg!(windows) {
-                &[".bin", "", ".exe"]
-            } else {
-                &[".bin", ""]
-            }
-        }
-        Some(_) => &[""],
-    }
-}
-
-fn binary_ext_for_target(target: &str) -> &'static str {
-    if target.contains("windows") { ".exe" } else { "" }
-}
-
-/// Render a binstall template string by replacing `{ variable }` placeholders.
-fn render_template(template: &str, ctx: &TemplateContext<'_>) -> String {
-    let mut result = template.to_string();
-    result = result.replace("{ name }", ctx.name);
-    result = result.replace("{ version }", ctx.version);
-    result = result.replace("{ target }", ctx.target);
-    result = result.replace("{ archive-suffix }", ctx.archive_suffix);
-    result = result.replace("{ binary-ext }", ctx.binary_ext);
-    result = result.replace("{ bin }", ctx.bin);
-    if let Some(repo) = ctx.repo {
-        result = result.replace("{ repo }", repo);
-    }
-    result
-}
-
-struct TemplateContext<'a> {
-    name: &'a str,
-    version: &'a str,
-    target: &'a str,
-    archive_suffix: &'a str,
-    binary_ext: &'a str,
-    bin: &'a str,
-    repo: Option<&'a str>,
 }
 
 impl BinstallProvider {
@@ -152,22 +50,7 @@ impl BinstallProvider {
     /// Read and parse `[package.metadata.binstall]` from the crate's Cargo.toml.
     fn read_binstall_metadata(krate: &DownloadedCrate, target: &str) -> Result<Option<BinstallMeta>> {
         let doc = krate.parsed_cargo_toml()?;
-        let binstall_value = doc
-            .get("package")
-            .and_then(|p| p.get("metadata"))
-            .and_then(|m| m.get("binstall"));
-        let Some(binstall_value) = binstall_value else {
-            return Ok(None);
-        };
-        let mut meta: BinstallMeta =
-            binstall_value
-                .clone()
-                .try_into()
-                .with_context(|_| error::BinstallMetadataInvalidSnafu {
-                    path: krate.cargo_toml_path(),
-                })?;
-        meta.merge_overrides(target);
-        Ok(Some(meta))
+        BinstallMetaRaw::try_from_cargo_toml(&doc).map(|raw| raw.map(|meta| meta.render_for_target(target)))
     }
 
     /// Get the repository URL for a crate, for use in `{ repo }` template variable.
@@ -198,6 +81,7 @@ impl Provider for BinstallProvider {
 
     fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
         let resolved = &krate.resolved;
+        let target_info = BinstallTargetInfo::from_str(platform)?;
 
         let Some(meta) = Self::read_binstall_metadata(krate, platform)? else {
             self.reporter.report(|| {
@@ -221,7 +105,7 @@ impl Provider for BinstallProvider {
 
         let pkg_fmt = meta.pkg_fmt.as_deref();
         let format = archive_format_from_pkg_fmt(pkg_fmt)?;
-        let binary_ext = binary_ext_for_target(platform);
+        let binary_ext = target_info.binary_ext();
         let repo_url = Self::get_repo_url(krate)?;
         let version_string = resolved.version.to_string();
         let suffixes = binstall_archive_suffixes(pkg_fmt);
@@ -237,18 +121,20 @@ impl Provider for BinstallProvider {
         let archive_path = temp_dir.path().join(format.canonical_filename());
         let mut downloaded = false;
 
-        for suffix in suffixes {
-            let ctx = TemplateContext {
+        for &suffix in suffixes {
+            let ctx = BinstallTemplateContext {
                 name: &resolved.name,
                 version: &version_string,
                 target: platform,
-                archive_suffix: suffix,
+                archive_suffix: Some(suffix),
                 binary_ext,
                 bin: &binary_name,
                 repo: repo_url.as_deref(),
+                target_info: &target_info,
+                kind: BinstallTemplateKind::PackageUrl,
             };
 
-            let url = render_template(pkg_url_template, &ctx);
+            let url = ctx.render_template(pkg_url_template)?;
 
             self.reporter
                 .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Binstall));
@@ -305,16 +191,18 @@ impl Provider for BinstallProvider {
 
         let extract_dir = temp_dir.path().join("extracted");
         let binary_path = if let Some(bin_dir_template) = meta.bin_dir.as_deref() {
-            let ctx = TemplateContext {
+            let ctx = BinstallTemplateContext {
                 name: &resolved.name,
                 version: &version_string,
                 target: platform,
-                archive_suffix: selected_suffix,
+                archive_suffix: Some(selected_suffix),
                 binary_ext,
                 bin: &binary_name,
                 repo: repo_url.as_deref(),
+                target_info: &target_info,
+                kind: BinstallTemplateKind::BinDir,
             };
-            let rendered_path = render_template(bin_dir_template, &ctx);
+            let rendered_path = ctx.render_template(bin_dir_template)?;
             super::extract_binary_at_archive_relative_path(
                 &archive_path,
                 format,
@@ -368,6 +256,265 @@ impl Provider for BinstallProvider {
             provider: BinaryProvider::Binstall,
             path: final_path,
         }))
+    }
+}
+
+/// The resolved binstall metadata for a specific target, after applying any overrides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinstallMeta {
+    pkg_url: Option<String>,
+    pkg_fmt: Option<String>,
+    bin_dir: Option<String>,
+}
+
+/// The raw binstall package metadata as read from a crate's Cargo.toml file.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+struct BinstallMetaRaw {
+    pkg_url: Option<String>,
+    pkg_fmt: Option<String>,
+    bin_dir: Option<String>,
+    #[serde(default)]
+    overrides: HashMap<String, BinstallMetaOverride>,
+}
+
+/// The raw binstall package metadata override for a specific target, as read from a crate's
+/// Cargo.toml file.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+struct BinstallMetaOverride {
+    pkg_url: Option<String>,
+    pkg_fmt: Option<String>,
+    bin_dir: Option<String>,
+}
+
+impl BinstallMetaRaw {
+    /// Check the parsed Cargo.toml for `[package.metadata.binstall]` and return the parsed metadata
+    /// if present.
+    fn try_from_cargo_toml(cargo_toml: &toml::Value) -> Result<Option<Self>> {
+        let binstall_value = cargo_toml
+            .get("package")
+            .and_then(|p| p.get("metadata"))
+            .and_then(|m| m.get("binstall"));
+        let Some(binstall_value) = binstall_value else {
+            return Ok(None);
+        };
+
+        let meta = binstall_value
+            .clone()
+            .try_into()
+            .context(error::BinstallMetadataInvalidInCargoTomlSnafu)?;
+        Ok(Some(meta))
+    }
+
+    /// Render the binstall metadata for a specific target, applying any overrides for that target.
+    fn render_for_target(&self, target: &str) -> BinstallMeta {
+        let mut meta = BinstallMeta {
+            pkg_url: self.pkg_url.clone(),
+            pkg_fmt: self.pkg_fmt.clone(),
+            bin_dir: self.bin_dir.clone(),
+        };
+
+        if let Some(overrides) = self.overrides.get(target) {
+            if let Some(pkg_url) = &overrides.pkg_url {
+                meta.pkg_url = Some(pkg_url.clone());
+            }
+            if let Some(pkg_fmt) = &overrides.pkg_fmt {
+                meta.pkg_fmt = Some(pkg_fmt.clone());
+            }
+            if let Some(bin_dir) = &overrides.bin_dir {
+                meta.bin_dir = Some(bin_dir.clone());
+            }
+        }
+
+        meta
+    }
+}
+
+/// Target-derived values exposed to binstall templates.
+///
+/// This keeps the provider-facing API as a plain target triple string while using
+/// [`target_lexicon::Triple`] internally to render cargo-binstall-compatible target placeholders.
+struct BinstallTargetInfo {
+    triple: Triple,
+}
+
+impl BinstallTargetInfo {
+    /// The OS name in this target triple, normalized to the value cargo-binstall uses for
+    /// `{ os-name }` in templates.
+    fn normalized_os_name(&self) -> Cow<'static, str> {
+        match self.triple.operating_system {
+            OperatingSystem::Darwin(_) | OperatingSystem::MacOSX(_) => Cow::Borrowed("macos"),
+            os => os.into_str(),
+        }
+    }
+
+    /// The executable filename extension implied by this target.
+    fn binary_ext(&self) -> &'static str {
+        match self.triple.operating_system {
+            OperatingSystem::Windows => ".exe",
+            _ => "",
+        }
+    }
+}
+
+impl FromStr for BinstallTargetInfo {
+    type Err = error::Error;
+
+    fn from_str(target: &str) -> Result<Self> {
+        let triple = Triple::from_str(target).map_err(|source| {
+            error::InvalidTargetTripleSnafu {
+                target: target.to_string(),
+                message: source.to_string(),
+            }
+            .build()
+        })?;
+        Ok(Self { triple })
+    }
+}
+
+/// Supplies target-derived placeholder values requested by [`leon`] while rendering templates.
+///
+/// Cargo-binstall exposes these keys independently of the full `{ target }` triple so package
+/// authors can construct asset names like `wasmtime-{ target-arch }-{ target-family }`.
+impl Values for BinstallTargetInfo {
+    /// Return the value for one target placeholder key, or `None` when this context does not own
+    /// it.
+    fn get_value(&self, key: &str) -> Option<Cow<'_, str>> {
+        match key {
+            "target-family" => Some(self.triple.operating_system.into_str()),
+            "os-name" => Some(self.normalized_os_name()),
+            "target-arch" => Some(self.triple.architecture.into_str()),
+            "target-libc" => Some(self.triple.environment.into_str()),
+            "target-vendor" => Some(Cow::Borrowed(self.triple.vendor.as_str())),
+            _ => None,
+        }
+    }
+}
+
+/// The binstall template currently being rendered.
+///
+/// Some placeholder names are intentionally context-sensitive. In particular, `{ format }` means
+/// archive format in `pkg-url` templates and binary extension in `bin-dir` templates.
+#[derive(Clone, Copy)]
+enum BinstallTemplateKind {
+    /// Rendering `pkg-url`, where archive placeholders such as `{ archive-format }` are available.
+    PackageUrl,
+    /// Rendering `bin-dir`, where `{ format }` is a compatibility alias for `{ binary-ext }`.
+    BinDir,
+}
+
+/// Values used to render a binstall template with [`leon`].
+///
+/// The context combines package metadata, the selected archive suffix, repository information, and
+/// target-derived placeholders. [`BinstallTemplateKind`] selects the small set of placeholders
+/// whose meaning differs between `pkg-url` and `bin-dir`.
+struct BinstallTemplateContext<'a> {
+    name: &'a str,
+    version: &'a str,
+    target: &'a str,
+    archive_suffix: Option<&'a str>,
+    binary_ext: &'a str,
+    bin: &'a str,
+    repo: Option<&'a str>,
+    target_info: &'a BinstallTargetInfo,
+    kind: BinstallTemplateKind,
+}
+
+impl BinstallTemplateContext<'_> {
+    fn render_template(&self, template: &str) -> Result<String> {
+        let template_src = template;
+        let template = Template::parse(template_src).with_context(|_| error::BinstallTemplateParseSnafu {
+            template: template_src.to_string(),
+        })?;
+        template
+            .render(self)
+            .with_context(|_| error::BinstallTemplateRenderSnafu {
+                template: template_src.to_string(),
+            })
+    }
+
+    fn archive_format_from_suffix(&self) -> Option<Cow<'_, str>> {
+        self.archive_suffix.map(|archive_suffix| {
+            if archive_suffix.is_empty() {
+                Cow::Borrowed("bin")
+            } else {
+                Cow::Borrowed(archive_suffix.trim_start_matches('.'))
+            }
+        })
+    }
+}
+
+/// Supplies package, archive, binary, and delegated target values to [`leon`] during rendering.
+///
+/// This is the main template namespace for Binstall metadata. Unknown keys are delegated to
+/// [`BinstallTargetInfo`] so target placeholders share the same rendering path as ordinary package
+/// placeholders.
+impl Values for BinstallTemplateContext<'_> {
+    /// Return the value for one Binstall template key in the namespace selected by `kind`.
+    fn get_value(&self, key: &str) -> Option<Cow<'_, str>> {
+        match key {
+            "name" => Some(Cow::Borrowed(self.name)),
+            "version" => Some(Cow::Borrowed(self.version)),
+            "repo" => self.repo.map(Cow::Borrowed),
+            "target" => Some(Cow::Borrowed(self.target)),
+            "bin" => Some(Cow::Borrowed(self.bin)),
+            "binary-ext" => Some(Cow::Borrowed(self.binary_ext)),
+            "archive-suffix" if matches!(self.kind, BinstallTemplateKind::PackageUrl) => {
+                self.archive_suffix.map(Cow::Borrowed)
+            }
+            "archive-format" if matches!(self.kind, BinstallTemplateKind::PackageUrl) => {
+                self.archive_format_from_suffix()
+            }
+            "format" => match self.kind {
+                BinstallTemplateKind::PackageUrl => self.archive_format_from_suffix(),
+                BinstallTemplateKind::BinDir => Some(Cow::Borrowed(self.binary_ext)),
+            },
+            key => self.target_info.get_value(key),
+        }
+    }
+}
+
+/// Map a binstall `pkg-fmt` value to an [`ArchiveFormat`].
+///
+/// Returns [`ArchiveFormat::TarGz`] when no format is specified (the binstall spec default).
+fn archive_format_from_pkg_fmt(pkg_fmt: Option<&str>) -> Result<ArchiveFormat> {
+    match pkg_fmt {
+        Some("tar") => Ok(ArchiveFormat::Tar),
+        Some("tgz") | None => Ok(ArchiveFormat::TarGz),
+        Some("txz") => Ok(ArchiveFormat::TarXz),
+        Some("tzstd") => Ok(ArchiveFormat::TarZst),
+        Some("tbz2") => Ok(ArchiveFormat::TarBz2),
+        Some("zip") => Ok(ArchiveFormat::Zip),
+        Some("bin") => Ok(ArchiveFormat::NakedBinary),
+        Some(other) => error::UnsupportedArchiveFormatSnafu {
+            format: other.to_string(),
+        }
+        .fail(),
+    }
+}
+
+/// Return the list of `{ archive-suffix }` values to try for a given `pkg-fmt`.
+///
+/// Matches the behavior of cargo-binstall's `PkgFmt::extensions()`: each pkg-fmt has a
+/// primary (short) suffix and may have an expanded alias. The caller should try each suffix
+/// in order until a download succeeds.
+fn binstall_archive_suffixes(pkg_fmt: Option<&str>) -> &'static [&'static str] {
+    match pkg_fmt {
+        Some("tar") => &[".tar"],
+        Some("tgz") | None => &[".tgz", ".tar.gz"],
+        Some("txz") => &[".txz", ".tar.xz"],
+        Some("tzstd") => &[".tzstd", ".tzst", ".tar.zst"],
+        Some("tbz2") => &[".tbz2", ".tar.bz2"],
+        Some("zip") => &[".zip"],
+        Some("bin") => {
+            if cfg!(windows) {
+                &[".bin", "", ".exe"]
+            } else {
+                &[".bin", ""]
+            }
+        }
+        Some(_) => &[""],
     }
 }
 
@@ -456,91 +603,163 @@ mod tests {
         archive_data
     }
 
-    #[test]
-    fn render_template_basic() {
-        let ctx = TemplateContext {
-            name: "eza",
-            version: "0.23.1",
-            target: "x86_64-unknown-linux-gnu",
-            archive_suffix: ".tar.gz",
-            binary_ext: "",
-            bin: "eza",
-            repo: Some("https://github.com/eza-community/eza"),
+    fn render_pkg_template(template: &str, target: &str, archive_suffix: &str) -> String {
+        let target_info = BinstallTargetInfo::from_str(target).unwrap();
+        let binary_ext = target_info.binary_ext();
+        let ctx = BinstallTemplateContext {
+            name: "package-name",
+            version: "1.0.0",
+            target,
+            archive_suffix: Some(archive_suffix),
+            binary_ext,
+            bin: "tool",
+            repo: Some("https://github.com/example/package-name"),
+            target_info: &target_info,
+            kind: BinstallTemplateKind::PackageUrl,
         };
 
-        let template = "{ repo }/releases/download/v{ version }/{ name }_{ target }{ archive-suffix }";
-        let rendered = render_template(template, &ctx);
+        ctx.render_template(template).unwrap()
+    }
+
+    fn render_bin_dir_template(template: &str, target: &str, archive_suffix: &str) -> String {
+        let target_info = BinstallTargetInfo::from_str(target).unwrap();
+        let binary_ext = target_info.binary_ext();
+        let ctx = BinstallTemplateContext {
+            name: "package-name",
+            version: "1.0.0",
+            target,
+            archive_suffix: Some(archive_suffix),
+            binary_ext,
+            bin: "tool",
+            repo: Some("https://github.com/example/package-name"),
+            target_info: &target_info,
+            kind: BinstallTemplateKind::BinDir,
+        };
+
+        ctx.render_template(template).unwrap()
+    }
+
+    #[test]
+    fn render_template_compact_and_spaced_placeholders() {
+        let template = "{repo}/{ repo }/{name}/{ name }/{version}/{ version }/{target}/{ target }";
+        let rendered = render_pkg_template(template, "x86_64-unknown-linux-gnu", ".tgz");
         let expected = concat!(
-            "https://github.com/eza-community/eza/releases/download/",
-            "v0.23.1/eza_x86_64-unknown-linux-gnu.tar.gz",
+            "https://github.com/example/package-name/",
+            "https://github.com/example/package-name/",
+            "package-name/package-name/",
+            "1.0.0/1.0.0/",
+            "x86_64-unknown-linux-gnu/x86_64-unknown-linux-gnu",
         );
         assert_eq!(rendered, expected);
     }
 
     #[test]
-    fn render_template_binary_ext() {
-        let ctx = TemplateContext {
-            name: "mytool",
-            version: "1.0.0",
-            target: "x86_64-pc-windows-msvc",
-            archive_suffix: ".zip",
-            binary_ext: ".exe",
-            bin: "mytool",
-            repo: None,
-        };
+    fn pkg_url_template_supports_archive_format_aliases() {
+        let template = "{archive-format}/{ format }/{ archive-suffix }/{archive-suffix}";
+        let rendered = render_pkg_template(template, "x86_64-unknown-linux-gnu", ".tar.gz");
+        assert_eq!(rendered, "tar.gz/tar.gz/.tar.gz/.tar.gz");
+    }
 
+    #[test]
+    fn pkg_url_template_derives_tgz_archive_format() {
+        let rendered = render_pkg_template("{ archive-format }", "x86_64-unknown-linux-gnu", ".tgz");
+        assert_eq!(rendered, "tgz");
+    }
+
+    #[test]
+    fn pkg_url_template_derives_bin_archive_format_from_empty_suffix() {
+        let rendered = render_pkg_template("{ archive-format }", "x86_64-unknown-linux-gnu", "");
+        assert_eq!(rendered, "bin");
+    }
+
+    #[test]
+    fn bin_dir_template_uses_format_as_binary_ext_alias() {
+        let rendered = render_bin_dir_template(
+            "{ bin }{ format }/{ bin }{ binary-ext }",
+            "x86_64-pc-windows-msvc",
+            ".zip",
+        );
+        assert_eq!(rendered, "tool.exe/tool.exe");
+    }
+
+    #[test]
+    fn render_template_target_placeholders_for_linux() {
+        let template = "{ target-arch }/{ target-family }/{ os-name }/{ target-libc }/{ target-vendor }";
+        let rendered = render_pkg_template(template, "x86_64-unknown-linux-gnu", ".tgz");
+        assert_eq!(rendered, "x86_64/linux/linux/gnu/unknown");
+    }
+
+    #[test]
+    fn render_template_target_placeholders_for_windows() {
+        let template = "{ target-arch }/{ target-family }/{ os-name }/{ target-libc }/{ target-vendor }";
+        let rendered = render_pkg_template(template, "x86_64-pc-windows-msvc", ".zip");
+        assert_eq!(rendered, "x86_64/windows/windows/msvc/pc");
+    }
+
+    #[test]
+    fn render_template_target_placeholders_for_macos() {
+        let template = "{ target-arch }/{ target-family }/{ os-name }/{ target-libc }/{ target-vendor }";
+        let rendered = render_pkg_template(template, "aarch64-apple-darwin", ".zip");
+        assert_eq!(rendered, "aarch64/darwin/macos/unknown/apple");
+    }
+
+    #[test]
+    fn render_template_escapes_braces_and_backslash() {
+        let rendered = render_pkg_template(r"\{ {name} \} \\ {name}", "x86_64-unknown-linux-gnu", ".tgz");
+        assert_eq!(rendered, r"{ package-name } \ package-name");
+    }
+
+    #[test]
+    fn render_template_binary_ext() {
         let template = "https://example.com/{ name }-v{ version }-{ target }{ archive-suffix }";
-        let rendered = render_template(template, &ctx);
+        let rendered = render_pkg_template(template, "x86_64-pc-windows-msvc", ".zip");
         assert_eq!(
             rendered,
-            "https://example.com/mytool-v1.0.0-x86_64-pc-windows-msvc.zip"
+            "https://example.com/package-name-v1.0.0-x86_64-pc-windows-msvc.zip"
         );
     }
 
     #[test]
     fn binary_ext_is_derived_from_target() {
-        assert_eq!(binary_ext_for_target("x86_64-pc-windows-msvc"), ".exe");
-        assert_eq!(binary_ext_for_target("aarch64-apple-darwin"), "");
+        let windows = BinstallTargetInfo::from_str("x86_64-pc-windows-msvc").unwrap();
+        let macos = BinstallTargetInfo::from_str("aarch64-apple-darwin").unwrap();
+
+        assert_eq!(windows.binary_ext(), ".exe");
+        assert_eq!(macos.binary_ext(), "");
     }
 
     #[test]
     fn render_template_bin_variable() {
-        let ctx = TemplateContext {
-            name: "cargo-watch",
-            version: "8.0.0",
-            target: "aarch64-apple-darwin",
-            archive_suffix: ".tar.xz",
-            binary_ext: "",
-            bin: "cargo-watch",
-            repo: Some("https://github.com/watchexec/cargo-watch"),
-        };
-
         let template =
             "{ repo }/releases/download/v{ version }/{ bin }-v{ version }-{ target }{ archive-suffix }";
-        let rendered = render_template(template, &ctx);
+        let rendered = render_pkg_template(template, "aarch64-apple-darwin", ".tar.xz");
         let expected = concat!(
-            "https://github.com/watchexec/cargo-watch/releases/download/",
-            "v8.0.0/cargo-watch-v8.0.0-aarch64-apple-darwin.tar.xz",
+            "https://github.com/example/package-name/releases/download/",
+            "v1.0.0/tool-v1.0.0-aarch64-apple-darwin.tar.xz",
         );
         assert_eq!(rendered, expected);
     }
 
     #[test]
-    fn render_template_missing_repo() {
-        let ctx = TemplateContext {
+    fn render_template_missing_repo_returns_error() {
+        let target_info = BinstallTargetInfo::from_str("x86_64-unknown-linux-gnu").unwrap();
+        let binary_ext = target_info.binary_ext();
+        let ctx = BinstallTemplateContext {
             name: "tool",
             version: "1.0.0",
             target: "x86_64-unknown-linux-gnu",
-            archive_suffix: ".tar.gz",
-            binary_ext: "",
+            archive_suffix: Some(".tar.gz"),
+            binary_ext,
             bin: "tool",
             repo: None,
+            target_info: &target_info,
+            kind: BinstallTemplateKind::PackageUrl,
         };
-
         let template = "{ repo }/download/{ name }";
-        let rendered = render_template(template, &ctx);
-        // { repo } is not replaced when repo is None
-        assert_eq!(rendered, "{ repo }/download/tool");
+        assert_matches::assert_matches!(
+            ctx.render_template(template),
+            Err(Error::BinstallTemplateRender { .. })
+        );
     }
 
     #[test]
@@ -633,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_binstall_metadata_from_toml() {
+    fn parse_binstall_metadata_raw_from_cargo_toml() {
         let toml_content = r#"
             [package]
             name = "eza"
@@ -649,15 +868,8 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let binstall_value = doc
-            .get("package")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
-            .get("binstall")
-            .unwrap();
+        let meta = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap().unwrap();
 
-        let meta: BinstallMeta = binstall_value.clone().try_into().unwrap();
         assert_eq!(
             meta.pkg_url.as_deref(),
             Some("{ repo }/releases/download/v{ version }/{ name }_{ target }{ archive-suffix }")
@@ -668,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_overrides_applies_target() {
+    fn render_for_target_applies_exact_target_overrides() {
         let toml_content = r#"
             [package.metadata.binstall]
             pkg-url = "https://example.com/{ name }-{ target }.tar.gz"
@@ -680,16 +892,8 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let binstall_value = doc
-            .get("package")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
-            .get("binstall")
-            .unwrap();
-
-        let mut meta: BinstallMeta = binstall_value.clone().try_into().unwrap();
-        meta.merge_overrides("x86_64-pc-windows-msvc");
+        let raw = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap().unwrap();
+        let meta = raw.render_for_target("x86_64-pc-windows-msvc");
 
         assert_eq!(meta.pkg_fmt.as_deref(), Some("zip"));
         assert_eq!(
@@ -699,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_overrides_no_match_leaves_base() {
+    fn render_for_target_no_match_leaves_base_metadata() {
         let toml_content = r#"
             [package.metadata.binstall]
             pkg-url = "https://example.com/{ name }-{ target }.tar.gz"
@@ -710,16 +914,8 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let binstall_value = doc
-            .get("package")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
-            .get("binstall")
-            .unwrap();
-
-        let mut meta: BinstallMeta = binstall_value.clone().try_into().unwrap();
-        meta.merge_overrides("aarch64-apple-darwin");
+        let raw = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap().unwrap();
+        let meta = raw.render_for_target("aarch64-apple-darwin");
 
         assert_eq!(meta.pkg_fmt.as_deref(), Some("tgz"));
         assert_eq!(
@@ -729,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_overrides_partial_override() {
+    fn render_for_target_partial_override_inherits_base_values() {
         let toml_content = r#"
             [package.metadata.binstall]
             pkg-url = "https://example.com/default"
@@ -741,20 +937,10 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let binstall_value = doc
-            .get("package")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
-            .get("binstall")
-            .unwrap();
+        let raw = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap().unwrap();
+        let meta = raw.render_for_target("aarch64-apple-darwin");
 
-        let mut meta: BinstallMeta = binstall_value.clone().try_into().unwrap();
-        meta.merge_overrides("aarch64-apple-darwin");
-
-        // pkg-fmt overridden
         assert_eq!(meta.pkg_fmt.as_deref(), Some("txz"));
-        // pkg-url and bin-dir unchanged
         assert_eq!(meta.pkg_url.as_deref(), Some("https://example.com/default"));
         assert_eq!(meta.bin_dir.as_deref(), Some("{ bin }"));
     }
@@ -768,10 +954,7 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let result = doc
-            .get("package")
-            .and_then(|p| p.get("metadata"))
-            .and_then(|m| m.get("binstall"));
+        let result = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap();
         assert!(result.is_none());
     }
 
@@ -783,16 +966,25 @@ mod tests {
         "#;
 
         let doc: toml::Value = toml::from_str(toml_content).unwrap();
-        let binstall_value = doc
-            .get("package")
-            .unwrap()
-            .get("metadata")
-            .unwrap()
-            .get("binstall")
-            .unwrap();
+        let raw = BinstallMetaRaw::try_from_cargo_toml(&doc).unwrap().unwrap();
+        let meta = raw.render_for_target("x86_64-unknown-linux-gnu");
 
-        let meta: BinstallMeta = binstall_value.clone().try_into().unwrap();
         assert!(meta.pkg_url.is_none());
+    }
+
+    #[test]
+    fn invalid_binstall_metadata_returns_snafu_error() {
+        let toml_content = r#"
+            [package.metadata]
+            binstall = "invalid"
+        "#;
+
+        let doc: toml::Value = toml::from_str(toml_content).unwrap();
+
+        assert_matches::assert_matches!(
+            BinstallMetaRaw::try_from_cargo_toml(&doc),
+            Err(Error::BinstallMetadataInvalidInCargoToml { .. })
+        );
     }
 
     #[test]
@@ -966,6 +1158,38 @@ repository = "{}"
 pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
 pkg-fmt = "zip"
 bin-dir = "{{ bin }}{{ binary-ext }}"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let result = provider.try_resolve(&krate, "x86_64-pc-windows-msvc").unwrap();
+
+        assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn resolves_using_upstream_template_placeholders_in_pkg_url_and_bin_dir() {
+        let server = MockServer::start();
+        let asset = zip_with_binary("release/.exe/x86_64/tool.exe");
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/package-name-x86_64-windows-zip.zip");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{repo}}/{{name}}-{{target-arch}}-{{target-family}}-{{archive-format}}{{archive-suffix}}"
+pkg-fmt = "zip"
+bin-dir = "release/{{format}}/{{target-arch}}/{{bin}}{{binary-ext}}"
 "#,
             server.base_url()
         );

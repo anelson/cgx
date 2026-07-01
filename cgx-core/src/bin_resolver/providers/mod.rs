@@ -9,17 +9,16 @@ use std::collections::HashSet;
 
 use snafu::IntoError;
 
+pub(super) use self::{
+    archive::{ArchiveFormat, extract_binary_at_archive_relative_path, extract_binary_by_candidate_names},
+    binstall::BinstallProvider,
+    github::GithubProvider,
+    gitlab::GitlabProvider,
+    quickinstall::QuickinstallProvider,
+};
 use crate::{
     Result, bin_resolver::ConclusiveResolution, config::BinaryProvider, downloader::DownloadedCrate, error,
 };
-
-pub(super) use archive::{
-    ArchiveFormat, extract_binary_at_archive_relative_path, extract_binary_by_candidate_names,
-};
-pub(super) use binstall::BinstallProvider;
-pub(super) use github::GithubProvider;
-pub(super) use gitlab::GitlabProvider;
-pub(super) use quickinstall::QuickinstallProvider;
 
 /// Trait for providers that can resolve pre-built binaries.
 pub(super) trait Provider {

@@ -291,8 +291,23 @@ pub enum Error {
     #[snafu(display("Failed to parse {}: {}", path.display(), source))]
     CargoTomlParse { path: PathBuf, source: toml::de::Error },
 
-    #[snafu(display("Invalid [package.metadata.binstall] in {}: {}", path.display(), source))]
-    BinstallMetadataInvalid { path: PathBuf, source: toml::de::Error },
+    #[snafu(display("Invalid [package.metadata.binstall]: {source}"))]
+    BinstallMetadataInvalidInCargoToml { source: toml::de::Error },
+
+    #[snafu(display("Invalid binstall template '{template}': {source}"))]
+    BinstallTemplateParse {
+        template: String,
+        source: leon::ParseError,
+    },
+
+    #[snafu(display("Failed to render binstall template '{template}': {source}"))]
+    BinstallTemplateRender {
+        template: String,
+        source: leon::RenderError,
+    },
+
+    #[snafu(display("Invalid target triple '{target}': {message}"))]
+    InvalidTargetTriple { target: String, message: String },
 
     #[snafu(display("Failed to build HTTP client: {message}"))]
     HttpClientBuild { message: String },

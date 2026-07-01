@@ -38,6 +38,7 @@ home            = { workspace = true }
 humantime       = { workspace = true }
 humantime-serde = { workspace = true }
 ignore          = { workspace = true }
+leon            = { workspace = true }
 reqwest         = { workspace = true }
 semver          = { workspace = true }
 serde           = { workspace = true }
@@ -49,6 +50,7 @@ snafu           = { workspace = true }
 strum           = { workspace = true, features = ["derive"] }
 tame-index      = { workspace = true }
 tar             = { workspace = true }
+target-lexicon  = { workspace = true }
 tempfile        = { workspace = true }
 toml            = { workspace = true }
 tracing         = { workspace = true }
