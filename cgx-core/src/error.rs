@@ -3,6 +3,8 @@ use std::path::PathBuf;
 pub use reqwest::StatusCode;
 use snafu::prelude::*;
 
+use crate::config::BinaryProvider;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[non_exhaustive]
@@ -248,6 +250,16 @@ pub enum Error {
     ))]
     ChecksumMismatch { expected: String, actual: String },
 
+    #[snafu(display("Failed to parse SHA256 checksum contents: {contents}"))]
+    ChecksumUnparsable { contents: String },
+
+    #[snafu(display("Provider {provider:?} failed to prepare asset {url}: {source}"))]
+    ProviderAssetPreparationFailed {
+        provider: BinaryProvider,
+        url: String,
+        source: Box<Error>,
+    },
+
     #[snafu(display("Unsupported archive format: {format}"))]
     UnsupportedArchiveFormat { format: String },
 
@@ -287,6 +299,25 @@ pub enum Error {
 
     #[snafu(display("HTTP request to {url} failed: {source}"))]
     HttpRequest { url: String, source: reqwest::Error },
+
+    #[snafu(display("Failed to stream HTTP response from {url} to {}: {source}", path.display()))]
+    HttpDownloadToFile {
+        url: String,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("HTTP response from {url} exceeded maximum size of {limit} bytes"))]
+    HttpResponseTooLarge { url: String, limit: usize },
+
+    #[snafu(display("Failed to read HTTP response body from {url}: {source}"))]
+    HttpResponseRead { url: String, source: std::io::Error },
+
+    #[snafu(display("HTTP response from {url} is not valid UTF-8: {source}"))]
+    HttpResponseUtf8 {
+        url: String,
+        source: std::string::FromUtf8Error,
+    },
 
     #[snafu(display("HTTP {status} from {url}"))]
     HttpStatus { url: String, status: u16 },

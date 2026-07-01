@@ -1,9 +1,11 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use snafu::ResultExt;
 
 use super::{ArchiveFormat, Provider};
@@ -14,7 +16,7 @@ use crate::{
     crate_resolver::ResolvedSource,
     downloader::DownloadedCrate,
     error,
-    http::{Bytes, HttpClient},
+    http::HttpClient,
     messages::PrebuiltBinaryMessage,
 };
 
@@ -103,6 +105,10 @@ fn binstall_archive_suffixes(pkg_fmt: Option<&str>) -> &'static [&'static str] {
     }
 }
 
+fn binary_ext_for_target(target: &str) -> &'static str {
+    if target.contains("windows") { ".exe" } else { "" }
+}
+
 /// Render a binstall template string by replacing `{ variable }` placeholders.
 fn render_template(template: &str, ctx: &TemplateContext<'_>) -> String {
     let mut result = template.to_string();
@@ -180,49 +186,8 @@ impl BinstallProvider {
         }
     }
 
-    /// Download a file from the given URL.
-    ///
-    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource
-    /// does not exist), or `Err` for any other failure (network errors, non-404 HTTP errors).
-    fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
-        self.http_client.try_download(url)
-    }
-
-    fn verify_checksum(&self, data: &[u8], url: &str) -> Result<()> {
-        let checksum_url = format!("{}.sha256", url);
-
-        let checksum_data = match self.try_download(&checksum_url)? {
-            Some(data) => data,
-            None => return Ok(()),
-        };
-
-        let checksum_str = String::from_utf8_lossy(&checksum_data);
-        let expected_hash = checksum_str.split_whitespace().next().ok_or_else(|| {
-            error::ChecksumMismatchSnafu {
-                expected: checksum_str.to_string(),
-                actual: "invalid checksum format".to_string(),
-            }
-            .build()
-        })?;
-
-        self.reporter
-            .report(|| PrebuiltBinaryMessage::verifying_checksum(expected_hash));
-
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let actual_hash = crate::helpers::format_hex_lower(hasher.finalize());
-
-        if expected_hash != actual_hash {
-            return error::ChecksumMismatchSnafu {
-                expected: expected_hash.to_string(),
-                actual: actual_hash,
-            }
-            .fail();
-        }
-
-        self.reporter.report(PrebuiltBinaryMessage::checksum_verified);
-
-        Ok(())
+    fn try_download_to_file(&self, url: &str, path: &Path) -> Result<bool> {
+        self.http_client.try_download_to_file(url, path)
     }
 }
 
@@ -256,13 +221,21 @@ impl Provider for BinstallProvider {
 
         let pkg_fmt = meta.pkg_fmt.as_deref();
         let format = archive_format_from_pkg_fmt(pkg_fmt)?;
-        let binary_ext = if cfg!(windows) { ".exe" } else { "" };
+        let binary_ext = binary_ext_for_target(platform);
         let repo_url = Self::get_repo_url(krate)?;
         let version_string = resolved.version.to_string();
         let suffixes = binstall_archive_suffixes(pkg_fmt);
+        let binary_name = krate.default_binary_name()?;
 
         let mut last_url = String::new();
-        let mut data = None;
+        let mut selected_suffix = "";
+
+        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
+            parent: self.cache_dir.clone(),
+        })?;
+
+        let archive_path = temp_dir.path().join(format.canonical_filename());
+        let mut downloaded = false;
 
         for suffix in suffixes {
             let ctx = TemplateContext {
@@ -271,7 +244,7 @@ impl Provider for BinstallProvider {
                 target: platform,
                 archive_suffix: suffix,
                 binary_ext,
-                bin: &resolved.name,
+                bin: &binary_name,
                 repo: repo_url.as_deref(),
             };
 
@@ -280,20 +253,21 @@ impl Provider for BinstallProvider {
             self.reporter
                 .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Binstall));
 
-            match self.try_download(&url) {
-                Ok(Some(bytes)) => {
-                    data = Some(bytes);
+            match self.try_download_to_file(&url, &archive_path) {
+                Ok(true) => {
+                    downloaded = true;
                     last_url = url;
+                    selected_suffix = suffix;
                     break;
                 }
-                Ok(None) => {
+                Ok(false) => {
                     last_url = url;
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        let Some(data) = data else {
+        if !downloaded {
             // If not binary found and no transient error then it just means this crate legit
             // doesn't have a prebuilt binary for this platform in any of the places we know to
             // look.
@@ -304,25 +278,60 @@ impl Provider for BinstallProvider {
                 )
             });
             return Ok(ConclusiveResolution::Nonexistent);
-        };
+        }
         let url = last_url;
 
         if self.verify_checksums {
-            self.verify_checksum(&data, &url)?;
+            let asset_filename = super::checksum::asset_filename_from_url(&url);
+            let checksum_url = format!("{}.sha256", url);
+            let checksum_path = temp_dir.path().join("checksum.sha256");
+            let checksum_found =
+                self.try_download_to_file(&checksum_url, &checksum_path)
+                    .map_err(|source| {
+                        super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
+                    })?;
+            if checksum_found {
+                super::checksum::verify_sha256_checksum(
+                    &archive_path,
+                    &checksum_path,
+                    asset_filename,
+                    &self.reporter,
+                )
+                .map_err(|source| {
+                    super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
+                })?;
+            }
         }
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
-
-        let archive_path = temp_dir.path().join(format.canonical_filename());
-        std::fs::write(&archive_path, &data).with_context(|_| error::IoSnafu {
-            path: archive_path.clone(),
-        })?;
-
-        let binary_name = krate.default_binary_name()?;
         let extract_dir = temp_dir.path().join("extracted");
-        let binary_path = super::extract_binary(&archive_path, format, &binary_name, &extract_dir)?;
+        let binary_path = if let Some(bin_dir_template) = meta.bin_dir.as_deref() {
+            let ctx = TemplateContext {
+                name: &resolved.name,
+                version: &version_string,
+                target: platform,
+                archive_suffix: selected_suffix,
+                binary_ext,
+                bin: &binary_name,
+                repo: repo_url.as_deref(),
+            };
+            let rendered_path = render_template(bin_dir_template, &ctx);
+            super::extract_binary_at_archive_relative_path(
+                &archive_path,
+                format,
+                &binary_name,
+                Path::new(&rendered_path),
+                &extract_dir,
+            )
+        } else {
+            let expected_binary_names = super::expected_binary_names(&binary_name, None, &resolved.name);
+            super::extract_binary_by_candidate_names(
+                &archive_path,
+                format,
+                &expected_binary_names,
+                &extract_dir,
+            )
+        }
+        .map_err(|source| super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source))?;
 
         let final_dir = self
             .cache_dir
@@ -364,12 +373,88 @@ impl Provider for BinstallProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, io::Write, time::Duration};
 
+    use flate2::{Compression, write::GzEncoder};
+    use httpmock::prelude::*;
     use semver::Version;
+    use zip::write::SimpleFileOptions;
 
     use super::*;
-    use crate::{crate_resolver::ResolvedSource, cratespec::Forge, error::Error};
+    use crate::{
+        config::HttpConfig, crate_resolver::ResolvedSource, cratespec::Forge, error::Error,
+        messages::MessageReporter,
+    };
+
+    fn fast_retry_config() -> HttpConfig {
+        HttpConfig {
+            retries: 2,
+            backoff_base: Duration::from_millis(1),
+            backoff_max: Duration::from_millis(10),
+            ..Default::default()
+        }
+    }
+
+    fn test_provider(verify_checksums: bool) -> (BinstallProvider, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let http_client = HttpClient::new(&fast_retry_config()).unwrap();
+        (
+            BinstallProvider::new(
+                MessageReporter::null(),
+                temp_dir.path().to_path_buf(),
+                verify_checksums,
+                http_client,
+            ),
+            temp_dir,
+        )
+    }
+
+    fn downloaded_crate_with_toml(cargo_toml: &str) -> (DownloadedCrate, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::write(temp_dir.path().join("Cargo.toml"), cargo_toml).unwrap();
+        (
+            DownloadedCrate {
+                resolved: crate::crate_resolver::ResolvedCrate {
+                    name: "package-name".to_string(),
+                    version: Version::new(1, 0, 0),
+                    source: ResolvedSource::CratesIo,
+                },
+                crate_path: temp_dir.path().to_path_buf(),
+            },
+            temp_dir,
+        )
+    }
+
+    fn tar_gz_with_binary(relative_path: &str) -> Vec<u8> {
+        let mut archive_data = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut archive_data, Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let payload = b"#!/bin/sh\necho test";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, relative_path, &payload[..]).unwrap();
+            tar.finish().unwrap();
+        }
+        archive_data
+    }
+
+    fn zip_with_binary(relative_path: &str) -> Vec<u8> {
+        let mut archive_data = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut archive_data);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let options = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o755);
+            zip.start_file(relative_path, options).unwrap();
+            zip.write_all(b"#!/bin/sh\necho test").unwrap();
+            zip.finish().unwrap();
+        }
+        archive_data
+    }
 
     #[test]
     fn render_template_basic() {
@@ -410,6 +495,12 @@ mod tests {
             rendered,
             "https://example.com/mytool-v1.0.0-x86_64-pc-windows-msvc.zip"
         );
+    }
+
+    #[test]
+    fn binary_ext_is_derived_from_target() {
+        assert_eq!(binary_ext_for_target("x86_64-pc-windows-msvc"), ".exe");
+        assert_eq!(binary_ext_for_target("aarch64-apple-darwin"), "");
     }
 
     #[test]
@@ -815,5 +906,146 @@ version = "1.0.0"
         assert_eq!(binstall_archive_suffixes(Some("tbz2")), &[".tbz2", ".tar.bz2"]);
         assert_eq!(binstall_archive_suffixes(Some("zip")), &[".zip"]);
         assert_eq!(binstall_archive_suffixes(Some("tar")), &[".tar"]);
+    }
+
+    #[test]
+    fn resolves_using_rendered_bin_dir() {
+        let server = MockServer::start();
+        let asset = tar_gz_with_binary("package-name-x86_64-unknown-linux-gnu/tool");
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-gnu.tgz");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
+pkg-fmt = "tgz"
+bin-dir = "{{ name }}-{{ target }}/{{ bin }}{{ binary-ext }}"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let result = provider.try_resolve(&krate, "x86_64-unknown-linux-gnu").unwrap();
+
+        let ConclusiveResolution::Found(binary) = result else {
+            panic!("expected binstall provider to resolve rendered bin-dir asset")
+        };
+        assert_eq!(binary.path.file_name().unwrap().to_string_lossy(), "tool");
+        assert!(binary.path.exists());
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn rendered_bin_dir_uses_windows_binary_ext_from_target() {
+        let server = MockServer::start();
+        let asset = zip_with_binary("tool.exe");
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-pc-windows-msvc.zip");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
+pkg-fmt = "zip"
+bin-dir = "{{ bin }}{{ binary-ext }}"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let result = provider.try_resolve(&krate, "x86_64-pc-windows-msvc").unwrap();
+
+        assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn missing_bin_dir_falls_back_to_bounded_archive_search() {
+        let server = MockServer::start();
+        let asset = tar_gz_with_binary("release/tool");
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-gnu.tgz");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
+pkg-fmt = "tgz"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let result = provider.try_resolve(&krate, "x86_64-unknown-linux-gnu").unwrap();
+
+        assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn unusable_bin_dir_returns_provider_asset_preparation_error() {
+        let server = MockServer::start();
+        let asset = tar_gz_with_binary("release/tool");
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-gnu.tgz");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
+pkg-fmt = "tgz"
+bin-dir = "missing/tool"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let result = provider.try_resolve(&krate, "x86_64-unknown-linux-gnu");
+
+        assert_matches::assert_matches!(
+            result,
+            Err(Error::ProviderAssetPreparationFailed {
+                provider: BinaryProvider::Binstall,
+                ..
+            })
+        );
+        mock.assert_calls(1);
     }
 }

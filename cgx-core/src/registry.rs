@@ -10,7 +10,13 @@ use tame_index::{
     utils::flock::{FileLock, LockOptions},
 };
 
-use crate::{Result, config::HttpConfig, cratespec::RegistrySource, error, http::HttpClient};
+use crate::{
+    Result,
+    config::HttpConfig,
+    cratespec::RegistrySource,
+    error,
+    http::{HttpClient, SMALL_DOWNLOAD_LIMIT_BYTES},
+};
 
 /// File name of the sparse registry configuration stored at the root of Cargo's index cache.
 const SPARSE_INDEX_CONFIG_FILENAME: &str = "config.json";
@@ -201,18 +207,16 @@ impl RegistryClient {
         }
 
         let config_url = self.sparse_config_url();
-        let response = self.http_client.get(&config_url)?;
-        if !response.status().is_success() {
+        let Some(contents) = self
+            .http_client
+            .try_download_bytes(&config_url, SMALL_DOWNLOAD_LIMIT_BYTES)?
+        else {
             return Err(error::HttpStatusSnafu {
                 url: config_url,
-                status: response.status().as_u16(),
+                status: reqwest::StatusCode::NOT_FOUND.as_u16(),
             }
             .build());
-        }
-
-        let contents = response
-            .bytes()
-            .with_context(|_| error::HttpRequestSnafu { url: config_url })?;
+        };
         let config = serde_json::from_slice(&contents).context(error::JsonSnafu)?;
         Ok((config, contents.to_vec()))
     }

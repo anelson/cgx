@@ -51,6 +51,11 @@ pub enum PrebuiltBinaryMessage {
         provider: BinaryProvider,
         reason: String,
     },
+    /// A provider failed before it could make a conclusive determination.
+    ProviderFailed {
+        provider: BinaryProvider,
+        reason: String,
+    },
     /// Downloading a prebuilt binary from a provider
     DownloadingBinary { url: String, provider: BinaryProvider },
     /// Verifying checksum of downloaded binary
@@ -117,6 +122,13 @@ impl PrebuiltBinaryMessage {
 
     pub fn provider_has_no_binary(provider: BinaryProvider, reason: impl Into<String>) -> Self {
         Self::ProviderHasNoBinary {
+            provider,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn provider_failed(provider: BinaryProvider, reason: impl Into<String>) -> Self {
+        Self::ProviderFailed {
             provider,
             reason: reason.into(),
         }

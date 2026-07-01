@@ -1,10 +1,9 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use reqwest::StatusCode;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use snafu::ResultExt;
 
 use super::Provider;
@@ -16,7 +15,10 @@ use crate::{
     cratespec::Forge,
     downloader::DownloadedCrate,
     error,
-    http::{ACCEPT, AUTHORIZATION, Bytes, HeaderMap, HeaderValue, HttpClient},
+    http::{
+        ACCEPT, API_RESPONSE_LIMIT_BYTES, AUTHORIZATION, HeaderMap, HeaderValue, HttpClient,
+        SMALL_DOWNLOAD_LIMIT_BYTES,
+    },
     messages::PrebuiltBinaryMessage,
 };
 
@@ -137,9 +139,7 @@ impl GithubProvider {
             return Self::non_success_response_error(&url, response);
         }
 
-        let text = response
-            .text()
-            .with_context(|_| error::HttpRequestSnafu { url: url.clone() })?;
+        let text = HttpClient::response_body_to_string(response, &url, API_RESPONSE_LIMIT_BYTES)?;
 
         let release: ReleaseResponse = serde_json::from_str(&text).context(error::JsonSnafu)?;
 
@@ -150,28 +150,26 @@ impl GithubProvider {
             .collect())
     }
 
-    /// Download a file from the given URL.
+    /// Download a release asset from the given URL.
     ///
-    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource
+    /// Returns `Ok(true)` on success, `Ok(false)` if the server returned 404 (resource
     /// does not exist), or `Err` for any other failure (network errors, non-404 HTTP errors).
-    fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
+    fn try_download_to_file(&self, url: &str, path: &Path) -> Result<bool> {
         let response = self
             .http_client
             .get_retrying_status(url, Self::should_retry_status)?;
 
         if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
+            return Ok(false);
         }
 
         if !response.status().is_success() {
             return Self::non_success_response_error(url, response);
         }
 
-        let bytes = response
-            .bytes()
-            .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
+        HttpClient::response_body_to_file(response, url, path)?;
 
-        Ok(Some(bytes))
+        Ok(true)
     }
 
     /// GitHub rate limiting can be reported as HTTP 403 or 429, and callers should not retry
@@ -192,11 +190,11 @@ impl GithubProvider {
         let headers = response.headers().clone();
         let body = if status == StatusCode::FORBIDDEN && !Self::is_throttled_response(status, &headers, None)
         {
-            Some(
-                response
-                    .text()
-                    .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?,
-            )
+            match HttpClient::response_body_to_string(response, url, SMALL_DOWNLOAD_LIMIT_BYTES) {
+                Ok(text) => Some(text),
+                Err(error::Error::HttpResponseTooLarge { .. }) => None,
+                Err(source) => return Err(source),
+            }
         } else {
             None
         };
@@ -251,43 +249,6 @@ impl GithubProvider {
             .get(name)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
-    }
-
-    fn verify_checksum(&self, data: &[u8], url: &str) -> Result<()> {
-        let checksum_url = format!("{}.sha256", url);
-
-        let checksum_data = match self.try_download(&checksum_url)? {
-            Some(data) => data,
-            None => return Ok(()),
-        };
-
-        let checksum_str = String::from_utf8_lossy(&checksum_data);
-        let expected_hash = checksum_str.split_whitespace().next().ok_or_else(|| {
-            error::ChecksumMismatchSnafu {
-                expected: checksum_str.to_string(),
-                actual: "invalid checksum format".to_string(),
-            }
-            .build()
-        })?;
-
-        self.reporter
-            .report(|| PrebuiltBinaryMessage::verifying_checksum(expected_hash));
-
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let actual_hash = crate::helpers::format_hex_lower(hasher.finalize());
-
-        if expected_hash != actual_hash {
-            return error::ChecksumMismatchSnafu {
-                expected: expected_hash.to_string(),
-                actual: actual_hash,
-            }
-            .fail();
-        }
-
-        self.reporter.report(PrebuiltBinaryMessage::checksum_verified);
-
-        Ok(())
     }
 }
 
@@ -392,9 +353,18 @@ impl Provider for GithubProvider {
             PrebuiltBinaryMessage::downloading_binary(download_url, BinaryProvider::GithubReleases)
         });
 
-        let data = match self.try_download(download_url) {
-            Ok(Some(data)) => data,
-            Ok(None) => {
+        let binary_name = krate.default_binary_name()?;
+        let expected_binary_names =
+            super::expected_binary_names(&binary_name, Some(&candidate.binary_basename), crate_name);
+
+        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
+            parent: self.cache_dir.clone(),
+        })?;
+
+        let archive_path = temp_dir.path().join(candidate.format.canonical_filename());
+        match self.try_download_to_file(download_url, &archive_path) {
+            Ok(true) => {}
+            Ok(false) => {
                 self.reporter.report(|| {
                     PrebuiltBinaryMessage::provider_has_no_binary(
                         BinaryProvider::GithubReleases,
@@ -404,24 +374,47 @@ impl Provider for GithubProvider {
                 return Ok(ConclusiveResolution::Nonexistent);
             }
             Err(e) => return Err(e),
-        };
-
-        if self.verify_checksums {
-            self.verify_checksum(&data, download_url)?;
         }
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
+        if self.verify_checksums {
+            let checksum_url = format!("{}.sha256", download_url);
+            let checksum_path = temp_dir.path().join("checksum.sha256");
+            let checksum_found =
+                self.try_download_to_file(&checksum_url, &checksum_path)
+                    .map_err(|source| {
+                        super::provider_asset_preparation_failed(
+                            BinaryProvider::GithubReleases,
+                            download_url,
+                            source,
+                        )
+                    })?;
+            if checksum_found {
+                super::checksum::verify_sha256_checksum(
+                    &archive_path,
+                    &checksum_path,
+                    &candidate.filename,
+                    &self.reporter,
+                )
+                .map_err(|source| {
+                    super::provider_asset_preparation_failed(
+                        BinaryProvider::GithubReleases,
+                        download_url,
+                        source,
+                    )
+                })?;
+            }
+        }
 
-        let archive_path = temp_dir.path().join(candidate.format.canonical_filename());
-        std::fs::write(&archive_path, &data).with_context(|_| error::IoSnafu {
-            path: archive_path.clone(),
-        })?;
-
-        let binary_name = krate.default_binary_name()?;
         let extract_dir = temp_dir.path().join("extracted");
-        let binary_path = super::extract_binary(&archive_path, candidate.format, &binary_name, &extract_dir)?;
+        let binary_path = super::extract_binary_by_candidate_names(
+            &archive_path,
+            candidate.format,
+            &expected_binary_names,
+            &extract_dir,
+        )
+        .map_err(|source| {
+            super::provider_asset_preparation_failed(BinaryProvider::GithubReleases, download_url, source)
+        })?;
 
         let final_dir = self
             .cache_dir

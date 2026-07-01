@@ -1,9 +1,8 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use reqwest::StatusCode;
-use sha2::{Digest, Sha256};
 use snafu::ResultExt;
 
 use super::{ArchiveFormat, CandidateFilename, Provider};
@@ -15,9 +14,39 @@ use crate::{
     cratespec::Forge,
     downloader::DownloadedCrate,
     error,
-    http::{Bytes, HttpClient},
+    http::HttpClient,
     messages::PrebuiltBinaryMessage,
 };
+
+/// A generated GitLab release asset candidate and the metadata needed to consume it.
+///
+/// There's not a GitLab API endpoint to list release assets, unlike with GitHub, so to discover a
+/// release asset heuristically we need to generate a lot of these candidates and then probbe them
+/// one by one to see if any of them exist.
+#[derive(Debug, Clone)]
+struct GitlabReleaseAssetCandidate {
+    /// Full GitLab release download URL for this candidate asset.
+    url: String,
+
+    /// File format inferred from the candidate asset filename.
+    ///
+    /// This determines whether the downloaded asset is copied directly, decompressed,
+    /// or treated as an archive that must be searched for the binary.
+    archive_format: ArchiveFormat,
+
+    /// Release asset filename, without the surrounding URL path.
+    ///
+    /// Used for checksum sidecar matching and diagnostics that should mention the
+    /// concrete asset name.
+    asset_filename: String,
+
+    /// Binary basename implied by the generated asset filename.
+    ///
+    /// Used as a fallback expected binary name when searching inside archives, since
+    /// some projects publish assets under a name that differs from the crate's default
+    /// binary name.
+    binary_basename_hint: String,
+}
 
 pub(in crate::bin_resolver) struct GitlabProvider {
     reporter: crate::messages::MessageReporter,
@@ -63,31 +92,43 @@ impl GitlabProvider {
         }
     }
 
-    /// Generate candidate URLs for GitLab releases, each paired with its [`ArchiveFormat`].
+    /// Generate GitLab release asset candidates to probe and download.
     ///
-    /// Uses the shared filename generator and constructs full GitLab release download URLs
-    /// for both `v{version}` and `{version}` tags.
-    fn generate_urls(
+    /// Uses the came candidate filename generator in [`super::generate_candidate_filenames`], then
+    /// adds some Gitlab-specific fields to produce a list of [`GitlabReleaseAssetCandidate`]s that
+    /// can be probed for existence.
+    fn generate_release_asset_candidates(
         repo_url: &str,
         crate_name: &str,
         extra_binary_names: &[&str],
         version: &str,
         platform: &str,
-    ) -> Vec<(String, ArchiveFormat)> {
-        let candidates =
+    ) -> Vec<GitlabReleaseAssetCandidate> {
+        // Generate candidate filenames for the crate and platform
+        let filename_candidates =
             super::generate_candidate_filenames(crate_name, extra_binary_names, version, platform);
+
+        // Make a separate Gitlab release asset candidate for each possible variant the release tag
+        // might have (with or without a leading "v" prefix).
         let tags = [format!("v{}", version), version.to_string()];
 
-        let mut urls = Vec::new();
+        let mut asset_candidates = Vec::new();
         for tag in &tags {
-            for CandidateFilename { filename, format } in &candidates {
-                urls.push((
-                    format!("{}/-/releases/{}/downloads/binaries/{}", repo_url, tag, filename),
-                    *format,
-                ));
+            for CandidateFilename {
+                filename,
+                binary_basename,
+                format,
+            } in &filename_candidates
+            {
+                asset_candidates.push(GitlabReleaseAssetCandidate {
+                    url: format!("{}/-/releases/{}/downloads/binaries/{}", repo_url, tag, filename),
+                    archive_format: *format,
+                    asset_filename: filename.clone(),
+                    binary_basename_hint: binary_basename.clone(),
+                });
             }
         }
-        urls
+        asset_candidates
     }
 
     /// Probe a GitLab release download URL with a HEAD request to check if the asset exists.
@@ -107,34 +148,12 @@ impl GitlabProvider {
 
     /// Download a GitLab release asset from the given URL.
     ///
-    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource
+    /// Returns `Ok(true)` on success, `Ok(false)` if the server returned 404 (resource
     /// does not exist), or `Err` for any other failure (network errors, non-404 HTTP errors).
-    fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
-        let response = self
-            .http_client
-            .get_retrying_status(url, Self::should_retry_status)?;
-
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            return Err(Self::provider_throttled_error(url, response.status()));
-        }
-
-        if !response.status().is_success() {
-            return error::HttpStatusSnafu {
-                url: url.to_string(),
-                status: response.status().as_u16(),
-            }
-            .fail();
-        }
-
-        let bytes = response
-            .bytes()
-            .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
-
-        Ok(Some(bytes))
+    fn try_download_to_file(&self, url: &str, path: &Path) -> Result<bool> {
+        self.http_client
+            .try_download_to_file_retrying_status(url, path, Self::should_retry_status)
+            .map_err(|source| Self::map_download_error(url, source))
     }
 
     fn should_retry_status(status: StatusCode) -> bool {
@@ -153,41 +172,13 @@ impl GitlabProvider {
         .build()
     }
 
-    fn verify_checksum(&self, data: &[u8], url: &str) -> Result<()> {
-        let checksum_url = format!("{}.sha256", url);
-
-        let checksum_data = match self.try_download(&checksum_url)? {
-            Some(data) => data,
-            None => return Ok(()),
-        };
-
-        let checksum_str = String::from_utf8_lossy(&checksum_data);
-        let expected_hash = checksum_str.split_whitespace().next().ok_or_else(|| {
-            error::ChecksumMismatchSnafu {
-                expected: checksum_str.to_string(),
-                actual: "invalid checksum format".to_string(),
+    fn map_download_error(url: &str, source: error::Error) -> error::Error {
+        match source {
+            error::Error::HttpStatus { status, .. } if status == StatusCode::TOO_MANY_REQUESTS.as_u16() => {
+                Self::provider_throttled_error(url, StatusCode::TOO_MANY_REQUESTS)
             }
-            .build()
-        })?;
-
-        self.reporter
-            .report(|| PrebuiltBinaryMessage::verifying_checksum(expected_hash));
-
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let actual_hash = crate::helpers::format_hex_lower(hasher.finalize());
-
-        if expected_hash != actual_hash {
-            return error::ChecksumMismatchSnafu {
-                expected: expected_hash.to_string(),
-                actual: actual_hash,
-            }
-            .fail();
+            source => source,
         }
-
-        self.reporter.report(PrebuiltBinaryMessage::checksum_verified);
-
-        Ok(())
     }
 }
 
@@ -216,7 +207,7 @@ impl Provider for GitlabProvider {
             .map(String::as_str)
             .filter(|n| *n != crate_name)
             .collect();
-        let urls = Self::generate_urls(
+        let candidates = Self::generate_release_asset_candidates(
             &repo_url,
             crate_name,
             &extra_binary_names,
@@ -235,10 +226,10 @@ impl Provider for GitlabProvider {
         // `None` for every non-GitLab crate, which is the overwhelming majority and does zero
         // probes.
         let mut found = None;
-        for (url, format) in &urls {
-            match self.head_probe(url) {
+        for candidate in &candidates {
+            match self.head_probe(&candidate.url) {
                 Ok(true) => {
-                    found = Some((url.clone(), *format));
+                    found = Some(candidate.clone());
                     break;
                 }
 
@@ -246,7 +237,7 @@ impl Provider for GitlabProvider {
                 Ok(false) => continue,
             }
         }
-        let Some((url, format)) = found else {
+        let Some(candidate) = found else {
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::GitlabReleases,
@@ -256,39 +247,74 @@ impl Provider for GitlabProvider {
             return Ok(ConclusiveResolution::Nonexistent);
         };
 
-        self.reporter
-            .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::GitlabReleases));
+        self.reporter.report(|| {
+            PrebuiltBinaryMessage::downloading_binary(&candidate.url, BinaryProvider::GitlabReleases)
+        });
 
-        let data = match self.try_download(&url) {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                self.reporter.report(|| {
-                    PrebuiltBinaryMessage::provider_has_no_binary(
-                        BinaryProvider::GitlabReleases,
-                        format!("Release asset not found: {}", url),
-                    )
-                });
-                return Ok(ConclusiveResolution::Nonexistent);
-            }
-            Err(e) => return Err(e),
-        };
-
-        if self.verify_checksums {
-            self.verify_checksum(&data, &url)?;
-        }
+        let binary_name = krate.default_binary_name()?;
+        let expected_binary_names =
+            super::expected_binary_names(&binary_name, Some(&candidate.binary_basename_hint), crate_name);
 
         let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
             parent: self.cache_dir.clone(),
         })?;
 
-        let archive_path = temp_dir.path().join(format.canonical_filename());
-        std::fs::write(&archive_path, &data).with_context(|_| error::IoSnafu {
-            path: archive_path.clone(),
-        })?;
+        let archive_path = temp_dir
+            .path()
+            .join(candidate.archive_format.canonical_filename());
+        match self.try_download_to_file(&candidate.url, &archive_path) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::provider_has_no_binary(
+                        BinaryProvider::GitlabReleases,
+                        format!("Release asset not found: {}", candidate.url),
+                    )
+                });
+                return Ok(ConclusiveResolution::Nonexistent);
+            }
+            Err(e) => return Err(e),
+        }
 
-        let binary_name = krate.default_binary_name()?;
+        if self.verify_checksums {
+            let checksum_url = format!("{}.sha256", candidate.url);
+            let checksum_path = temp_dir.path().join("checksum.sha256");
+            let checksum_found =
+                self.try_download_to_file(&checksum_url, &checksum_path)
+                    .map_err(|source| {
+                        super::provider_asset_preparation_failed(
+                            BinaryProvider::GitlabReleases,
+                            &candidate.url,
+                            source,
+                        )
+                    })?;
+            if checksum_found {
+                super::checksum::verify_sha256_checksum(
+                    &archive_path,
+                    &checksum_path,
+                    &candidate.asset_filename,
+                    &self.reporter,
+                )
+                .map_err(|source| {
+                    super::provider_asset_preparation_failed(
+                        BinaryProvider::GitlabReleases,
+                        &candidate.url,
+                        source,
+                    )
+                })?;
+            }
+        }
+
         let extract_dir = temp_dir.path().join("extracted");
-        let binary_path = super::extract_binary(&archive_path, format, &binary_name, &extract_dir)?;
+        let binary_path = super::extract_binary_by_candidate_names(
+            &archive_path,
+            candidate.archive_format,
+            &expected_binary_names,
+            &extract_dir,
+        )
+        .map_err(|source| {
+            super::provider_asset_preparation_failed(BinaryProvider::GitlabReleases, &candidate.url, source)
+        })?;
 
         let final_dir = self
             .cache_dir
@@ -367,8 +393,8 @@ mod tests {
     }
 
     #[test]
-    fn test_url_generation_includes_version_patterns() {
-        let urls = GitlabProvider::generate_urls(
+    fn test_release_asset_candidate_generation_includes_version_patterns() {
+        let candidates = GitlabProvider::generate_release_asset_candidates(
             "https://gitlab.com/owner/repo",
             "mytool",
             &[],
@@ -376,13 +402,21 @@ mod tests {
             "x86_64-unknown-linux-gnu",
         );
 
-        assert!(urls.iter().any(|(url, _)| url.contains("/-/releases/v1.2.3/")));
-        assert!(urls.iter().any(|(url, _)| url.contains("/-/releases/1.2.3/")));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.url.contains("/-/releases/v1.2.3/"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.url.contains("/-/releases/1.2.3/"))
+        );
     }
 
     #[test]
-    fn test_url_generation_uses_gitlab_path() {
-        let urls = GitlabProvider::generate_urls(
+    fn test_release_asset_candidate_generation_uses_gitlab_path() {
+        let candidates = GitlabProvider::generate_release_asset_candidates(
             "https://gitlab.com/owner/repo",
             "mytool",
             &[],
@@ -390,13 +424,21 @@ mod tests {
             "x86_64-unknown-linux-gnu",
         );
 
-        assert!(urls.iter().all(|(url, _)| url.contains("/-/releases/")));
-        assert!(urls.iter().all(|(url, _)| url.contains("/downloads/binaries/")));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.url.contains("/-/releases/"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.url.contains("/downloads/binaries/"))
+        );
     }
 
     #[test]
-    fn test_url_generation_includes_archive_formats() {
-        let urls = GitlabProvider::generate_urls(
+    fn test_release_asset_candidate_generation_includes_archive_formats() {
+        let candidates = GitlabProvider::generate_release_asset_candidates(
             "https://gitlab.com/owner/repo",
             "mytool",
             &[],
@@ -404,15 +446,27 @@ mod tests {
             "x86_64-unknown-linux-gnu",
         );
 
-        assert!(urls.iter().any(|(url, _)| url.ends_with(".tar.gz")));
-        assert!(urls.iter().any(|(url, _)| url.ends_with(".tar.xz")));
-        assert!(urls.iter().any(|(url, _)| url.ends_with(".tar.zst")));
-        assert!(urls.iter().any(|(url, _)| url.ends_with(".zip")));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.url.ends_with(".tar.gz"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.url.ends_with(".tar.xz"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.url.ends_with(".tar.zst"))
+        );
+        assert!(candidates.iter().any(|candidate| candidate.url.ends_with(".zip")));
     }
 
     #[test]
-    fn test_url_generation_carries_format() {
-        let urls = GitlabProvider::generate_urls(
+    fn test_release_asset_candidate_generation_carries_format() {
+        let candidates = GitlabProvider::generate_release_asset_candidates(
             "https://gitlab.com/owner/repo",
             "mytool",
             &[],
@@ -420,29 +474,29 @@ mod tests {
             "x86_64-unknown-linux-gnu",
         );
 
-        for (url, format) in &urls {
-            if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
-                assert_eq!(*format, ArchiveFormat::TarGz);
-            } else if url.ends_with(".tar.xz") {
-                assert_eq!(*format, ArchiveFormat::TarXz);
-            } else if url.ends_with(".tar.zst") {
-                assert_eq!(*format, ArchiveFormat::TarZst);
-            } else if url.ends_with(".tar.bz2") {
-                assert_eq!(*format, ArchiveFormat::TarBz2);
-            } else if url.ends_with(".tar") {
-                assert_eq!(*format, ArchiveFormat::Tar);
-            } else if url.ends_with(".zip") {
-                assert_eq!(*format, ArchiveFormat::Zip);
-            } else if url.ends_with(".gz") {
-                assert_eq!(*format, ArchiveFormat::Gz);
-            } else if url.ends_with(".xz") {
-                assert_eq!(*format, ArchiveFormat::Xz);
-            } else if url.ends_with(".zst") {
-                assert_eq!(*format, ArchiveFormat::Zst);
-            } else if url.ends_with(".bz2") {
-                assert_eq!(*format, ArchiveFormat::Bz2);
+        for candidate in &candidates {
+            if candidate.url.ends_with(".tar.gz") || candidate.url.ends_with(".tgz") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::TarGz);
+            } else if candidate.url.ends_with(".tar.xz") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::TarXz);
+            } else if candidate.url.ends_with(".tar.zst") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::TarZst);
+            } else if candidate.url.ends_with(".tar.bz2") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::TarBz2);
+            } else if candidate.url.ends_with(".tar") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Tar);
+            } else if candidate.url.ends_with(".zip") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Zip);
+            } else if candidate.url.ends_with(".gz") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Gz);
+            } else if candidate.url.ends_with(".xz") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Xz);
+            } else if candidate.url.ends_with(".zst") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Zst);
+            } else if candidate.url.ends_with(".bz2") {
+                assert_eq!(candidate.archive_format, ArchiveFormat::Bz2);
             } else {
-                assert_eq!(*format, ArchiveFormat::NakedBinary);
+                assert_eq!(candidate.archive_format, ArchiveFormat::NakedBinary);
             }
         }
     }

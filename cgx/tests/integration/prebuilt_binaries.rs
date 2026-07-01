@@ -741,6 +741,56 @@ fn github_provider_resolves_tgz_binary() {
     assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 }
 
+/// Test that ripgrep's GitHub release archive resolves when the host target is one ripgrep
+/// publishes for 15.1.0. This exercises archives whose executable (`rg`) is inside a single
+/// top-level directory named after the crate/release (`ripgrep-...`).
+#[test]
+#[cfg(any(
+    all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(
+        target_os = "windows",
+        any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+    ),
+    all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
+    all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86", target_arch = "aarch64", target_arch = "s390x")
+    )
+))]
+fn github_provider_resolves_ripgrep_15_1_0() {
+    let mut cgx = Cgx::with_test_fs();
+
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("--prebuilt-binary")
+        .arg("always")
+        .arg("--prebuilt-binary-sources")
+        .arg("github-releases")
+        .arg("ripgrep@=15.1.0")
+        .arg("--version")
+        .assert_with_messages();
+
+    assert
+        .success()
+        .stdout(predicates::str::contains("ripgrep 15.1.0"));
+
+    let resolved = messages.iter().find_map(|m| match m {
+        Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+        _ => None,
+    });
+    let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+        "Should not have BuildMessage::Started when using prebuilt binary"
+    );
+}
+
 /// Test that `--prebuilt-binary-sources quickinstall` resolves via the Quickinstall provider only.
 ///
 /// Excluded on `x86_64-pc-windows-gnu` because cargo-quickinstall does not publish binaries for

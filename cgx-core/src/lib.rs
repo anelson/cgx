@@ -10,7 +10,7 @@ pub mod downloader;
 pub mod error;
 pub mod git;
 pub(crate) mod helpers;
-pub mod http;
+pub(crate) mod http;
 pub(crate) mod logging;
 pub mod messages;
 pub(crate) mod registry;
