@@ -1132,7 +1132,11 @@ bin-dir = "{{ name }}-{{ target }}/{{ bin }}{{ binary-ext }}"
         let ConclusiveResolution::Found(binary) = result else {
             panic!("expected binstall provider to resolve rendered bin-dir asset")
         };
-        assert_eq!(binary.path.file_name().unwrap().to_string_lossy(), "tool");
+        let expected_binary_filename = format!("tool{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(
+            binary.path.file_name().unwrap().to_string_lossy(),
+            expected_binary_filename
+        );
         assert!(binary.path.exists());
         mock.assert_calls(1);
     }
