@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{io::Read, path::Path, time::Duration};
 
 use backon::{BlockingRetryable, ExponentialBuilder};
-pub use bytes::Bytes;
-pub use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use bytes::Bytes;
+pub(crate) use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use reqwest::{
     StatusCode,
     blocking::{Client, Response},
@@ -12,6 +12,8 @@ use snafu::ResultExt;
 use crate::{Result, config::HttpConfig, error};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const API_RESPONSE_LIMIT_BYTES: usize = 1024 * 1024;
+pub(crate) const SMALL_DOWNLOAD_LIMIT_BYTES: usize = 64 * 1024;
 
 /// Build the cgx user agent string.
 ///
@@ -37,14 +39,14 @@ pub(crate) fn user_agent() -> String {
 /// and timeout (used as both connect timeout and stalled-transfer timeout threshold). See
 /// [`crate::git`] for details.
 #[derive(Debug, Clone)]
-pub struct HttpClient {
+pub(crate) struct HttpClient {
     client: Client,
     config: HttpConfig,
 }
 
 impl HttpClient {
     /// Build a new [`HttpClient`] with the given configuration.
-    pub fn new(config: &HttpConfig) -> Result<Self> {
+    pub(crate) fn new(config: &HttpConfig) -> Result<Self> {
         let mut builder = Client::builder()
             .user_agent(user_agent())
             .timeout(config.timeout)
@@ -71,7 +73,7 @@ impl HttpClient {
     ///
     /// This is provided for use with [`tame_index::index::RemoteSparseIndex`] which
     /// requires a client reference.
-    pub fn inner(&self) -> &Client {
+    pub(crate) fn inner(&self) -> &Client {
         &self.client
     }
 
@@ -81,7 +83,7 @@ impl HttpClient {
     ///
     /// Returns the response even if the status is non-success (except for retryable statuses);
     /// callers must inspect the status and handle non-2xx as needed.
-    pub fn get(&self, url: &str) -> Result<Response> {
+    pub(crate) fn get(&self, url: &str) -> Result<Response> {
         self.get_with_headers(url, &HeaderMap::new())
     }
 
@@ -90,7 +92,7 @@ impl HttpClient {
     /// Retries on 429 (rate limit), 5xx (server errors), and connection errors.
     /// Returns the response even if the status is non-success (except for retryable statuses);
     /// callers must inspect the status and handle non-2xx as needed.
-    pub fn get_with_headers(&self, url: &str, headers: &HeaderMap) -> Result<Response> {
+    pub(crate) fn get_with_headers(&self, url: &str, headers: &HeaderMap) -> Result<Response> {
         self.get_with_headers_retrying_status(url, headers, Self::standard_should_retry_status)
     }
 
@@ -142,15 +144,6 @@ impl HttpClient {
             .call()
     }
 
-    /// Perform a HEAD request with retry on transient errors.
-    ///
-    /// Retries on 429 (rate limit), 5xx (server errors), and connection errors.
-    /// Returns the response even if the status is non-success (except for retryable statuses);
-    /// callers must inspect the status and handle non-2xx as needed.
-    pub fn head(&self, url: &str) -> Result<Response> {
-        self.head_retrying_status(url, Self::standard_should_retry_status)
-    }
-
     /// Perform a HEAD request with a custom status retry policy.
     ///
     /// Transport errors continue to use the standard retry policy; `should_retry_status` controls
@@ -184,16 +177,62 @@ impl HttpClient {
             .call()
     }
 
-    /// Attempt to download a file from the given URL with retry.
+    /// Attempt to download a URL to a file with retry.
     ///
-    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404
-    /// (resource does not exist), or `Err` for any other failure (network errors,
-    /// non-404 HTTP errors after retries).
+    /// Returns `Ok(true)` on success, `Ok(false)` if the server returned 404 (resource does not
+    /// exist), or `Err` for any other failure.
+    pub(crate) fn try_download_to_file(&self, url: &str, path: &Path) -> Result<bool> {
+        self.try_download_to_file_retrying_status(url, path, Self::standard_should_retry_status)
+    }
+
+    /// Attempt to download a URL to a file using a custom HTTP status retry policy.
     ///
-    /// This is a convenience method that encapsulates the common pattern used by
-    /// all binary providers.
-    pub fn try_download(&self, url: &str) -> Result<Option<Bytes>> {
-        let response = self.get(url)?;
+    /// Returns `Ok(true)` on success, `Ok(false)` if the server returned 404 (resource does not
+    /// exist), or `Err` for any other failure.
+    pub(crate) fn try_download_to_file_retrying_status(
+        &self,
+        url: &str,
+        path: &Path,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<bool> {
+        let response = self.get_retrying_status(url, should_retry_status)?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+
+        if !response.status().is_success() {
+            return error::HttpStatusSnafu {
+                url: url.to_string(),
+                status: response.status().as_u16(),
+            }
+            .fail();
+        }
+
+        Self::response_body_to_file(response, url, path)?;
+
+        Ok(true)
+    }
+
+    /// Attempt to download a URL into memory, failing if the body exceeds `max_bytes`.
+    ///
+    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource does
+    /// not exist), or `Err` for any other failure.
+    pub(crate) fn try_download_bytes(&self, url: &str, max_bytes: usize) -> Result<Option<Bytes>> {
+        self.try_download_bytes_retrying_status(url, max_bytes, Self::standard_should_retry_status)
+    }
+
+    /// Attempt to download a URL into memory using a custom HTTP status retry policy.
+    ///
+    /// Returns `Ok(Some(bytes))` on success, `Ok(None)` if the server returned 404 (resource does
+    /// not exist), or `Err` for any other failure.
+    pub(crate) fn try_download_bytes_retrying_status(
+        &self,
+        url: &str,
+        max_bytes: usize,
+        should_retry_status: fn(StatusCode) -> bool,
+    ) -> Result<Option<Bytes>> {
+        let response = self.get_retrying_status(url, should_retry_status)?;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
@@ -207,11 +246,52 @@ impl HttpClient {
             .fail();
         }
 
-        let bytes = response
-            .bytes()
-            .with_context(|_| error::HttpRequestSnafu { url: url.to_string() })?;
+        Self::response_body_to_bytes(response, url, max_bytes).map(Some)
+    }
 
-        Ok(Some(bytes))
+    pub(crate) fn response_body_to_file(mut response: Response, url: &str, path: &Path) -> Result<()> {
+        let mut file = std::fs::File::create(path).with_context(|_| error::IoSnafu {
+            path: path.to_path_buf(),
+        })?;
+
+        std::io::copy(&mut response, &mut file).map_err(|source| error::Error::HttpDownloadToFile {
+            url: url.to_string(),
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        Ok(())
+    }
+
+    pub(crate) fn response_body_to_string(response: Response, url: &str, max_bytes: usize) -> Result<String> {
+        let bytes = Self::response_body_to_bytes(response, url, max_bytes)?;
+        String::from_utf8(bytes.to_vec()).map_err(|source| error::Error::HttpResponseUtf8 {
+            url: url.to_string(),
+            source,
+        })
+    }
+
+    fn response_body_to_bytes(response: Response, url: &str, max_bytes: usize) -> Result<Bytes> {
+        let mut bytes = Vec::new();
+        let read_limit = u64::try_from(max_bytes).unwrap_or(u64::MAX - 1).saturating_add(1);
+        let mut limited = response.take(read_limit);
+
+        limited
+            .read_to_end(&mut bytes)
+            .map_err(|source| error::Error::HttpResponseRead {
+                url: url.to_string(),
+                source,
+            })?;
+
+        if bytes.len() > max_bytes {
+            return error::HttpResponseTooLargeSnafu {
+                url: url.to_string(),
+                limit: max_bytes,
+            }
+            .fail();
+        }
+
+        Ok(Bytes::from(bytes))
     }
 
     fn build_backoff(&self) -> ExponentialBuilder {
@@ -223,7 +303,7 @@ impl HttpClient {
     }
 
     /// Return whether a status should be retried by the default HTTP policy.
-    pub(crate) fn standard_should_retry_status(status: StatusCode) -> bool {
+    fn standard_should_retry_status(status: StatusCode) -> bool {
         status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
     }
 
@@ -580,13 +660,15 @@ mod tests {
         }
     }
 
-    mod try_download_tests {
+    mod download_tests {
         use httpmock::{HttpMockRequest, HttpMockResponse, prelude::*};
 
         use super::*;
 
+        const TEST_DOWNLOAD_LIMIT_BYTES: usize = 12;
+
         #[test]
-        fn test_try_download_200_returns_some_bytes() {
+        fn test_try_download_to_file_200_writes_file_and_returns_true() {
             let server = MockServer::start();
             server.mock(|when, then| {
                 when.method(GET).path("/binary");
@@ -594,12 +676,16 @@ mod tests {
             });
 
             let client = HttpClient::new(&fast_retry_config()).unwrap();
-            let result = client.try_download(&server.url("/binary")).unwrap();
-            assert_eq!(result, Some(Bytes::from("file-content")));
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let result = client
+                .try_download_to_file(&server.url("/binary"), file.path())
+                .unwrap();
+            assert!(result);
+            assert_eq!(std::fs::read_to_string(file.path()).unwrap(), "file-content");
         }
 
         #[test]
-        fn test_try_download_404_returns_none() {
+        fn test_try_download_to_file_404_returns_false() {
             let server = MockServer::start();
             server.mock(|when, then| {
                 when.method(GET).path("/missing");
@@ -607,12 +693,15 @@ mod tests {
             });
 
             let client = HttpClient::new(&fast_retry_config()).unwrap();
-            let result = client.try_download(&server.url("/missing")).unwrap();
-            assert_eq!(result, None);
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let result = client
+                .try_download_to_file(&server.url("/missing"), file.path())
+                .unwrap();
+            assert!(!result);
         }
 
         #[test]
-        fn test_try_download_403_returns_error() {
+        fn test_try_download_to_file_403_returns_error() {
             let server = MockServer::start();
             server.mock(|when, then| {
                 when.method(GET).path("/denied");
@@ -620,12 +709,13 @@ mod tests {
             });
 
             let client = HttpClient::new(&fast_retry_config()).unwrap();
-            let result = client.try_download(&server.url("/denied"));
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let result = client.try_download_to_file(&server.url("/denied"), file.path());
             assert_matches!(result, Err(error::Error::HttpStatus { status: 403, .. }));
         }
 
         #[test]
-        fn test_try_download_retries_then_succeeds() {
+        fn test_try_download_to_file_retries_then_succeeds() {
             let server = MockServer::start();
             let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let call_count_for_mock = std::sync::Arc::clone(&call_count);
@@ -644,9 +734,71 @@ mod tests {
 
             let retry_config = fast_retry_config();
             let retry_client = HttpClient::new(&retry_config).unwrap();
-            let result = retry_client.try_download(&server.url("/flaky")).unwrap();
-            assert_eq!(result, Some(Bytes::from("recovered")));
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let result = retry_client
+                .try_download_to_file(&server.url("/flaky"), file.path())
+                .unwrap();
+            assert!(result);
+            assert_eq!(std::fs::read_to_string(file.path()).unwrap(), "recovered");
             mock.assert_calls(2);
+        }
+
+        #[test]
+        fn test_try_download_bytes_200_returns_some_bytes() {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/binary");
+                then.status(200).body("file-content");
+            });
+
+            let client = HttpClient::new(&fast_retry_config()).unwrap();
+            let result = client
+                .try_download_bytes(&server.url("/binary"), TEST_DOWNLOAD_LIMIT_BYTES)
+                .unwrap();
+            assert_eq!(result, Some(Bytes::from("file-content")));
+        }
+
+        #[test]
+        fn test_try_download_bytes_404_returns_none() {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/missing");
+                then.status(404);
+            });
+
+            let client = HttpClient::new(&fast_retry_config()).unwrap();
+            let result = client
+                .try_download_bytes(&server.url("/missing"), TEST_DOWNLOAD_LIMIT_BYTES)
+                .unwrap();
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn test_try_download_bytes_exact_limit_succeeds() {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/exact");
+                then.status(200).body("123456789012");
+            });
+
+            let client = HttpClient::new(&fast_retry_config()).unwrap();
+            let result = client
+                .try_download_bytes(&server.url("/exact"), TEST_DOWNLOAD_LIMIT_BYTES)
+                .unwrap();
+            assert_eq!(result, Some(Bytes::from("123456789012")));
+        }
+
+        #[test]
+        fn test_try_download_bytes_over_limit_errors() {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(GET).path("/too-large");
+                then.status(200).body("1234567890123");
+            });
+
+            let client = HttpClient::new(&fast_retry_config()).unwrap();
+            let result = client.try_download_bytes(&server.url("/too-large"), TEST_DOWNLOAD_LIMIT_BYTES);
+            assert_matches!(result, Err(error::Error::HttpResponseTooLarge { .. }));
         }
     }
 
@@ -705,7 +857,12 @@ mod tests {
             });
 
             let client = HttpClient::new(&fast_retry_config()).unwrap();
-            let response = client.head(&server.url("/head-check")).unwrap();
+            let response = client
+                .head_retrying_status(
+                    &server.url("/head-check"),
+                    HttpClient::standard_should_retry_status,
+                )
+                .unwrap();
             assert_eq!(response.status(), 200);
             mock.assert();
         }
@@ -725,7 +882,10 @@ mod tests {
                 ..Default::default()
             };
             let client = HttpClient::new(&config).unwrap();
-            let result = client.head(&server.url("/head-ratelimit"));
+            let result = client.head_retrying_status(
+                &server.url("/head-ratelimit"),
+                HttpClient::standard_should_retry_status,
+            );
             assert_matches!(result, Err(error::Error::HttpStatus { status: 429, .. }));
             mock.assert_calls(2);
         }
@@ -745,7 +905,10 @@ mod tests {
                 ..Default::default()
             };
             let client = HttpClient::new(&config).unwrap();
-            let result = client.head(&server.url("/head-error"));
+            let result = client.head_retrying_status(
+                &server.url("/head-error"),
+                HttpClient::standard_should_retry_status,
+            );
             assert_matches!(result, Err(error::Error::HttpStatus { status: 500, .. }));
             mock.assert_calls(2);
         }

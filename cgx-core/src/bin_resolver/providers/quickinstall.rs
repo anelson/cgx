@@ -12,7 +12,7 @@ use crate::{
     crate_resolver::ResolvedCrate,
     downloader::DownloadedCrate,
     error,
-    http::{Bytes, HttpClient},
+    http::HttpClient,
     messages::PrebuiltBinaryMessage,
 };
 
@@ -40,10 +40,6 @@ impl QuickinstallProvider {
         let tag = format!("{}-{}", krate.name, krate.version);
         format!("{base}/{tag}/{tag}-{platform}.tar.gz")
     }
-
-    fn download_file(&self, url: &str) -> Result<Option<Bytes>> {
-        self.http_client.try_download(url)
-    }
 }
 
 impl Provider for QuickinstallProvider {
@@ -57,9 +53,14 @@ impl Provider for QuickinstallProvider {
         self.reporter
             .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Quickinstall));
 
-        let data = match self.download_file(&url) {
-            Ok(Some(data)) => data,
-            Ok(None) => {
+        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
+            parent: self.cache_dir.clone(),
+        })?;
+
+        let archive_path = temp_dir.path().join(ArchiveFormat::TarGz.canonical_filename());
+        match self.http_client.try_download_to_file(&url, &archive_path) {
+            Ok(true) => {}
+            Ok(false) => {
                 self.reporter.report(|| {
                     PrebuiltBinaryMessage::provider_has_no_binary(
                         BinaryProvider::Quickinstall,
@@ -73,19 +74,17 @@ impl Provider for QuickinstallProvider {
 
         // TODO(#80): verify .sig (minisign) signatures when support is added
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
-
-        let archive_path = temp_dir.path().join(ArchiveFormat::TarGz.canonical_filename());
-        std::fs::write(&archive_path, &data).with_context(|_| error::IoSnafu {
-            path: archive_path.clone(),
-        })?;
-
         let binary_name = krate.default_binary_name()?;
         let extract_dir = temp_dir.path().join("extracted");
-        let binary_path =
-            super::extract_binary(&archive_path, ArchiveFormat::TarGz, &binary_name, &extract_dir)?;
+        let binary_path = super::extract_binary_by_candidate_names(
+            &archive_path,
+            ArchiveFormat::TarGz,
+            &[&binary_name],
+            &extract_dir,
+        )
+        .map_err(|source| {
+            super::provider_asset_preparation_failed(BinaryProvider::Quickinstall, &url, source)
+        })?;
 
         let final_dir = self
             .cache_dir

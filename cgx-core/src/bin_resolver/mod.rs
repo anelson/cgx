@@ -374,8 +374,9 @@ impl DefaultBinaryResolver {
         let resolved = &krate.resolved;
         let mut results = Vec::with_capacity(self.providers.len());
         for provider in &self.providers {
+            let provider_kind = provider.kind();
             self.reporter
-                .report(|| PrebuiltBinaryMessage::checking_provider(resolved, provider.kind()));
+                .report(|| PrebuiltBinaryMessage::checking_provider(resolved, provider_kind));
 
             // Invoke the provider, and based on the outcome construct the BinaryResolution result.
             //
@@ -390,9 +391,13 @@ impl DefaultBinaryResolver {
             // to return an error, nor should it result in a permanent negative cache entry.
             let resolution = match provider.try_resolve(krate, platform) {
                 Ok(resolution) => BinaryResolution::from(resolution),
-                Err(source) => BinaryResolution::Inconclusive {
-                    source: Box::new(source),
-                },
+                Err(source) => {
+                    self.reporter
+                        .report(|| PrebuiltBinaryMessage::provider_failed(provider_kind, source.to_string()));
+                    BinaryResolution::Inconclusive {
+                        source: Box::new(source),
+                    }
+                }
             };
             let found = matches!(resolution, BinaryResolution::Found(_));
             results.push(resolution);

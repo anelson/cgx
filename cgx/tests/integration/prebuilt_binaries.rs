@@ -478,402 +478,518 @@ fn refresh_bypasses_binary_cache() {
     );
 }
 
-/// Test that `--prebuilt-binary-sources binstall` resolves via the Binstall provider only.
-///
-/// Uses git-gamble because it has binstall metadata with an override for x86_64-unknown-linux-gnu.
-/// The `--no-exec` flag is required because git-gamble's pre-built binary is linked against NixOS
-/// glibc and won't execute on non-Nix systems.
-///
-/// Gated to `target_env = "gnu"` because git-gamble's binstall `pkg-url` override only covers
-/// `x86_64-unknown-linux-gnu`, not musl.
-#[test]
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
-fn binstall_provider_resolves_binary() {
-    let mut cgx = Cgx::with_test_fs();
+mod binstall {
+    use super::*;
 
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("binstall")
-        .arg("--no-exec")
-        .arg("git-gamble@=2.11.0")
-        .assert_with_messages();
+    fn assert_binstall_resolves(package: &str) {
+        let mut cgx = Cgx::with_test_fs();
 
-    assert.success();
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("binstall")
+            .arg("--no-exec")
+            .arg(package)
+            .assert_with_messages();
 
-    let providers: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
-                Some(*provider)
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !providers.is_empty(),
-        "Expected at least one CheckingProvider message"
-    );
-    assert!(
-        providers.iter().all(|p| *p == BinaryProvider::Binstall),
-        "Expected only Binstall provider, got: {:?}",
-        providers
-    );
+        assert.success();
 
-    let resolved = messages.iter().find_map(|m| match m {
-        Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
-        _ => None,
-    });
-    let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
-    assert_eq!(binary.provider, BinaryProvider::Binstall);
-
-    assert!(
-        !messages
+        let providers: Vec<_> = messages
             .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when using prebuilt binary"
-    );
-}
+            .filter_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
+                    Some(*provider)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "Expected at least one CheckingProvider message"
+        );
+        assert!(
+            providers.iter().all(|p| *p == BinaryProvider::Binstall),
+            "Expected only Binstall provider, got: {:?}",
+            providers
+        );
 
-/// Test that `--prebuilt-binary-sources github-releases` resolves via the GitHub provider only.
-///
-/// eza version 0.23.1 published GitHub release assets for Linux GNU, x86_64 Linux musl, and
-/// `x86_64-pc-windows-gnu` only (no macOS, no windows-msvc, no aarch64 Linux musl).
-#[test]
-#[cfg(any(
-    all(target_os = "linux", not(all(target_arch = "aarch64", target_env = "musl"))),
-    all(target_os = "windows", target_env = "gnu")
-))]
-fn github_provider_resolves_binary() {
-    let mut cgx = Cgx::with_test_fs();
-
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("github-releases")
-        .arg("eza@=0.23.1")
-        .arg("--version")
-        .assert_with_messages();
-
-    assert.success().stdout(predicates::str::contains("eza"));
-
-    let providers: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
-                Some(*provider)
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !providers.is_empty(),
-        "Expected at least one CheckingProvider message"
-    );
-    assert!(
-        providers.iter().all(|p| *p == BinaryProvider::GithubReleases),
-        "Expected only GithubReleases provider, got: {:?}",
-        providers
-    );
-
-    let resolved = messages.iter().find_map(|m| match m {
-        Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
-        _ => None,
-    });
-    let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
-    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
-
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when using prebuilt binary"
-    );
-}
-
-/// Regression test for #206: `taplo-cli` resolves its prebuilt binary from GitHub releases.
-///
-/// This exercises all three of the asset-matching heuristics the fix added: the asset is named
-/// after the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform token
-/// (`taplo-linux-x86_64`, not the full triple), and on Linux/macOS is a bare `.gz` (a gzipped
-/// binary, not a tarball). `--no-exec` runs the full download+extract path — so the naked-`.gz`
-/// extraction is covered end to end — without executing the binary, sidestepping any glibc/musl
-/// run-host mismatch. Gated to the OS/arch combinations for which taplo publishes an asset that the
-/// `{os}-{arch}` alias matches.
-#[test]
-#[cfg(all(
-    any(target_os = "linux", target_os = "macos", target_os = "windows"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-fn github_provider_resolves_taplo_cli_via_binary_name() {
-    let mut cgx = Cgx::with_test_fs();
-
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("github-releases")
-        .arg("--no-exec")
-        .arg("taplo-cli@=0.10.0")
-        .assert_with_messages();
-
-    // `--no-exec` prints the resolved binary path; it is named after the `taplo` binary target.
-    assert.success().stdout(predicates::str::contains("taplo"));
-
-    let binary = messages
-        .iter()
-        .find_map(|m| match m {
+        let resolved = messages.iter().find_map(|m| match m {
             Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
             _ => None,
-        })
-        .expect("Expected PrebuiltBinaryMessage::Resolved");
-    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::Binstall);
 
-    assert_prebuilt(&messages);
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
 
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when using prebuilt binary"
-    );
+    /// Test that `--prebuilt-binary-sources binstall` resolves via the Binstall provider only.
+    ///
+    /// Uses git-gamble because it has binstall metadata with an override for
+    /// x86_64-unknown-linux-gnu. The `--no-exec` flag is required because git-gamble's
+    /// pre-built binary is linked against NixOS glibc and won't execute on non-Nix systems.
+    ///
+    /// Gated to `target_env = "gnu"` because git-gamble's binstall `pkg-url` override only covers
+    /// `x86_64-unknown-linux-gnu`, not musl.
+    #[test]
+    #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+    fn binstall_provider_resolves_binary() {
+        assert_binstall_resolves("git-gamble@=2.11.0");
+    }
+
+    /// cargo-binstall's manifest uses `{ archive-format }` in `pkg-url`.
+    #[test]
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_env = "gnu", target_env = "musl")
+        ),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+    ))]
+    fn binstall_provider_resolves_cargo_binstall_archive_format_template() {
+        assert_binstall_resolves("cargo-binstall@=1.20.1");
+    }
+
+    /// wasmtime-cli uses compact placeholders plus `{ target-arch }` and `{ target-family }`.
+    #[test]
+    #[cfg(any(
+        all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(target_os = "windows", target_arch = "x86_64")
+    ))]
+    fn binstall_provider_resolves_wasmtime_target_placeholders() {
+        assert_binstall_resolves("wasmtime-cli@=45.0.2");
+    }
+
+    /// wit-deps-cli uses compact placeholders and exact overrides with `pkg-fmt = "bin"`.
+    #[test]
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_env = "gnu", target_env = "musl")
+        ),
+        all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            any(target_env = "gnu", target_env = "msvc")
+        )
+    ))]
+    fn binstall_provider_resolves_wit_deps_exact_overrides_with_target_placeholders() {
+        assert_binstall_resolves("wit-deps-cli@=0.6.0");
+    }
 }
 
-/// Test that GitHub Releases correctly reports no eza binary for aarch64 Linux musl.
-#[test]
-#[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))]
-fn github_provider_reports_no_aarch64_musl_binary() {
-    let mut cgx = Cgx::with_test_fs();
+mod github_releases {
+    use super::*;
 
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("github-releases")
-        .arg("eza@=0.23.1")
-        .arg("--version")
-        .assert_with_messages();
+    /// Test that `--prebuilt-binary-sources github-releases` resolves via the GitHub provider only.
+    ///
+    /// eza version 0.23.1 published GitHub release assets for Linux GNU, x86_64 Linux musl, and
+    /// `x86_64-pc-windows-gnu` only (no macOS, no windows-msvc, no aarch64 Linux musl).
+    #[test]
+    #[cfg(any(
+        all(target_os = "linux", not(all(target_arch = "aarch64", target_env = "musl"))),
+        all(target_os = "windows", target_env = "gnu")
+    ))]
+    fn github_provider_resolves_binary() {
+        let mut cgx = Cgx::with_test_fs();
 
-    assert.failure();
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("eza@=0.23.1")
+            .arg("--version")
+            .assert_with_messages();
 
-    let providers: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
-                Some(*provider)
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !providers.is_empty(),
-        "Expected at least one CheckingProvider message"
-    );
-    assert!(
-        providers.iter().all(|p| *p == BinaryProvider::GithubReleases),
-        "Expected only GithubReleases provider, got: {:?}",
-        providers
-    );
+        assert.success().stdout(predicates::str::contains("eza"));
 
-    assert!(
-        messages.iter().any(|m| matches!(
-            m,
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::ProviderHasNoBinary {
-                provider: BinaryProvider::GithubReleases,
-                ..
+        let providers: Vec<_> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
+                    Some(*provider)
+                }
+                _ => None,
             })
-        )),
-        "Expected ProviderHasNoBinary for GithubReleases"
-    );
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "Expected at least one CheckingProvider message"
+        );
+        assert!(
+            providers.iter().all(|p| *p == BinaryProvider::GithubReleases),
+            "Expected only GithubReleases provider, got: {:?}",
+            providers
+        );
 
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
-        "Should not have Resolved for aarch64 Linux musl"
-    );
-
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when prebuilt binaries are required"
-    );
-}
-
-/// Test that `.tgz` archive suffix is matched by the GitHub provider.
-///
-/// cargo-binstall publishes Linux releases as `.tgz` files, exercising the `.tgz` candidate
-/// generation added alongside `.tar.gz`.
-#[test]
-#[cfg(target_os = "linux")]
-fn github_provider_resolves_tgz_binary() {
-    let mut cgx = Cgx::with_test_fs();
-
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("github-releases")
-        .arg("--no-exec")
-        .arg("cargo-binstall@=1.14.0")
-        .assert_with_messages();
-
-    assert.success();
-
-    let resolved = messages.iter().find_map(|m| match m {
-        Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
-        _ => None,
-    });
-    let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
-    assert_eq!(binary.provider, BinaryProvider::GithubReleases);
-}
-
-/// Test that `--prebuilt-binary-sources quickinstall` resolves via the Quickinstall provider only.
-///
-/// Excluded on `x86_64-pc-windows-gnu` because cargo-quickinstall does not publish binaries for
-/// that target (only `x86_64-pc-windows-msvc`).
-#[cfg(not(all(target_os = "windows", target_env = "gnu")))]
-#[test]
-fn quickinstall_provider_resolves_binary() {
-    let mut cgx = Cgx::with_test_fs();
-
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("quickinstall")
-        .arg("eza@=0.23.1")
-        .arg("--version")
-        .assert_with_messages();
-
-    assert.success().stdout(predicates::str::contains("eza"));
-
-    let providers: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
-                Some(*provider)
-            }
+        let resolved = messages.iter().find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
             _ => None,
-        })
-        .collect();
-    assert!(
-        !providers.is_empty(),
-        "Expected at least one CheckingProvider message"
-    );
-    assert!(
-        providers.iter().all(|p| *p == BinaryProvider::Quickinstall),
-        "Expected only Quickinstall provider, got: {:?}",
-        providers
-    );
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
-    let resolved = messages.iter().find_map(|m| match m {
-        Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
-        _ => None,
-    });
-    let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
-    assert_eq!(binary.provider, BinaryProvider::Quickinstall);
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
 
-    assert!(
-        !messages
+    /// Regression test for #206: `taplo-cli` resolves its prebuilt binary from GitHub releases.
+    ///
+    /// This exercises all three of the asset-matching heuristics the fix added: the asset is named
+    /// after the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform
+    /// token (`taplo-linux-x86_64`, not the full triple), and on Linux/macOS is a bare `.gz` (a
+    /// gzipped binary, not a tarball). `--no-exec` runs the full download+extract path — so the
+    /// naked-`.gz` extraction is covered end to end — without executing the binary,
+    /// sidestepping any glibc/musl run-host mismatch. Gated to the OS/arch combinations for
+    /// which taplo publishes an asset that the `{os}-{arch}` alias matches.
+    #[test]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos", target_os = "windows"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn github_provider_resolves_taplo_cli_via_binary_name() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("--no-exec")
+            .arg("taplo-cli@=0.10.0")
+            .assert_with_messages();
+
+        // `--no-exec` prints the resolved binary path; it is named after the `taplo` binary target.
+        assert.success().stdout(predicates::str::contains("taplo"));
+
+        let binary = messages
             .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Should not have BuildMessage::Started when using prebuilt binary"
-    );
-}
-
-/// Test that `--prebuilt-binary always --prebuilt-binary-sources gitlab-releases` fails for a
-/// GitHub-hosted crate, proving the sources flag restricts which providers are tried.
-#[test]
-fn gitlab_only_fails_for_github_crate() {
-    let mut cgx = Cgx::with_test_fs();
-
-    cgx.cmd
-        .arg("--prebuilt-binary")
-        .arg("always")
-        .arg("--prebuilt-binary-sources")
-        .arg("gitlab-releases")
-        .arg("eza@=0.23.1")
-        .arg("--version")
-        .assert()
-        .failure();
-}
-
-/// Test that `--prebuilt-binary-sources gitlab-releases` in auto mode reports no binary from
-/// GitLab for a GitHub-hosted crate, then falls back to source build.
-#[test]
-fn gitlab_provider_reports_no_binary_for_github_crate() {
-    let mut cgx = Cgx::with_test_fs();
-
-    let (assert, messages) = cgx
-        .cmd
-        .with_json_messages()
-        .arg("--prebuilt-binary-sources")
-        .arg("gitlab-releases")
-        .arg("eza@=0.23.1")
-        .arg("--version")
-        .assert_with_messages();
-
-    assert.success();
-
-    let providers: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
-                Some(*provider)
-            }
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !providers.is_empty(),
-        "Expected at least one CheckingProvider message"
-    );
-    assert!(
-        providers.iter().all(|p| *p == BinaryProvider::GitlabReleases),
-        "Expected only GitlabReleases provider, got: {:?}",
-        providers
-    );
-
-    assert!(
-        messages.iter().any(|m| matches!(
-            m,
-            Message::PrebuiltBinary(PrebuiltBinaryMessage::ProviderHasNoBinary {
-                provider: BinaryProvider::GitlabReleases,
-                ..
+            .find_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+                _ => None,
             })
-        )),
-        "Expected ProviderHasNoBinary for GitlabReleases"
-    );
+            .expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
-    assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
-        "Should not have Resolved when GitLab provider can't find a GitHub crate"
-    );
+        assert_prebuilt(&messages);
 
-    assert!(
-        messages
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
+
+    /// Test that GitHub Releases correctly reports no eza binary for aarch64 Linux musl.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux", target_env = "musl"))]
+    fn github_provider_reports_no_aarch64_musl_binary() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("eza@=0.23.1")
+            .arg("--version")
+            .assert_with_messages();
+
+        assert.failure();
+
+        let providers: Vec<_> = messages
             .iter()
-            .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
-        "Expected BuildMessage::Started as fallback to source build"
-    );
+            .filter_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
+                    Some(*provider)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "Expected at least one CheckingProvider message"
+        );
+        assert!(
+            providers.iter().all(|p| *p == BinaryProvider::GithubReleases),
+            "Expected only GithubReleases provider, got: {:?}",
+            providers
+        );
+
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::ProviderHasNoBinary {
+                    provider: BinaryProvider::GithubReleases,
+                    ..
+                })
+            )),
+            "Expected ProviderHasNoBinary for GithubReleases"
+        );
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
+            "Should not have Resolved for aarch64 Linux musl"
+        );
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when prebuilt binaries are required"
+        );
+    }
+
+    /// Test that `.tgz` archive suffix is matched by the GitHub provider.
+    ///
+    /// cargo-binstall publishes Linux releases as `.tgz` files, exercising the `.tgz` candidate
+    /// generation added alongside `.tar.gz`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn github_provider_resolves_tgz_binary() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("--no-exec")
+            .arg("cargo-binstall@=1.14.0")
+            .assert_with_messages();
+
+        assert.success();
+
+        let resolved = messages.iter().find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+    }
+
+    /// Test that ripgrep's GitHub release archive resolves when the host target is one ripgrep
+    /// publishes for 15.1.0. This exercises archives whose executable (`rg`) is inside a single
+    /// top-level directory named after the crate/release (`ripgrep-...`).
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86", target_arch = "aarch64", target_arch = "s390x")
+        )
+    ))]
+    fn github_provider_resolves_ripgrep_15_1_0() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("ripgrep@=15.1.0")
+            .arg("--version")
+            .assert_with_messages();
+
+        assert
+            .success()
+            .stdout(predicates::str::contains("ripgrep 15.1.0"));
+
+        let resolved = messages.iter().find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
+}
+
+mod quickinstall {
+    use super::*;
+
+    /// Test that `--prebuilt-binary-sources quickinstall` resolves via the Quickinstall provider
+    /// only.
+    ///
+    /// Excluded on `x86_64-pc-windows-gnu` because cargo-quickinstall does not publish binaries for
+    /// that target (only `x86_64-pc-windows-msvc`).
+    #[cfg(not(all(target_os = "windows", target_env = "gnu")))]
+    #[test]
+    fn quickinstall_provider_resolves_binary() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("quickinstall")
+            .arg("eza@=0.23.1")
+            .arg("--version")
+            .assert_with_messages();
+
+        assert.success().stdout(predicates::str::contains("eza"));
+
+        let providers: Vec<_> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
+                    Some(*provider)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "Expected at least one CheckingProvider message"
+        );
+        assert!(
+            providers.iter().all(|p| *p == BinaryProvider::Quickinstall),
+            "Expected only Quickinstall provider, got: {:?}",
+            providers
+        );
+
+        let resolved = messages.iter().find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::Quickinstall);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
+}
+
+mod gitlab_releases {
+    use super::*;
+
+    /// Test that `--prebuilt-binary always --prebuilt-binary-sources gitlab-releases` fails for a
+    /// GitHub-hosted crate, proving the sources flag restricts which providers are tried.
+    #[test]
+    fn gitlab_only_fails_for_github_crate() {
+        let mut cgx = Cgx::with_test_fs();
+
+        cgx.cmd
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("gitlab-releases")
+            .arg("eza@=0.23.1")
+            .arg("--version")
+            .assert()
+            .failure();
+    }
+
+    /// Test that `--prebuilt-binary-sources gitlab-releases` in auto mode reports no binary from
+    /// GitLab for a GitHub-hosted crate, then falls back to source build.
+    #[test]
+    fn gitlab_provider_reports_no_binary_for_github_crate() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary-sources")
+            .arg("gitlab-releases")
+            .arg("eza@=0.23.1")
+            .arg("--version")
+            .assert_with_messages();
+
+        assert.success();
+
+        let providers: Vec<_> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::CheckingProvider { provider, .. }) => {
+                    Some(*provider)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !providers.is_empty(),
+            "Expected at least one CheckingProvider message"
+        );
+        assert!(
+            providers.iter().all(|p| *p == BinaryProvider::GitlabReleases),
+            "Expected only GitlabReleases provider, got: {:?}",
+            providers
+        );
+
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::ProviderHasNoBinary {
+                    provider: BinaryProvider::GitlabReleases,
+                    ..
+                })
+            )),
+            "Expected ProviderHasNoBinary for GitlabReleases"
+        );
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
+            "Should not have Resolved when GitLab provider can't find a GitHub crate"
+        );
+
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Expected BuildMessage::Started as fallback to source build"
+        );
+    }
 }
 
 /// Test that `--prebuilt-binary-sources` with multiple providers restricts to only those providers.
