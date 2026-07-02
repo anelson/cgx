@@ -78,7 +78,7 @@ impl CgxMessage {
         Self::CratePlan {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: options.target_platform().to_string(),
             options: options.clone(),
         }
     }
@@ -94,7 +94,7 @@ impl CgxMessage {
         Self::CrateProvenance {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: options.target_platform().to_string(),
             options: options.clone(),
             provenance: Provenance::BuiltFromSource {
                 binary_path: binary_path.to_path_buf(),
@@ -114,7 +114,7 @@ impl CgxMessage {
         Self::CrateProvenance {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: options.target_platform().to_string(),
             options: options.clone(),
             provenance: Provenance::Prebuilt {
                 provider,

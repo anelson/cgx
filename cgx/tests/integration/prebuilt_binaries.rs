@@ -597,11 +597,13 @@ mod github_releases {
     /// Test that `--prebuilt-binary-sources github-releases` resolves via the GitHub provider only.
     ///
     /// eza version 0.23.1 published GitHub release assets for Linux GNU, x86_64 Linux musl, and
-    /// `x86_64-pc-windows-gnu` only (no macOS, no windows-msvc, no aarch64 Linux musl).
+    /// `x86_64-pc-windows-gnu` only (no macOS, no windows-msvc, no aarch64 Linux musl). The
+    /// `x86_64-pc-windows-msvc` host is included below to prove the ABI-compatible fallback: with
+    /// no msvc asset, an msvc host resolves and runs eza's `x86_64-pc-windows-gnu` PE.
     #[test]
     #[cfg(any(
         all(target_os = "linux", not(all(target_arch = "aarch64", target_env = "musl"))),
-        all(target_os = "windows", target_env = "gnu")
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     fn github_provider_resolves_binary() {
         let mut cgx = Cgx::with_test_fs();
@@ -800,18 +802,19 @@ mod github_releases {
     /// Test that ripgrep's GitHub release archive resolves when the host target is one ripgrep
     /// publishes for 15.1.0. This exercises archives whose executable (`rg`) is inside a single
     /// top-level directory named after the crate/release (`ripgrep-...`).
+    ///
+    /// ripgrep 15.1.0 publishes no `x86_64-unknown-linux-gnu` asset, only
+    /// `x86_64-unknown-linux-musl`. `x86_64-unknown-linux-gnu` is included below to prove the
+    /// ABI-compatible fallback: a glibc host resolves and runs the musl static binary.
     #[test]
     #[cfg(any(
         all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
-        all(
-            target_os = "windows",
-            any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
-        ),
+        all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")),
         all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
         all(
             target_os = "linux",
             target_env = "gnu",
-            any(target_arch = "x86", target_arch = "aarch64", target_arch = "s390x")
+            any(target_arch = "x86_64", target_arch = "aarch64")
         )
     ))]
     fn github_provider_resolves_ripgrep_15_1_0() {
@@ -845,6 +848,193 @@ mod github_releases {
                 .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
             "Should not have BuildMessage::Started when using prebuilt binary"
         );
+    }
+
+    /// Test that `just@1.42.4` resolves via an ABI-compatible fallback target.
+    ///
+    /// just 1.42.4 publishes no `-gnu` Linux asset and no `-windows-gnu` asset: for Linux it ships
+    /// only `*-unknown-linux-musl`, and for Windows only `*-pc-windows-msvc`. So a glibc Linux host
+    /// resolves the musl static binary and an `x86_64-pc-windows-gnu` host resolves the msvc PE,
+    /// both ABI-compatible siblings of the host target. The resolved binary is executed to prove it
+    /// actually runs on the host.
+    #[test]
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "windows", target_env = "gnu", target_arch = "x86_64")
+    ))]
+    fn github_provider_resolves_just_via_abi_fallback() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("just@=1.42.4")
+            .arg("--version")
+            .assert_with_messages();
+
+        assert.success().stdout(predicates::str::contains("just 1.42.4"));
+
+        let binary = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+                _ => None,
+            })
+            .expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
+
+    /// Test the Apple Silicon Rosetta 2 fallback: on `aarch64-apple-darwin`, an
+    /// `x86_64-apple-darwin` binary is an ABI-compatible fallback only when Rosetta 2 is installed.
+    ///
+    /// ripgrep 13.0.0 publishes only `x86_64-apple-darwin` for macOS (no `aarch64-apple-darwin`, no
+    /// `universal`), so it is resolvable on Apple Silicon exactly when Rosetta is available. This
+    /// test is self-adapting: it probes the ground-truth Rosetta state itself (independently of
+    /// cgx's own probe) and asserts cgx agrees. The nightly full-platform workflow installs Rosetta
+    /// and re-runs the prebuilt tests to exercise the positive branch; per-PR runners typically
+    /// lack Rosetta and exercise the negative branch. Unit tests cover both branches
+    /// deterministically.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn github_provider_resolves_ripgrep_13_via_rosetta_when_available() {
+        // Ground truth, independent of cgx's own probe: can this host run an x86_64 macOS binary?
+        let rosetta_available = std::process::Command::new("arch")
+            .args(["-arch", "x86_64", "/usr/bin/true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+
+        if rosetta_available {
+            let mut cgx = Cgx::with_test_fs();
+            let (assert, messages) = cgx
+                .cmd
+                .with_json_messages()
+                .arg("--prebuilt-binary")
+                .arg("always")
+                .arg("--prebuilt-binary-sources")
+                .arg("github-releases")
+                .arg("ripgrep@=13.0.0")
+                .arg("--version")
+                .assert_with_messages();
+
+            assert
+                .success()
+                .stdout(predicates::str::contains("ripgrep 13.0.0"));
+
+            let binary = messages
+                .iter()
+                .find_map(|m| match m {
+                    Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+                    _ => None,
+                })
+                .expect("Expected PrebuiltBinaryMessage::Resolved when Rosetta is available");
+            assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+            // The resolved asset must be the x86_64 (Rosetta) fallback, not an aarch64 asset.
+            assert!(
+                messages.iter().any(|m| matches!(
+                    m,
+                    Message::PrebuiltBinary(PrebuiltBinaryMessage::DownloadingBinary { url, .. })
+                        if url.contains("x86_64-apple-darwin")
+                )),
+                "Expected the downloaded asset URL to contain x86_64-apple-darwin"
+            );
+
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+                "Should not have BuildMessage::Started when using prebuilt binary"
+            );
+        } else {
+            // Without Rosetta, x86_64 macOS binaries are not runnable, so the x86_64 fallback must
+            // NOT be offered and `always` mode must fail with no binary found.
+            let mut cgx = Cgx::with_test_fs();
+            let (assert, messages) = cgx
+                .cmd
+                .with_json_messages()
+                .arg("--prebuilt-binary")
+                .arg("always")
+                .arg("--prebuilt-binary-sources")
+                .arg("github-releases")
+                .arg("--no-exec")
+                .arg("ripgrep@=13.0.0")
+                .assert_with_messages();
+
+            assert.failure();
+
+            assert!(
+                messages.iter().any(|m| matches!(
+                    m,
+                    Message::PrebuiltBinary(PrebuiltBinaryMessage::ProviderHasNoBinary {
+                        provider: BinaryProvider::GithubReleases,
+                        ..
+                    })
+                )),
+                "Expected ProviderHasNoBinary for GithubReleases without Rosetta"
+            );
+
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| matches!(m, Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { .. }))),
+                "Should not resolve an x86_64 macOS binary without Rosetta"
+            );
+        }
+    }
+
+    /// Test the macOS `universal-apple-darwin` fallback path — currently BLOCKED by issue #239.
+    ///
+    /// cargo-nextest 0.9.100 publishes only a `universal-apple-darwin` fat binary for macOS, which
+    /// a universal fallback token would match. But its GitHub release is tagged
+    /// `cargo-nextest-0.9.100`, and the GitHub provider today only tries the `v{version}` and
+    /// `{version}` tag forms, so it never finds the release and resolution fails before any asset
+    /// is matched.
+    ///
+    /// This test asserts the current (incorrect) blocked behavior as a tripwire. Once
+    /// https://github.com/anelson/cgx/issues/239 adds `{crate}-{version}` tag matching, cgx will
+    /// find the `cargo-nextest-0.9.100` release and match its
+    /// `cargo-nextest-0.9.100-universal-apple-darwin.tar.gz` asset via the `universal-apple-darwin`
+    /// compatible-target name. When that lands, this assertion must flip: the command should
+    /// `.success()` with `Resolved { provider: GithubReleases }` and a `DownloadingBinary` URL
+    /// containing `universal-apple-darwin`. (The universal fallback itself is already proven by the
+    /// `target.rs` and `providers` unit tests; #239 only unblocks the end-to-end path.)
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn github_provider_universal_nextest_blocked_by_239() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, _messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("--no-exec")
+            .arg("cargo-nextest@=0.9.100")
+            .assert_with_messages();
+
+        // BLOCKED by #239: the `cargo-nextest-0.9.100` release tag is not matched, so no binary is
+        // found and `always` mode fails. Flip to `.success()` (see doc comment) once #239 lands.
+        assert.failure();
     }
 }
 
@@ -1079,11 +1269,13 @@ fn default_resolves_via_binstall() {
 ///
 /// eza 0.23.1 published GitHub release assets for Linux GNU, x86_64 Linux musl, and
 /// `x86_64-pc-windows-gnu` only (no macOS, no windows-msvc, no aarch64 Linux musl). On
-/// aarch64 Linux musl, default resolution falls through to Quickinstall.
+/// aarch64 Linux musl, default resolution falls through to Quickinstall. On
+/// `x86_64-pc-windows-msvc` GitHub resolves via the ABI-compatible `x86_64-pc-windows-gnu` fallback
+/// asset.
 #[test]
 #[cfg(any(
     all(target_os = "linux", not(all(target_arch = "aarch64", target_env = "musl"))),
-    all(target_os = "windows", target_env = "gnu")
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 fn default_resolves_via_github() {
     let mut cgx = Cgx::with_test_fs();

@@ -17,6 +17,7 @@ use crate::{
     error::{self, Error},
     http::HttpClient,
     messages::{MessageReporter, PrebuiltBinaryMessage, ProviderChangeReason},
+    target::TargetTriple,
 };
 
 /// A resolved binary is a pre-built executable that cgx found and prepared, so the crate can run
@@ -366,7 +367,11 @@ impl DefaultBinaryResolver {
 
     /// Consult each configured provider in order, short-circuiting on the first `Found`, and fold
     /// the results with [`Self::combine_resolutions`].
-    fn resolve_via_providers(&self, krate: &DownloadedCrate, platform: &str) -> Result<BinaryResolution> {
+    fn resolve_via_providers(
+        &self,
+        krate: &DownloadedCrate,
+        target: &TargetTriple,
+    ) -> Result<BinaryResolution> {
         if self.providers.is_empty() {
             return error::NoProvidersConfiguredSnafu.fail();
         }
@@ -389,7 +394,7 @@ impl DefaultBinaryResolver {
             // If a provider fails for a given crate input, that is likely a bug in the provider
             // code somewhere, but such a bug should not cause the binary resolution process itself
             // to return an error, nor should it result in a permanent negative cache entry.
-            let resolution = match provider.try_resolve(krate, platform) {
+            let resolution = match provider.try_resolve(krate, target) {
                 Ok(resolution) => BinaryResolution::from(resolution),
                 Err(source) => {
                     self.reporter
@@ -417,7 +422,7 @@ impl DefaultBinaryResolver {
         &self,
         mut binary: ResolvedBinary,
         krate: &ResolvedCrate,
-        platform: &str,
+        target: &TargetTriple,
     ) -> Result<ResolvedBinary> {
         let source_hash = krate.source.source_hash();
 
@@ -427,7 +432,7 @@ impl DefaultBinaryResolver {
             .bin_dir
             .join(format!("{}-{}", krate.name, krate.version))
             .join(source_hash)
-            .join(format!("prebuilt-{:?}-{}", binary.provider, platform));
+            .join(format!("prebuilt-{:?}-{}", binary.provider, target.as_str()));
 
         std::fs::create_dir_all(&target_dir).with_context(|_| error::IoSnafu {
             path: target_dir.clone(),
@@ -527,15 +532,15 @@ impl BinaryResolver for DefaultBinaryResolver {
 
         // Always use the build target platform for pre-built binaries. If the user overrides this by
         // specifying a custom target, execution is not supposed to reach this point.
-        let platform: &'static str = build_context::TARGET;
+        let target = TargetTriple::host();
 
-        let resolution = self.resolve_via_providers(krate, platform)?;
+        let resolution = self.resolve_via_providers(krate, target)?;
 
         // For a found binary, relocate it into `bin_dir` (so the cached/returned path is stable and
         // separate from provider caches) and report it. Report the terminal non-found states too.
         let resolution = match resolution {
             BinaryResolution::Found(binary) => {
-                let relocated = self.relocate_to_bin_dir(binary, resolved_krate, platform)?;
+                let relocated = self.relocate_to_bin_dir(binary, resolved_krate, target)?;
                 self.reporter
                     .report(|| PrebuiltBinaryMessage::resolved(&relocated));
                 BinaryResolution::Found(relocated)
@@ -643,7 +648,11 @@ mod tests {
             BinaryProvider::GithubReleases
         }
 
-        fn try_resolve(&self, _krate: &DownloadedCrate, _platform: &str) -> Result<ConclusiveResolution> {
+        fn try_resolve(
+            &self,
+            _krate: &DownloadedCrate,
+            _target: &TargetTriple,
+        ) -> Result<ConclusiveResolution> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
                 StubOutcome::Found(binary) => Ok(ConclusiveResolution::Found(binary.clone())),
@@ -818,7 +827,7 @@ mod tests {
     #[test]
     fn test_disqualification_custom_target() {
         let options = BuildOptions {
-            target: Some("x86_64-unknown-linux-musl".to_string()),
+            target: Some(TargetTriple::from_static("x86_64-unknown-linux-musl").unwrap()),
             ..Default::default()
         };
         assert_eq!(

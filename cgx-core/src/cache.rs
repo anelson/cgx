@@ -21,6 +21,7 @@ use crate::{
     downloader::DownloadedCrate,
     error,
     messages::{BuildCacheMessage, CrateResolutionMessage, PrebuiltBinaryMessage, SourceMessage},
+    target::TargetTriple,
 };
 
 /// A cache entry wrapping a value with timestamp metadata.
@@ -232,7 +233,7 @@ impl Cache {
         })?;
 
         // Create a temp directory in the same parent directory for atomic rename
-        let temp_dir = tempfile::tempdir_in(parent).with_context(|_| error::TempDirCreationSnafu {
+        let temp_dir = tempfile::tempdir_in(parent).with_context(|_| error::TempDirInCreationSnafu {
             parent: parent.to_path_buf(),
         })?;
 
@@ -414,7 +415,7 @@ impl Cache {
     /// This ensures that binaries are cached per-platform, which is essential since pre-built
     /// binaries are platform-specific.
     fn binary_cache_path(&self, krate: &ResolvedCrate) -> Result<PathBuf> {
-        let hash = Self::compute_binary_cache_hash(krate, build_context::TARGET)?;
+        let hash = Self::compute_binary_cache_hash(krate, TargetTriple::host())?;
         Ok(self
             .inner
             .config
@@ -431,22 +432,22 @@ impl Cache {
     /// - Resolved source (crates.io vs git vs forge, etc.)
     /// - The target platform triple
     ///
-    /// `platform` is a parameter so the hash is distinct and testable for a fixed platform. This
+    /// `target` is a parameter so the hash is distinct and testable for a fixed platform. This
     /// ensures the same crate on different platforms gets different cache entries.
-    fn compute_binary_cache_hash(krate: &ResolvedCrate, platform: &str) -> Result<String> {
+    fn compute_binary_cache_hash(krate: &ResolvedCrate, target: &TargetTriple) -> Result<String> {
         #[derive(Serialize)]
         struct BinaryCacheKey<'a> {
             name: &'a str,
             version: &'a semver::Version,
             source: &'a ResolvedSource,
-            platform: &'a str,
+            platform: &'a TargetTriple,
         }
 
         let key = BinaryCacheKey {
             name: &krate.name,
             version: &krate.version,
             source: &krate.source,
-            platform,
+            platform: target,
         };
 
         let json = serde_json::to_string(&key).context(error::JsonSnafu)?;
@@ -770,7 +771,7 @@ impl Cache {
             all_features: bool,
             no_default_features: bool,
             profile: &'a Option<String>,
-            target: &'a Option<String>,
+            target: &'a Option<TargetTriple>,
             build_target: &'a BuildTarget,
             toolchain: &'a Option<String>,
             locked: bool,
@@ -826,7 +827,14 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::bin_resolver::{BinaryCacheEntry, ConclusiveResolution, ResolvedBinary};
+    use crate::{
+        bin_resolver::{BinaryCacheEntry, ConclusiveResolution, ResolvedBinary},
+        target::TargetTriple,
+    };
+
+    fn target(target: &'static str) -> TargetTriple {
+        TargetTriple::from_static(target).unwrap()
+    }
 
     fn test_cache() -> (Cache, TempDir) {
         test_cache_with_timeout(Duration::from_secs(3600))
@@ -1262,8 +1270,6 @@ mod tests {
         mod binary_cache_hash {
             use super::*;
 
-            const PLATFORM: &str = "x86_64-unknown-linux-gnu";
-
             #[test]
             fn crates_io() {
                 let krate = ResolvedCrate {
@@ -1272,7 +1278,7 @@ mod tests {
                     source: ResolvedSource::CratesIo,
                 };
                 assert_eq!(
-                    Cache::compute_binary_cache_hash(&krate, PLATFORM).unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target("x86_64-unknown-linux-gnu")).unwrap(),
                     "e73c84363ece02d92a3dfe4ff390dcbe0dbe3381f050280505a1adb3916fad78"
                 );
             }
@@ -1285,8 +1291,8 @@ mod tests {
                     source: ResolvedSource::CratesIo,
                 };
                 assert_ne!(
-                    Cache::compute_binary_cache_hash(&krate, "x86_64-unknown-linux-gnu").unwrap(),
-                    Cache::compute_binary_cache_hash(&krate, "aarch64-apple-darwin").unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target("x86_64-unknown-linux-gnu")).unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target("aarch64-apple-darwin")).unwrap(),
                 );
             }
         }
@@ -1320,7 +1326,7 @@ mod tests {
                     all_features: false,
                     no_default_features: true,
                     profile: Some("release".to_string()),
-                    target: Some("x86_64-unknown-linux-gnu".to_string()),
+                    target: Some(target("x86_64-unknown-linux-gnu")),
                     build_target: BuildTarget::Bin("mybin".to_string()),
                     toolchain: Some("stable".to_string()),
                     locked: true,
@@ -1933,11 +1939,11 @@ mod tests {
         #[test]
         fn different_target_produces_different_hash() {
             let options1 = BuildOptions {
-                target: Some("x86_64-unknown-linux-gnu".to_string()),
+                target: Some(target("x86_64-unknown-linux-gnu")),
                 ..Default::default()
             };
             let options2 = BuildOptions {
-                target: Some("aarch64-unknown-linux-gnu".to_string()),
+                target: Some(target("aarch64-unknown-linux-gnu")),
                 ..Default::default()
             };
 

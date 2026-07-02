@@ -18,6 +18,7 @@ pub(super) use self::{
 };
 use crate::{
     Result, bin_resolver::ConclusiveResolution, config::BinaryProvider, downloader::DownloadedCrate, error,
+    target::TargetTriple,
 };
 
 /// Trait for providers that can resolve pre-built binaries.
@@ -38,7 +39,7 @@ pub(super) trait Provider {
     /// providers to fallible things like network I/O and parsing of data, in which case those
     /// providers should return `Err` to indicate that they could not determine a conclusive
     /// outcome.
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution>;
+    fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution>;
 
     /// The kind of this provider, used for progress reporting.
     fn kind(&self) -> BinaryProvider;
@@ -119,10 +120,15 @@ pub(super) fn generate_candidate_filenames(
     crate_name: &str,
     extra_binary_names: &[&str],
     version: &str,
-    platform: &str,
+    target: &TargetTriple,
 ) -> Vec<CandidateFilename> {
     let formats = ArchiveFormat::all_formats();
-    let platforms = platform_aliases(platform);
+    // Get for the target the platform strings to try, corresponding to all targets, pseudo-targets,
+    // and alternative shorter forms of the target triple that are known to be used in release asset
+    // filenames. The host tokens are tried first and ABI-compatible fallback tokens (for example a
+    // `x86_64-unknown-linux-musl` asset for a `x86_64-unknown-linux-gnu` host, or a
+    // `universal-apple-darwin` asset on macOS) are tried afterwards.
+    let platforms = target.compatible_asset_platform_aliases();
 
     // Crate name first, then binary-name fallbacks. On Windows, also try `{name}.exe` as the name
     // component for projects that bake the extension into the asset name (e.g.
@@ -130,7 +136,7 @@ pub(super) fn generate_candidate_filenames(
     let mut names: Vec<String> = Vec::new();
     names.push(crate_name.to_string());
     names.extend(extra_binary_names.iter().map(|&n| n.to_string()));
-    if platform.contains("windows") {
+    if target.is_windows() {
         names.push(format!("{}.exe", crate_name));
         names.extend(extra_binary_names.iter().map(|n| format!("{}.exe", n)));
     }
@@ -139,7 +145,14 @@ pub(super) fn generate_candidate_filenames(
     for name in &names {
         for platform_token in &platforms {
             for &(format, suffix) in formats {
-                push_candidate_patterns(&mut candidates, name, version, platform_token, format, suffix);
+                push_candidate_patterns(
+                    &mut candidates,
+                    name,
+                    version,
+                    platform_token.as_ref(),
+                    format,
+                    suffix,
+                );
             }
         }
     }
@@ -150,41 +163,6 @@ pub(super) fn generate_candidate_filenames(
     candidates.retain(|c| seen.insert(c.filename.clone()));
 
     candidates
-}
-
-/// Build the list of platform tokens to try for asset matching: the full target triple first (the
-/// most specific, lowest-false-positive form), then the shorter `{os}-{arch}` and `{arch}-{os}`
-/// forms many projects use in their asset names.
-///
-/// The os component is mapped from the triple: `*apple*`/`*darwin*` -> `darwin`, `*windows*` ->
-/// `windows`, `*linux*` -> `linux`. The arch is the triple's first component, used verbatim (so
-/// `x86_64`, `aarch64`, `armv7` all match as-is); no arch synonyms are invented, to avoid
-/// over-generating candidates that could match the wrong asset.
-fn platform_aliases(platform: &str) -> Vec<String> {
-    let mut aliases = vec![platform.to_string()];
-
-    let arch = platform.split('-').next().unwrap_or("");
-    let os = if platform.contains("windows") {
-        Some("windows")
-    } else if platform.contains("apple") || platform.contains("darwin") {
-        Some("darwin")
-    } else if platform.contains("linux") {
-        Some("linux")
-    } else {
-        None
-    };
-
-    if let Some(os) = os {
-        if !arch.is_empty() {
-            for alias in [format!("{}-{}", os, arch), format!("{}-{}", arch, os)] {
-                if !aliases.contains(&alias) {
-                    aliases.push(alias);
-                }
-            }
-        }
-    }
-
-    aliases
 }
 
 fn push_candidate_patterns(
@@ -255,13 +233,17 @@ mod tests {
         candidates.iter().map(|c| c.filename.as_str()).collect()
     }
 
+    fn target_triple(target: &'static str) -> TargetTriple {
+        TargetTriple::from_static(target).unwrap()
+    }
+
     /// The taplo case: the crate is `taplo-cli`, but its GitHub assets are named after the `taplo`
     /// binary, use a short `{os}-{arch}` platform token, and a bare `.gz` suffix. All three must
     /// combine into a single candidate carrying the naked [`ArchiveFormat::Gz`] format.
     #[test]
     fn binary_name_short_platform_and_naked_gz_combine() {
-        let candidates =
-            generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", "x86_64-unknown-linux-gnu");
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", &target);
 
         let target = candidates
             .iter()
@@ -275,8 +257,8 @@ mod tests {
     /// regression).
     #[test]
     fn crate_name_full_triple_is_first_candidate() {
-        let candidates =
-            generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", "x86_64-unknown-linux-gnu");
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", &target);
         assert_eq!(
             candidates[0].filename,
             "taplo-cli-x86_64-unknown-linux-gnu-v0.10.0.tar"
@@ -286,8 +268,8 @@ mod tests {
     /// Every crate-name candidate is ordered before any binary-name candidate.
     #[test]
     fn crate_name_candidates_precede_binary_name_candidates() {
-        let candidates =
-            generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", "x86_64-unknown-linux-gnu");
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", &target);
         let names = filenames(&candidates);
         let last_crate = names.iter().rposition(|n| n.starts_with("taplo-cli")).unwrap();
         let first_binary = names
@@ -303,7 +285,8 @@ mod tests {
     /// Filenames are unique even when a binary name coincides with the crate name.
     #[test]
     fn candidates_are_deduplicated() {
-        let candidates = generate_candidate_filenames("foo", &["foo"], "1.0.0", "x86_64-unknown-linux-gnu");
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("foo", &["foo"], "1.0.0", &target);
         let count = candidates.len();
         let mut names = filenames(&candidates);
         names.sort_unstable();
@@ -313,8 +296,8 @@ mod tests {
 
     #[test]
     fn matched_candidate_carries_binary_basename() {
-        let candidates =
-            generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", "x86_64-unknown-linux-musl");
+        let target = target_triple("x86_64-unknown-linux-musl");
+        let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", &target);
         let candidate = candidates
             .iter()
             .find(|candidate| candidate.filename == "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz")
@@ -349,7 +332,8 @@ mod tests {
         ];
 
         for (platform, asset_name, format) in cases {
-            let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", platform);
+            let target = target_triple(platform);
+            let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", &target);
             let candidate = candidates
                 .iter()
                 .find(|candidate| candidate.filename == asset_name)
@@ -376,7 +360,8 @@ mod tests {
     /// `eza.exe_x86_64-pc-windows-gnu.tar.gz`).
     #[test]
     fn windows_adds_exe_name_variant() {
-        let candidates = generate_candidate_filenames("mytool", &[], "1.0.0", "x86_64-pc-windows-msvc");
+        let target = target_triple("x86_64-pc-windows-msvc");
+        let candidates = generate_candidate_filenames("mytool", &[], "1.0.0", &target);
         let names = filenames(&candidates);
         assert!(
             names.iter().any(|n| n.starts_with("mytool.exe")),
@@ -384,26 +369,54 @@ mod tests {
         );
     }
 
+    /// On a `x86_64-unknown-linux-gnu` host, ripgrep's `x86_64-unknown-linux-musl` asset is
+    /// generated as an ABI-compatible fallback, and the exact-host gnu asset is still tried first.
     #[test]
-    fn platform_aliases_full_triple_first_then_short_forms() {
-        let aliases = platform_aliases("x86_64-unknown-linux-gnu");
-        assert_eq!(aliases[0], "x86_64-unknown-linux-gnu");
-        assert!(aliases.contains(&"linux-x86_64".to_string()));
-        assert!(aliases.contains(&"x86_64-linux".to_string()));
+    fn gnu_host_generates_musl_fallback_after_exact_host() {
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", &target);
+        let names = filenames(&candidates);
+
+        let gnu = names
+            .iter()
+            .position(|n| *n == "ripgrep-15.1.0-x86_64-unknown-linux-gnu.tar.gz")
+            .expect("expected an exact-host gnu candidate");
+        let musl = names
+            .iter()
+            .position(|n| *n == "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz")
+            .expect("expected a musl fallback candidate");
+
+        assert!(
+            gnu < musl,
+            "the exact-host gnu candidate must precede the musl fallback"
+        );
     }
 
-    /// macOS triples use `apple`, but most asset names use `darwin`; the alias must bridge that.
+    /// On a `x86_64-pc-windows-msvc` host, eza's `x86_64-pc-windows-gnu` asset (baked-in `.exe`
+    /// name component) is generated as an ABI-compatible fallback.
     #[test]
-    fn platform_aliases_maps_apple_to_darwin() {
-        let aliases = platform_aliases("aarch64-apple-darwin");
-        assert!(aliases.contains(&"darwin-aarch64".to_string()));
-        assert!(aliases.contains(&"aarch64-darwin".to_string()));
+    fn windows_msvc_host_generates_gnu_exe_fallback() {
+        let target = target_triple("x86_64-pc-windows-msvc");
+        let candidates = generate_candidate_filenames("eza", &[], "0.23.1", &target);
+        let names = filenames(&candidates);
+
+        assert!(
+            names.iter().any(|n| *n == "eza.exe_x86_64-pc-windows-gnu.tar.gz"),
+            "expected an eza.exe_x86_64-pc-windows-gnu.tar.gz fallback candidate"
+        );
     }
 
+    /// On a macOS host, a `universal-apple-darwin` asset is generated as a fallback (a universal
+    /// fat binary always runs regardless of the host architecture).
     #[test]
-    fn platform_aliases_windows() {
-        let aliases = platform_aliases("x86_64-pc-windows-msvc");
-        assert!(aliases.contains(&"windows-x86_64".to_string()));
-        assert!(aliases.contains(&"x86_64-windows".to_string()));
+    fn macos_host_generates_universal_fallback() {
+        let target = target_triple("aarch64-apple-darwin");
+        let candidates = generate_candidate_filenames("mytool", &[], "1.0.0", &target);
+        let names = filenames(&candidates);
+
+        assert!(
+            names.iter().any(|n| n.contains("universal-apple-darwin")),
+            "expected a universal-apple-darwin fallback candidate"
+        );
     }
 }

@@ -16,6 +16,7 @@ pub mod messages;
 pub(crate) mod registry;
 pub mod runner;
 pub(crate) mod sbom;
+pub(crate) mod target;
 #[cfg(test)]
 pub(crate) mod testdata;
 

@@ -16,6 +16,7 @@ use crate::{
     error,
     http::HttpClient,
     messages::PrebuiltBinaryMessage,
+    target::TargetTriple,
 };
 
 /// A generated GitLab release asset candidate and the metadata needed to consume it.
@@ -102,11 +103,11 @@ impl GitlabProvider {
         crate_name: &str,
         extra_binary_names: &[&str],
         version: &str,
-        platform: &str,
+        target: &TargetTriple,
     ) -> Vec<GitlabReleaseAssetCandidate> {
         // Generate candidate filenames for the crate and platform
         let filename_candidates =
-            super::generate_candidate_filenames(crate_name, extra_binary_names, version, platform);
+            super::generate_candidate_filenames(crate_name, extra_binary_names, version, target);
 
         // Make a separate Gitlab release asset candidate for each possible variant the release tag
         // might have (with or without a leading "v" prefix).
@@ -187,7 +188,7 @@ impl Provider for GitlabProvider {
         BinaryProvider::GitlabReleases
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
+    fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -212,7 +213,7 @@ impl Provider for GitlabProvider {
             crate_name,
             &extra_binary_names,
             &krate.resolved.version.to_string(),
-            platform,
+            target,
         );
 
         // Probe sequentially with HEAD requests
@@ -255,9 +256,7 @@ impl Provider for GitlabProvider {
         let expected_binary_names =
             super::expected_binary_names(&binary_name, Some(&candidate.binary_basename_hint), crate_name);
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
+        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
 
         let archive_path = temp_dir
             .path()
@@ -322,13 +321,13 @@ impl Provider for GitlabProvider {
             .join("gitlab")
             .join(&krate.resolved.name)
             .join(krate.resolved.version.to_string())
-            .join(platform);
+            .join(target.as_str());
 
         std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
             path: final_dir.clone(),
         })?;
 
-        let final_path = final_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+        let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
         std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
             path: final_path.clone(),
         })?;
@@ -392,6 +391,10 @@ mod tests {
         )
     }
 
+    fn target_triple(target: &'static str) -> TargetTriple {
+        TargetTriple::from_static(target).unwrap()
+    }
+
     #[test]
     fn test_release_asset_candidate_generation_includes_version_patterns() {
         let candidates = GitlabProvider::generate_release_asset_candidates(
@@ -399,7 +402,7 @@ mod tests {
             "mytool",
             &[],
             "1.2.3",
-            "x86_64-unknown-linux-gnu",
+            &target_triple("x86_64-unknown-linux-gnu"),
         );
 
         assert!(
@@ -421,7 +424,7 @@ mod tests {
             "mytool",
             &[],
             "1.2.3",
-            "x86_64-unknown-linux-gnu",
+            &target_triple("x86_64-unknown-linux-gnu"),
         );
 
         assert!(
@@ -443,7 +446,7 @@ mod tests {
             "mytool",
             &[],
             "1.2.3",
-            "x86_64-unknown-linux-gnu",
+            &target_triple("x86_64-unknown-linux-gnu"),
         );
 
         assert!(
@@ -471,7 +474,7 @@ mod tests {
             "mytool",
             &[],
             "1.2.3",
-            "x86_64-unknown-linux-gnu",
+            &target_triple("x86_64-unknown-linux-gnu"),
         );
 
         for candidate in &candidates {

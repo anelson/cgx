@@ -20,6 +20,7 @@ use crate::{
         SMALL_DOWNLOAD_LIMIT_BYTES,
     },
     messages::PrebuiltBinaryMessage,
+    target::TargetTriple,
 };
 
 pub(in crate::bin_resolver) struct GithubProvider {
@@ -257,7 +258,7 @@ impl Provider for GithubProvider {
         BinaryProvider::GithubReleases
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
+    fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution> {
         let repo_url = if let Some(url) = Self::get_repo_url(krate)? {
             url
         } else {
@@ -326,7 +327,7 @@ impl Provider for GithubProvider {
             .filter(|n| *n != crate_name)
             .collect();
         let candidates =
-            super::generate_candidate_filenames(crate_name, &extra_binary_names, &version, platform);
+            super::generate_candidate_filenames(crate_name, &extra_binary_names, &version, target);
 
         let asset_map: std::collections::HashMap<&str, &str> = assets
             .iter()
@@ -357,9 +358,7 @@ impl Provider for GithubProvider {
         let expected_binary_names =
             super::expected_binary_names(&binary_name, Some(&candidate.binary_basename), crate_name);
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
+        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
 
         let archive_path = temp_dir.path().join(candidate.format.canonical_filename());
         match self.try_download_to_file(download_url, &archive_path) {
@@ -422,13 +421,13 @@ impl Provider for GithubProvider {
             .join("github")
             .join(&krate.resolved.name)
             .join(krate.resolved.version.to_string())
-            .join(platform);
+            .join(target.as_str());
 
         std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
             path: final_dir.clone(),
         })?;
 
-        let final_path = final_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+        let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
         std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
             path: final_path.clone(),
         })?;
