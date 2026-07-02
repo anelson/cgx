@@ -14,6 +14,7 @@ use crate::{
     error,
     http::HttpClient,
     messages::PrebuiltBinaryMessage,
+    target::TargetTriple,
 };
 
 pub(in crate::bin_resolver) struct QuickinstallProvider {
@@ -35,10 +36,10 @@ impl QuickinstallProvider {
         }
     }
 
-    fn construct_url(krate: &ResolvedCrate, platform: &str) -> String {
+    fn construct_url(krate: &ResolvedCrate, target: &TargetTriple) -> String {
         let base = "https://github.com/cargo-bins/cargo-quickinstall/releases/download";
         let tag = format!("{}-{}", krate.name, krate.version);
-        format!("{base}/{tag}/{tag}-{platform}.tar.gz")
+        format!("{base}/{tag}/{tag}-{}.tar.gz", target.as_str())
     }
 }
 
@@ -47,8 +48,8 @@ impl Provider for QuickinstallProvider {
         BinaryProvider::Quickinstall
     }
 
-    fn try_resolve(&self, krate: &DownloadedCrate, platform: &str) -> Result<ConclusiveResolution> {
-        let url = Self::construct_url(&krate.resolved, platform);
+    fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution> {
+        let url = Self::construct_url(&krate.resolved, target);
 
         self.reporter
             .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Quickinstall));
@@ -92,13 +93,13 @@ impl Provider for QuickinstallProvider {
             .join("quickinstall")
             .join(&krate.resolved.name)
             .join(krate.resolved.version.to_string())
-            .join(platform);
+            .join(target.as_str());
 
         std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
             path: final_dir.clone(),
         })?;
 
-        let final_path = final_dir.join(format!("{}{}", binary_name, std::env::consts::EXE_SUFFIX));
+        let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
         std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
             path: final_path.clone(),
         })?;

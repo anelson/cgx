@@ -1847,7 +1847,10 @@ mod tests {
         fn test_target() {
             let opts =
                 parse_build_options_from_args(&["--target", "x86_64-unknown-linux-musl", "ripgrep"]).unwrap();
-            assert_eq!(opts.target, Some("x86_64-unknown-linux-musl".to_string()));
+            assert_eq!(
+                opts.target.as_ref().map(|target| target.as_str()),
+                Some("x86_64-unknown-linux-musl")
+            );
         }
 
         #[test]
