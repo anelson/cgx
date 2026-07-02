@@ -47,15 +47,6 @@ impl BinstallProvider {
         }
     }
 
-    /// Read and parse `[package.metadata.binstall]` from the crate's Cargo.toml.
-    fn read_binstall_metadata(
-        krate: &DownloadedCrate,
-        target: &TargetTriple,
-    ) -> Result<Option<BinstallMeta>> {
-        let doc = krate.parsed_cargo_toml()?;
-        BinstallMetaRaw::try_from_cargo_toml(&doc).map(|raw| raw.map(|meta| meta.render_for_target(target)))
-    }
-
     /// Get the repository URL for a crate, for use in `{ repo }` template variable.
     ///
     /// If the crate came from a forge, the forge URL is used directly. This handles the fork
@@ -85,7 +76,8 @@ impl Provider for BinstallProvider {
     fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution> {
         let resolved = &krate.resolved;
 
-        let Some(meta) = Self::read_binstall_metadata(krate, target)? else {
+        let doc = krate.parsed_cargo_toml()?;
+        let Some(raw_meta) = BinstallMetaRaw::try_from_cargo_toml(&doc)? else {
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::Binstall,
@@ -95,164 +87,172 @@ impl Provider for BinstallProvider {
             return Ok(ConclusiveResolution::Nonexistent);
         };
 
-        let Some(ref pkg_url_template) = meta.pkg_url else {
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::Binstall,
-                    "binstall metadata has no pkg-url",
-                )
-            });
-            return Ok(ConclusiveResolution::Nonexistent);
-        };
-
-        let pkg_fmt = meta.pkg_fmt.as_deref();
-        let format = archive_format_from_pkg_fmt(pkg_fmt)?;
         let repo_url = Self::get_repo_url(krate)?;
         let version_string = resolved.version.to_string();
-        let suffixes = binstall_archive_suffixes(pkg_fmt);
         let binary_name = krate.default_binary_name()?;
 
+        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
+
+        // Try the exact host target first, then each ABI-compatible fallback target. Overrides are
+        // applied per candidate, so a crate whose base `pkg-url` renders one ABI but has an override
+        // for a compatible sibling still resolves. The first target whose asset downloads wins.
         let mut last_url = String::new();
-        let mut selected_suffix = "";
+        let mut had_pkg_url = false;
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
-
-        let archive_path = temp_dir.path().join(format.canonical_filename());
-        let mut downloaded = false;
-
-        for &suffix in suffixes {
-            let ctx = BinstallTemplateContext {
-                name: &resolved.name,
-                version: &version_string,
-                target,
-                archive_suffix: Some(suffix),
-                bin: &binary_name,
-                repo: repo_url.as_deref(),
-                kind: BinstallTemplateKind::PackageUrl,
+        for candidate_target in target.compatible_targets() {
+            let meta = raw_meta.render_for_target(&candidate_target);
+            let Some(ref pkg_url_template) = meta.pkg_url else {
+                continue;
             };
+            had_pkg_url = true;
 
-            let url = ctx.render_template(pkg_url_template)?;
+            let pkg_fmt = meta.pkg_fmt.as_deref();
+            let format = archive_format_from_pkg_fmt(pkg_fmt)?;
+            let suffixes = binstall_archive_suffixes(pkg_fmt);
+            let archive_path = temp_dir.path().join(format.canonical_filename());
 
-            self.reporter
-                .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Binstall));
+            let mut downloaded = false;
+            let mut selected_suffix = "";
+            for &suffix in suffixes {
+                let ctx = BinstallTemplateContext {
+                    name: &resolved.name,
+                    version: &version_string,
+                    target: &candidate_target,
+                    archive_suffix: Some(suffix),
+                    bin: &binary_name,
+                    repo: repo_url.as_deref(),
+                    kind: BinstallTemplateKind::PackageUrl,
+                };
 
-            match self.try_download_to_file(&url, &archive_path) {
-                Ok(true) => {
-                    downloaded = true;
-                    last_url = url;
-                    selected_suffix = suffix;
-                    break;
+                let url = ctx.render_template(pkg_url_template)?;
+
+                self.reporter
+                    .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Binstall));
+
+                match self.try_download_to_file(&url, &archive_path) {
+                    Ok(true) => {
+                        downloaded = true;
+                        last_url = url;
+                        selected_suffix = suffix;
+                        break;
+                    }
+                    Ok(false) => {
+                        last_url = url;
+                    }
+                    Err(e) => return Err(e),
                 }
-                Ok(false) => {
-                    last_url = url;
-                }
-                Err(e) => return Err(e),
             }
-        }
 
-        if !downloaded {
-            // If not binary found and no transient error then it just means this crate legit
-            // doesn't have a prebuilt binary for this platform in any of the places we know to
-            // look.
-            self.reporter.report(|| {
-                PrebuiltBinaryMessage::provider_has_no_binary(
-                    BinaryProvider::Binstall,
-                    format!("download failed: {}", last_url),
-                )
-            });
-            return Ok(ConclusiveResolution::Nonexistent);
-        }
-        let url = last_url;
+            if !downloaded {
+                // No asset for this compatible target; try the next one.
+                continue;
+            }
+            let url = last_url.clone();
 
-        if self.verify_checksums {
-            let asset_filename = super::checksum::asset_filename_from_url(&url);
-            let checksum_url = format!("{}.sha256", url);
-            let checksum_path = temp_dir.path().join("checksum.sha256");
-            let checksum_found =
-                self.try_download_to_file(&checksum_url, &checksum_path)
+            if self.verify_checksums {
+                let asset_filename = super::checksum::asset_filename_from_url(&url);
+                let checksum_url = format!("{}.sha256", url);
+                let checksum_path = temp_dir.path().join("checksum.sha256");
+                let checksum_found =
+                    self.try_download_to_file(&checksum_url, &checksum_path)
+                        .map_err(|source| {
+                            super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
+                        })?;
+                if checksum_found {
+                    super::checksum::verify_sha256_checksum(
+                        &archive_path,
+                        &checksum_path,
+                        asset_filename,
+                        &self.reporter,
+                    )
                     .map_err(|source| {
                         super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
                     })?;
-            if checksum_found {
-                super::checksum::verify_sha256_checksum(
-                    &archive_path,
-                    &checksum_path,
-                    asset_filename,
-                    &self.reporter,
-                )
-                .map_err(|source| {
-                    super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
-                })?;
+                }
             }
-        }
 
-        let extract_dir = temp_dir.path().join("extracted");
-        let binary_path = if let Some(bin_dir_template) = meta.bin_dir.as_deref() {
-            let ctx = BinstallTemplateContext {
-                name: &resolved.name,
-                version: &version_string,
-                target,
-                archive_suffix: Some(selected_suffix),
-                bin: &binary_name,
-                repo: repo_url.as_deref(),
-                kind: BinstallTemplateKind::BinDir,
-            };
-            let rendered_path = ctx.render_template(bin_dir_template)?;
-            super::extract_binary_at_archive_relative_path(
-                &archive_path,
-                format,
-                &binary_name,
-                Path::new(&rendered_path),
-                &extract_dir,
-            )
-        } else {
-            let expected_binary_names = super::expected_binary_names(&binary_name, None, &resolved.name);
-            super::extract_binary_by_candidate_names(
-                &archive_path,
-                format,
-                &expected_binary_names,
-                &extract_dir,
-            )
-        }
-        .map_err(|source| super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source))?;
+            let extract_dir = temp_dir.path().join("extracted");
+            let binary_path = if let Some(bin_dir_template) = meta.bin_dir.as_deref() {
+                let ctx = BinstallTemplateContext {
+                    name: &resolved.name,
+                    version: &version_string,
+                    target: &candidate_target,
+                    archive_suffix: Some(selected_suffix),
+                    bin: &binary_name,
+                    repo: repo_url.as_deref(),
+                    kind: BinstallTemplateKind::BinDir,
+                };
+                let rendered_path = ctx.render_template(bin_dir_template)?;
+                super::extract_binary_at_archive_relative_path(
+                    &archive_path,
+                    format,
+                    &binary_name,
+                    Path::new(&rendered_path),
+                    &extract_dir,
+                )
+            } else {
+                let expected_binary_names = super::expected_binary_names(&binary_name, None, &resolved.name);
+                super::extract_binary_by_candidate_names(
+                    &archive_path,
+                    format,
+                    &expected_binary_names,
+                    &extract_dir,
+                )
+            }
+            .map_err(|source| {
+                super::provider_asset_preparation_failed(BinaryProvider::Binstall, &url, source)
+            })?;
 
-        let final_dir = self
-            .cache_dir
-            .join("binaries")
-            .join("binstall")
-            .join(&resolved.name)
-            .join(resolved.version.to_string())
-            .join(target.as_str());
+            // The cache directory is keyed on the host target, not the compatible target that
+            // actually matched, so a fallback binary caches under the same key as an exact match.
+            let final_dir = self
+                .cache_dir
+                .join("binaries")
+                .join("binstall")
+                .join(&resolved.name)
+                .join(resolved.version.to_string())
+                .join(target.as_str());
 
-        std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
-            path: final_dir.clone(),
-        })?;
+            std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
+                path: final_dir.clone(),
+            })?;
 
-        let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
-        std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
-            path: final_path.clone(),
-        })?;
-
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&final_path)
-                .with_context(|_| error::IoSnafu {
-                    path: final_path.clone(),
-                })?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&final_path, perms).with_context(|_| error::IoSnafu {
+            let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
+            std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
                 path: final_path.clone(),
             })?;
+
+            #[cfg(unix)]
+            {
+                let mut perms = std::fs::metadata(&final_path)
+                    .with_context(|_| error::IoSnafu {
+                        path: final_path.clone(),
+                    })?
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&final_path, perms).with_context(|_| error::IoSnafu {
+                    path: final_path.clone(),
+                })?;
+            }
+
+            return Ok(ConclusiveResolution::Found(ResolvedBinary {
+                krate: resolved.clone(),
+                provider: BinaryProvider::Binstall,
+                path: final_path,
+            }));
         }
 
-        Ok(ConclusiveResolution::Found(ResolvedBinary {
-            krate: resolved.clone(),
-            provider: BinaryProvider::Binstall,
-            path: final_path,
-        }))
+        // No compatible target yielded a downloadable asset. If no candidate even had a `pkg-url`,
+        // the metadata simply does not describe a package URL; otherwise every rendered URL failed
+        // to download, meaning the crate has no prebuilt binary for this host or its fallbacks.
+        let reason = if had_pkg_url {
+            format!("download failed: {}", last_url)
+        } else {
+            "binstall metadata has no pkg-url".to_string()
+        };
+        self.reporter
+            .report(|| PrebuiltBinaryMessage::provider_has_no_binary(BinaryProvider::Binstall, reason));
+        Ok(ConclusiveResolution::Nonexistent)
     }
 }
 
@@ -1208,6 +1208,91 @@ pkg-fmt = "tgz"
 
         assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
         mock.assert_calls(1);
+    }
+
+    /// On a `x86_64-unknown-linux-gnu` host, a crate whose `pkg-url` renders the (absent) gnu asset
+    /// must fall back to the ABI-compatible `x86_64-unknown-linux-musl` asset. The gnu URLs are
+    /// explicitly mocked to 404 so the fallback path is exercised deterministically.
+    #[test]
+    fn resolves_via_musl_fallback_on_gnu_host() {
+        let server = MockServer::start();
+        let asset = tar_gz_with_binary("tool");
+        let gnu_tgz = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-gnu.tgz");
+            then.status(404);
+        });
+        let gnu_tar_gz = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-gnu.tar.gz");
+            then.status(404);
+        });
+        let musl = server.mock(|when, then| {
+            when.method(GET)
+                .path("/package-name-1.0.0-x86_64-unknown-linux-musl.tgz");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{}"
+
+[package.metadata.binstall]
+pkg-url = "{{ repo }}/{{ name }}-{{ version }}-{{ target }}{{ archive-suffix }}"
+pkg-fmt = "tgz"
+"#,
+            server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let result = provider.try_resolve(&krate, &target).unwrap();
+
+        assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
+        // The gnu asset was probed (both suffixes) and missing, then the musl fallback resolved.
+        gnu_tgz.assert_calls(1);
+        gnu_tar_gz.assert_calls(1);
+        musl.assert_calls(1);
+    }
+
+    /// A `x86_64-unknown-linux-gnu` host resolves a crate that only declares a musl asset through a
+    /// per-target override keyed on `x86_64-unknown-linux-musl`.
+    #[test]
+    fn resolves_via_musl_override_on_gnu_host() {
+        let server = MockServer::start();
+        let asset = tar_gz_with_binary("tool");
+        let musl = server.mock(|when, then| {
+            when.method(GET).path("/musl/package-name.tgz");
+            then.status(200).body(asset);
+        });
+        let cargo_toml = format!(
+            r#"
+[package]
+name = "package-name"
+version = "1.0.0"
+default-run = "tool"
+repository = "{base}"
+
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{base}/musl/{{ name }}{{ archive-suffix }}"
+"#,
+            base = server.base_url()
+        );
+        let (krate, _crate_dir) = downloaded_crate_with_toml(&cargo_toml);
+        let (provider, _provider_dir) = test_provider(false);
+
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let result = provider.try_resolve(&krate, &target).unwrap();
+
+        assert_matches::assert_matches!(result, ConclusiveResolution::Found(_));
+        musl.assert_calls(1);
     }
 
     #[test]

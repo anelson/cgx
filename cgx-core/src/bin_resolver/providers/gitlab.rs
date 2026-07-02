@@ -256,9 +256,7 @@ impl Provider for GitlabProvider {
         let expected_binary_names =
             super::expected_binary_names(&binary_name, Some(&candidate.binary_basename_hint), crate_name);
 
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
+        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
 
         let archive_path = temp_dir
             .path()

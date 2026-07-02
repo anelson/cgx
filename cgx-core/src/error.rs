@@ -137,7 +137,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to create temporary directory in {}: {}", parent.display(), source))]
-    TempDirCreation { parent: PathBuf, source: std::io::Error },
+    TempDirInCreation { parent: PathBuf, source: std::io::Error },
+
+    #[snafu(display("Failed to create temporary directory: {}", source))]
+    TempDirCreation { source: std::io::Error },
 
     #[snafu(display("Failed to execute command: {}", source))]
     CommandExecution { source: std::io::Error },

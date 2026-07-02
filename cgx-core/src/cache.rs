@@ -233,7 +233,7 @@ impl Cache {
         })?;
 
         // Create a temp directory in the same parent directory for atomic rename
-        let temp_dir = tempfile::tempdir_in(parent).with_context(|_| error::TempDirCreationSnafu {
+        let temp_dir = tempfile::tempdir_in(parent).with_context(|_| error::TempDirInCreationSnafu {
             parent: parent.to_path_buf(),
         })?;
 

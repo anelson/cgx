@@ -637,7 +637,7 @@ impl RealCrateBuilder {
         let temp_dir = tempfile::Builder::new()
             .prefix(&format!("cgx-build-{}", &krate.resolved.name))
             .tempdir_in(&self.config.build_dir)
-            .with_context(|_| error::TempDirCreationSnafu {
+            .with_context(|_| error::TempDirInCreationSnafu {
                 parent: self.config.build_dir.clone(),
             })?;
 

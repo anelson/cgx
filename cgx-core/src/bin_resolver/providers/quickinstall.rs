@@ -49,28 +49,37 @@ impl Provider for QuickinstallProvider {
     }
 
     fn try_resolve(&self, krate: &DownloadedCrate, target: &TargetTriple) -> Result<ConclusiveResolution> {
-        let url = Self::construct_url(&krate.resolved, target);
-
-        self.reporter
-            .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Quickinstall));
-
-        let temp_dir = tempfile::tempdir().with_context(|_| error::TempDirCreationSnafu {
-            parent: self.cache_dir.clone(),
-        })?;
+        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
 
         let archive_path = temp_dir.path().join(ArchiveFormat::TarGz.canonical_filename());
-        match self.http_client.try_download_to_file(&url, &archive_path) {
-            Ok(true) => {}
-            Ok(false) => {
-                self.reporter.report(|| {
-                    PrebuiltBinaryMessage::provider_has_no_binary(
-                        BinaryProvider::Quickinstall,
-                        "binary not found",
-                    )
-                });
-                return Ok(ConclusiveResolution::Nonexistent);
+
+        // Try the exact host target first, then each ABI-compatible fallback target; the first one
+        // that quickinstall actually publishes wins.
+        let mut resolved_url = None;
+        for candidate_target in target.compatible_targets() {
+            let url = Self::construct_url(&krate.resolved, &candidate_target);
+
+            self.reporter
+                .report(|| PrebuiltBinaryMessage::downloading_binary(&url, BinaryProvider::Quickinstall));
+
+            match self.http_client.try_download_to_file(&url, &archive_path) {
+                Ok(true) => {
+                    resolved_url = Some(url);
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => return Err(e),
             }
-            Err(e) => return Err(e),
+        }
+
+        let Some(url) = resolved_url else {
+            self.reporter.report(|| {
+                PrebuiltBinaryMessage::provider_has_no_binary(
+                    BinaryProvider::Quickinstall,
+                    "binary not found",
+                )
+            });
+            return Ok(ConclusiveResolution::Nonexistent);
         };
 
         // TODO(#80): verify .sig (minisign) signatures when support is added

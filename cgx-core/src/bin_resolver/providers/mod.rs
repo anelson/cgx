@@ -123,7 +123,12 @@ pub(super) fn generate_candidate_filenames(
     target: &TargetTriple,
 ) -> Vec<CandidateFilename> {
     let formats = ArchiveFormat::all_formats();
-    let platforms = target.release_asset_platform_aliases();
+    // Get for the target the platform strings to try, corresponding to all targets, pseudo-targets,
+    // and alternative shorter forms of the target triple that are known to be used in release asset
+    // filenames. The host tokens are tried first and ABI-compatible fallback tokens (for example a
+    // `x86_64-unknown-linux-musl` asset for a `x86_64-unknown-linux-gnu` host, or a
+    // `universal-apple-darwin` asset on macOS) are tried afterwards.
+    let platforms = target.compatible_asset_platform_aliases();
 
     // Crate name first, then binary-name fallbacks. On Windows, also try `{name}.exe` as the name
     // component for projects that bake the extension into the asset name (e.g.
@@ -361,6 +366,57 @@ mod tests {
         assert!(
             names.iter().any(|n| n.starts_with("mytool.exe")),
             "expected a mytool.exe-prefixed candidate on Windows"
+        );
+    }
+
+    /// On a `x86_64-unknown-linux-gnu` host, ripgrep's `x86_64-unknown-linux-musl` asset is
+    /// generated as an ABI-compatible fallback, and the exact-host gnu asset is still tried first.
+    #[test]
+    fn gnu_host_generates_musl_fallback_after_exact_host() {
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", &target);
+        let names = filenames(&candidates);
+
+        let gnu = names
+            .iter()
+            .position(|n| *n == "ripgrep-15.1.0-x86_64-unknown-linux-gnu.tar.gz")
+            .expect("expected an exact-host gnu candidate");
+        let musl = names
+            .iter()
+            .position(|n| *n == "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz")
+            .expect("expected a musl fallback candidate");
+
+        assert!(
+            gnu < musl,
+            "the exact-host gnu candidate must precede the musl fallback"
+        );
+    }
+
+    /// On a `x86_64-pc-windows-msvc` host, eza's `x86_64-pc-windows-gnu` asset (baked-in `.exe`
+    /// name component) is generated as an ABI-compatible fallback.
+    #[test]
+    fn windows_msvc_host_generates_gnu_exe_fallback() {
+        let target = target_triple("x86_64-pc-windows-msvc");
+        let candidates = generate_candidate_filenames("eza", &[], "0.23.1", &target);
+        let names = filenames(&candidates);
+
+        assert!(
+            names.iter().any(|n| *n == "eza.exe_x86_64-pc-windows-gnu.tar.gz"),
+            "expected an eza.exe_x86_64-pc-windows-gnu.tar.gz fallback candidate"
+        );
+    }
+
+    /// On a macOS host, a `universal-apple-darwin` asset is generated as a fallback (a universal
+    /// fat binary always runs regardless of the host architecture).
+    #[test]
+    fn macos_host_generates_universal_fallback() {
+        let target = target_triple("aarch64-apple-darwin");
+        let candidates = generate_candidate_filenames("mytool", &[], "1.0.0", &target);
+        let names = filenames(&candidates);
+
+        assert!(
+            names.iter().any(|n| n.contains("universal-apple-darwin")),
+            "expected a universal-apple-darwin fallback candidate"
         );
     }
 }
