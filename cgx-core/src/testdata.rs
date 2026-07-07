@@ -7,6 +7,13 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::target::TargetTriple;
+
+/// Construct a [`TargetTriple`] from a literal, for tests anywhere in the crate that need one.
+pub(crate) fn target_triple(target: &'static str) -> TargetTriple {
+    TargetTriple::from_static(target)
+}
+
 pub(crate) struct CrateTestCase {
     /// The name of the test case, which is also the name of the directory under `testdata`.
     pub name: &'static str,

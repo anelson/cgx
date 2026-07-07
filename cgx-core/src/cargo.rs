@@ -15,6 +15,7 @@ use crate::{
     config::{Config, Verbosity},
     error,
     messages::{BuildMessage, MessageReporter},
+    target::TargetTriple,
 };
 
 /// Options for controlling cargo metadata invocation.
@@ -27,7 +28,7 @@ pub(crate) struct CargoMetadataOptions {
 
     /// Only include dependencies for the specified target platform.
     /// Corresponds to `--filter-platform TARGET` flag.
-    pub filter_platform: Option<String>,
+    pub filter_platform: Option<TargetTriple>,
 
     /// Space or comma separated list of features to activate.
     /// Corresponds to `--features` flag.
@@ -193,15 +194,15 @@ impl RealCargoRunner {
         // deps for all platforms mixed together. Default to current platform if not specified.
         let platform: Option<&str> = if options.no_deps {
             // When not resolving deps, platform filtering doesn't matter
-            options.filter_platform.as_deref()
+            options.filter_platform.as_ref().map(TargetTriple::as_str)
         } else {
             // When resolving deps, MUST filter by platform
             // Default to current platform if not specified
             Some(
                 options
                     .filter_platform
-                    .as_deref()
-                    .unwrap_or(build_context::TARGET),
+                    .as_ref()
+                    .map_or_else(|| TargetTriple::host().as_str(), TargetTriple::as_str),
             )
         };
 
@@ -335,7 +336,7 @@ impl CargoRunner for RealCargoRunner {
 
         // Target triple for cross-compilation
         if let Some(target) = &options.target {
-            cmd.args(["--target", target]);
+            cmd.args(["--target", target.as_str()]);
         }
 
         // Build target (bin/example)

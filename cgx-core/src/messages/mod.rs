@@ -28,6 +28,11 @@ pub use crate::git::GitSelector;
 /// Messages are serialized as tagged JSON with a "type" field indicating the subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the target refactor increases the largest variant by only about 40 bytes, just enough to \
+              cross the lint threshold"
+)]
 pub enum Message {
     CrateResolution(CrateResolutionMessage),
     PrebuiltBinary(PrebuiltBinaryMessage),

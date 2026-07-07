@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Message;
 use crate::{
+    bin_resolver::ResolvedBinary,
     builder::{BuildOptions, BuildTarget},
     config::BinaryProvider,
     crate_resolver::ResolvedCrate,
@@ -44,6 +45,10 @@ pub enum CgxMessage {
         /// The build options cgx chose for this invocation.
         options: BuildOptions,
         /// The Rust target triple this binary is for (the explicit `--target`, or the host triple).
+        ///
+        /// The reported target platform pertains to the resolved binary itself, not from the build
+        /// options: the binary may be for an ABI-compatible fallback of the host (a musl binary on
+        /// a glibc host, an msvc PE on a windows-gnu host, etc)
         target_platform: String,
         /// Whether the binary was built from source or downloaded pre-built, and where it is.
         provenance: Provenance,
@@ -78,7 +83,7 @@ impl CgxMessage {
         Self::CratePlan {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: options.target_platform().to_string(),
             options: options.clone(),
         }
     }
@@ -94,7 +99,7 @@ impl CgxMessage {
         Self::CrateProvenance {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: options.target_platform().to_string(),
             options: options.clone(),
             provenance: Provenance::BuiltFromSource {
                 binary_path: binary_path.to_path_buf(),
@@ -108,17 +113,16 @@ impl CgxMessage {
         resolved: &ResolvedCrate,
         crate_path: &Path,
         options: &BuildOptions,
-        provider: BinaryProvider,
-        binary_path: &Path,
+        binary: &ResolvedBinary,
     ) -> Self {
         Self::CrateProvenance {
             resolved: resolved.clone(),
             crate_path: crate_path.to_path_buf(),
-            target_platform: options.target_platform(),
+            target_platform: binary.target.clone(),
             options: options.clone(),
             provenance: Provenance::Prebuilt {
-                provider,
-                binary_path: binary_path.to_path_buf(),
+                provider: binary.provider,
+                binary_path: binary.path.clone(),
             },
         }
     }

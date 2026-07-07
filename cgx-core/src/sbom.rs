@@ -241,7 +241,7 @@ fn build_main_component(resolved: &ResolvedCrate, options: &BuildOptions) -> Res
         properties.push(
             PropertyBuilder::default()
                 .name("build:target")
-                .value(target.clone())
+                .value(target.to_string())
                 .build()
                 .map_err(|e| {
                     crate::error::SbomBuilderSnafu {
@@ -461,7 +461,7 @@ pub(crate) mod tests {
     use crate::{
         cargo::{CargoMetadataOptions, CargoRunner},
         crate_resolver::ResolvedSource,
-        testdata::CrateTestCase,
+        testdata::{CrateTestCase, target_triple},
     };
 
     /// Get a [`CargoRunner`] for testing.
@@ -939,7 +939,7 @@ pub(crate) mod tests {
         let options = BuildOptions {
             profile: Some("release".to_string()),
             all_features: true,
-            target: Some("x86_64-unknown-linux-musl".to_string()),
+            target: Some(target_triple("x86_64-unknown-linux-musl")),
             toolchain: Some("stable".to_string()),
             ..Default::default()
         };

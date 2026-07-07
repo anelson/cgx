@@ -291,7 +291,7 @@ eza = { version = "=0.23.1", features = ["vendored-openssl"] }
     let features = messages
         .iter()
         .find_map(|message| match message {
-            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features.clone()),
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features().to_vec()),
             _ => None,
         })
         .expect("expected a CratePlan message");
@@ -329,7 +329,7 @@ eza = { version = "=0.23.1", features = ["a-config-only-feature"] }
     let features = messages
         .iter()
         .find_map(|message| match message {
-            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features.clone()),
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.features().to_vec()),
             _ => None,
         })
         .expect("expected a CratePlan message");
@@ -362,7 +362,7 @@ eza = { version = "=0.23.1", default-features = false }
     let no_default_features = messages
         .iter()
         .find_map(|message| match message {
-            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.no_default_features),
+            Message::Cgx(CgxMessage::CratePlan { options, .. }) => Some(options.no_default_features()),
             _ => None,
         })
         .expect("expected a CratePlan message");
@@ -405,8 +405,8 @@ eza = { version = "=0.23.1", default-features = false }
         })
         .expect("expected a CratePlan message");
 
-    assert!(options.no_default_features);
-    assert_eq!(options.features, vec!["vendored-openssl"]);
+    assert!(options.no_default_features());
+    assert_eq!(options.features(), ["vendored-openssl"]);
 }
 
 #[test]

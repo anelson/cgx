@@ -16,6 +16,7 @@ pub mod messages;
 pub(crate) mod registry;
 pub mod runner;
 pub(crate) mod sbom;
+pub(crate) mod target;
 #[cfg(test)]
 pub(crate) mod testdata;
 
@@ -76,7 +77,7 @@ impl Cgx {
             cache.clone(),
             reporter.clone(),
             http_client.clone(),
-        ));
+        )?);
 
         let downloader = Arc::new(downloader::create_downloader(
             config.clone(),
@@ -128,8 +129,7 @@ impl Cgx {
                     &downloaded_crate.resolved,
                     &downloaded_crate.crate_path,
                     &build_options,
-                    provider,
-                    &resolved_binary.path,
+                    &resolved_binary,
                 )
             });
             return Ok(resolved_binary.path);

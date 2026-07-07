@@ -12,6 +12,7 @@ use crate::{
     cratespec::CrateSpec,
     downloader::DownloadedCrate,
     error,
+    target::TargetTriple,
 };
 
 /// Which executable within a crate to build.
@@ -94,44 +95,44 @@ pub struct BuildOverrides {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BuildOptions {
     /// Features to activate (corresponds to `--features`).
-    pub features: Vec<String>,
+    pub(crate) features: Vec<String>,
 
     /// Activate all available features (corresponds to `--all-features`).
-    pub all_features: bool,
+    pub(crate) all_features: bool,
 
     /// Do not activate the `default` feature (corresponds to `--no-default-features`).
-    pub no_default_features: bool,
+    pub(crate) no_default_features: bool,
 
     /// Build profile to use (corresponds to `--profile`).
     ///
     /// When `None`, the default release profile is used.
     /// Use `Some("dev")` for debug builds.
-    pub profile: Option<String>,
+    pub(crate) profile: Option<String>,
 
     /// Target triple for cross-compilation (corresponds to `--target`).
-    pub target: Option<String>,
+    pub(crate) target: Option<TargetTriple>,
 
     /// Require that `Cargo.lock` remains unchanged (corresponds to `--locked`).
-    pub locked: bool,
+    pub(crate) locked: bool,
 
     /// Run without accessing the network (corresponds to `--offline`).
-    pub offline: bool,
+    pub(crate) offline: bool,
 
     /// Number of parallel jobs for compilation (corresponds to `-j`/`--jobs`).
     ///
     /// When `None`, cargo uses its default (number of CPUs).
-    pub jobs: Option<usize>,
+    pub(crate) jobs: Option<usize>,
 
     /// Ignore `rust-version` specification in packages (corresponds to `--ignore-rust-version`).
-    pub ignore_rust_version: bool,
+    pub(crate) ignore_rust_version: bool,
 
     /// Which executable within the crate to build.
-    pub build_target: BuildTarget,
+    pub(crate) build_target: BuildTarget,
 
     /// Rust toolchain override to use for this build (e.g., "nightly", "1.70.0", "stable").
     ///
     /// When set, Cargo is run through `rustup run <toolchain>`.
-    pub toolchain: Option<String>,
+    pub(crate) toolchain: Option<String>,
 }
 
 impl Default for BuildOptions {
@@ -153,6 +154,61 @@ impl Default for BuildOptions {
 }
 
 impl BuildOptions {
+    /// Features to activate.
+    pub fn features(&self) -> &[String] {
+        &self.features
+    }
+
+    /// Whether all available features are activated.
+    pub fn all_features(&self) -> bool {
+        self.all_features
+    }
+
+    /// Whether the default feature is disabled.
+    pub fn no_default_features(&self) -> bool {
+        self.no_default_features
+    }
+
+    /// The build profile to use.
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+
+    /// The explicit target triple for cross-compilation, if one was requested.
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_ref().map(TargetTriple::as_str)
+    }
+
+    /// Whether `Cargo.lock` must remain unchanged.
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Whether Cargo should run without accessing the network.
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+
+    /// The requested number of parallel jobs for compilation.
+    pub fn jobs(&self) -> Option<usize> {
+        self.jobs
+    }
+
+    /// Whether to ignore package `rust-version` declarations.
+    pub fn ignore_rust_version(&self) -> bool {
+        self.ignore_rust_version
+    }
+
+    /// Which executable within the crate to build.
+    pub fn build_target(&self) -> &BuildTarget {
+        &self.build_target
+    }
+
+    /// The Rust toolchain override to use for this build.
+    pub fn toolchain(&self) -> Option<&str> {
+        self.toolchain.as_deref()
+    }
+
     /// Merge build options from config and already-translated CLI overrides, with proper
     /// precedence.
     ///
@@ -163,6 +219,11 @@ impl BuildOptions {
     /// which the CLI front-end has already produced from the raw arguments (tokenizing
     /// features, folding `--debug`, resolving `--bin`/`--example`).
     pub fn load(config: &Config, overrides: &BuildOverrides) -> Result<Self> {
+        // The target string is deliberately NOT validated here: cargo accepts targets (and even
+        // target-spec JSON paths) that we cannot parse, so whatever the user passed is carried
+        // through verbatim.
+        let target = overrides.target.clone().map(TargetTriple::from_owned);
+
         Ok(BuildOptions {
             // These come from the config settings, `Config` will already apply any CLI overrides
             locked: config.locked,
@@ -176,7 +237,7 @@ impl BuildOptions {
             all_features: overrides.all_features,
             no_default_features: overrides.no_default_features,
             profile: overrides.profile.clone(),
-            target: overrides.target.clone(),
+            target,
             jobs: overrides.jobs,
             ignore_rust_version: overrides.ignore_rust_version,
             build_target: overrides.target_selection.clone(),
@@ -228,14 +289,11 @@ impl BuildOptions {
 
     /// The resolved Rust target triple this build targets: the explicit `--target`, or cgx's own
     /// host triple ([`build_context::TARGET`]) when none was given.
-    ///
-    /// This matches how cgx resolves the platform everywhere else (pre-built binary lookup, cargo
-    /// metadata filtering, and the build cache), so it reliably names the triple the binary is for
-    /// even on a default build where cargo writes to `target/debug` rather than a triple subdir.
-    pub(crate) fn target_platform(&self) -> String {
-        self.target
-            .clone()
-            .unwrap_or_else(|| build_context::TARGET.to_string())
+    pub(crate) fn target_platform(&self) -> &TargetTriple {
+        match &self.target {
+            Some(target) => target,
+            None => TargetTriple::host(),
+        }
     }
 }
 
@@ -578,7 +636,7 @@ impl RealCrateBuilder {
         let temp_dir = tempfile::Builder::new()
             .prefix(&format!("cgx-build-{}", &krate.resolved.name))
             .tempdir_in(&self.config.build_dir)
-            .with_context(|_| error::TempDirCreationSnafu {
+            .with_context(|_| error::TempDirInCreationSnafu {
                 parent: self.config.build_dir.clone(),
             })?;
 
@@ -1223,7 +1281,7 @@ mod tests {
             );
             let options2 = BuildOptions {
                 profile: Some("dev".to_string()),
-                target: Some(build_context::TARGET.to_string()),
+                target: Some(TargetTriple::host().clone()),
                 ..Default::default()
             };
             let (binary2, _target) = builder.build(&krate2, &options2).unwrap();
@@ -1912,7 +1970,25 @@ mod tests {
                 let cli = Cli::parse_from_test_args(["--target", "x86_64-unknown-linux-gnu", "tool"]);
                 let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
 
-                assert_eq!(options.target, Some("x86_64-unknown-linux-gnu".to_string()));
+                assert_eq!(
+                    options.target.as_ref().map(TargetTriple::as_str),
+                    Some("x86_64-unknown-linux-gnu")
+                );
+            }
+
+            /// Any target rustc accepts must be forwarded to cargo verbatim, including triples
+            /// that `target-lexicon` cannot parse (`arm64ec-pc-windows-msvc` is a real rustc
+            /// target); cgx itself must not reject them.
+            #[test]
+            fn target_unparsable_by_target_lexicon() {
+                let config = Config::default();
+                let cli = Cli::parse_from_test_args(["--target", "arm64ec-pc-windows-msvc", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
+
+                assert_eq!(
+                    options.target.as_ref().map(TargetTriple::as_str),
+                    Some("arm64ec-pc-windows-msvc")
+                );
             }
 
             /// Test that `--jobs` flag is passed through.

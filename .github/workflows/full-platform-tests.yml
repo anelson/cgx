@@ -141,6 +141,21 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: cargo test --workspace ${{ env.TARGET_FLAG }}
 
+      # The first "Run tests" pass runs on whatever Rosetta state the runner ships with (GitHub's
+      # Apple Silicon runners have no Rosetta by default), exercising the negative branch of the
+      # self-adapting Rosetta fallback test. Install Rosetta and re-run only the prebuilt-binary
+      # tests so the positive branch (resolving an x86_64-apple-darwin asset under Rosetta) is also
+      # exercised. Nightly-only, since it is on the Mac ARM64 job of this workflow.
+      - name: Install Rosetta 2 (Mac ARM64)
+        if: matrix.name == 'Mac ARM64'
+        run: softwareupdate --install-rosetta --agree-to-license
+
+      - name: Re-run prebuilt-binary tests under Rosetta (Mac ARM64)
+        if: matrix.name == 'Mac ARM64'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: cargo test -p cgx --test integration prebuilt_binaries
+
   test-musl:
     name: Test (Linux musl ${{ matrix.name }})
     needs: should-run
