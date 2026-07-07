@@ -589,6 +589,33 @@ mod binstall {
     fn binstall_provider_resolves_wit_deps_exact_overrides_with_target_placeholders() {
         assert_binstall_resolves("wit-deps-cli@=0.6.0");
     }
+
+    /// cargo-nextest's manifest bakes its monorepo tag into `pkg-url`
+    /// (`{ repo }/releases/download/cargo-nextest-{ version }/...`), with `universal-apple-darwin`
+    /// overrides for both macOS architectures. This path is pure template substitution and
+    /// pre-dates the #239 tag heuristics; the test pins that the same crate resolves through both
+    /// routes (see `github_provider_resolves_cargo_nextest` for the heuristic one).
+    ///
+    /// Gated to targets its `pkg-url` template can name: the exact `{ target }` assets published
+    /// for 0.9.100 plus the explicit macOS universal overrides.
+    #[test]
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            any(target_env = "gnu", target_env = "musl")
+        ),
+        all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"),
+        all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(
+            target_os = "windows",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            target_env = "msvc"
+        )
+    ))]
+    fn binstall_provider_resolves_cargo_nextest() {
+        assert_binstall_resolves("cargo-nextest@=0.9.100");
+    }
 }
 
 mod github_releases {
@@ -646,6 +673,17 @@ mod github_releases {
         });
         let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+        // eza 0.23.1 publishes exact-triple Linux assets, but its only Windows asset is
+        // `x86_64-pc-windows-gnu` — so on an msvc host the resolved target must be the
+        // ABI-compatible gnu one, not the host triple.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let expected_target = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+        #[cfg(all(target_os = "linux", target_env = "musl"))]
+        let expected_target = "x86_64-unknown-linux-musl".to_string();
+        #[cfg(target_os = "windows")]
+        let expected_target = "x86_64-pc-windows-gnu".to_string();
+        assert_eq!(binary.target, expected_target);
 
         assert!(
             !messages
@@ -842,6 +880,86 @@ mod github_releases {
         let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
+        // With no `x86_64-unknown-linux-gnu` asset, an x86_64 Linux host (gnu or musl) must
+        // resolve the musl asset — the gnu host via ABI fallback. Every other gated host has an
+        // exact-triple asset.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let expected_target = "x86_64-unknown-linux-musl".to_string();
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let expected_target = "aarch64-unknown-linux-gnu".to_string();
+        #[cfg(target_os = "macos")]
+        let expected_target = format!("{}-apple-darwin", std::env::consts::ARCH);
+        #[cfg(all(target_os = "windows", target_env = "msvc"))]
+        let expected_target = format!("{}-pc-windows-msvc", std::env::consts::ARCH);
+        #[cfg(all(target_os = "windows", target_env = "gnu"))]
+        let expected_target = "x86_64-pc-windows-gnu".to_string();
+        assert_eq!(binary.target, expected_target);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
+    }
+
+    /// Test the `{crate}-{version}` monorepo release-tag heuristic end to end.
+    ///
+    /// The nextest repository tags its cargo-nextest releases `cargo-nextest-0.9.100` — no
+    /// `v{version}` or `{version}` tag exists — so the GitHub provider only finds the release
+    /// through the name-prefixed tag form. The asset names themselves
+    /// (`cargo-nextest-0.9.100-{target}.tar.gz`) match the standard candidate templates.
+    ///
+    /// cargo-nextest 0.9.100 publishes assets for `x86_64`/`aarch64` Linux gnu, `x86_64` Linux
+    /// musl (an ABI fallback for gnu hosts), `x86_64`/`i686`/`aarch64` Windows msvc, and a macOS
+    /// `universal-apple-darwin` fat binary, giving the cfg gate below.
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(target_os = "windows", any(target_arch = "x86_64", target_arch = "aarch64")),
+        all(target_os = "linux", target_env = "musl", target_arch = "x86_64"),
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    fn github_provider_resolves_cargo_nextest() {
+        let mut cgx = Cgx::with_test_fs();
+
+        let (assert, messages) = cgx
+            .cmd
+            .with_json_messages()
+            .arg("--prebuilt-binary")
+            .arg("always")
+            .arg("--prebuilt-binary-sources")
+            .arg("github-releases")
+            .arg("--no-exec")
+            .arg("cargo-nextest@=0.9.100")
+            .assert_with_messages();
+
+        assert.success();
+
+        let resolved = messages.iter().find_map(|m| match m {
+            Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+            _ => None,
+        });
+        let binary = resolved.expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+        // On macOS the only asset is the `universal-apple-darwin` fat binary, and on Windows the
+        // only assets are msvc ones (an ABI fallback for a windows-gnu host) — in both cases the
+        // resolved target is not necessarily the host triple. Linux hosts get exact-triple assets.
+        #[cfg(target_os = "macos")]
+        let expected_target = "universal-apple-darwin".to_string();
+        #[cfg(target_os = "windows")]
+        let expected_target = format!("{}-pc-windows-msvc", std::env::consts::ARCH);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let expected_target = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+        #[cfg(all(target_os = "linux", target_env = "musl"))]
+        let expected_target = "x86_64-unknown-linux-musl".to_string();
+        assert_eq!(binary.target, expected_target);
+
         assert!(
             !messages
                 .iter()
@@ -891,12 +1009,13 @@ mod github_releases {
             .expect("Expected PrebuiltBinaryMessage::Resolved");
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
-        // The provenance report must name the ABI-compatible target that actually matched (just
-        // 1.42.4 ships only musl Linux and msvc Windows assets)
+        // Both the resolved binary and the provenance report must name the ABI-compatible target
+        // that actually matched (just 1.42.4 ships only musl Linux and msvc Windows assets)
         #[cfg(target_os = "linux")]
         let expected_target = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
         #[cfg(target_os = "windows")]
         let expected_target = "x86_64-pc-windows-msvc".to_string();
+        assert_eq!(binary.target, expected_target);
 
         let target_platform = messages
             .iter()
@@ -965,6 +1084,9 @@ mod github_releases {
                 .expect("Expected PrebuiltBinaryMessage::Resolved when Rosetta is available");
             assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
+            // The resolved target must be the x86_64 (Rosetta) fallback, not the aarch64 host.
+            assert_eq!(binary.target, "x86_64-apple-darwin");
+
             // The resolved asset must be the x86_64 (Rosetta) fallback, not an aarch64 asset.
             assert!(
                 messages.iter().any(|m| matches!(
@@ -1018,28 +1140,18 @@ mod github_releases {
         }
     }
 
-    /// Test the macOS `universal-apple-darwin` fallback path — currently BLOCKED by issue #239.
+    /// Test the macOS `universal-apple-darwin` fallback path end to end.
     ///
-    /// cargo-nextest 0.9.100 publishes only a `universal-apple-darwin` fat binary for macOS, which
-    /// a universal fallback token would match. But its GitHub release is tagged
-    /// `cargo-nextest-0.9.100`, and the GitHub provider today only tries the `v{version}` and
-    /// `{version}` tag forms, so it never finds the release and resolution fails before any asset
-    /// is matched.
-    ///
-    /// This test asserts the current (incorrect) blocked behavior as a tripwire. Once
-    /// https://github.com/anelson/cgx/issues/239 adds `{crate}-{version}` tag matching, cgx will
-    /// find the `cargo-nextest-0.9.100` release and match its
-    /// `cargo-nextest-0.9.100-universal-apple-darwin.tar.gz` asset via the `universal-apple-darwin`
-    /// compatible-target name. When that lands, this assertion must flip: the command should
-    /// `.success()` with `Resolved { provider: GithubReleases }` and a `DownloadingBinary` URL
-    /// containing `universal-apple-darwin`. (The universal fallback itself is already proven by the
-    /// `target.rs` and `providers` unit tests; #239 only unblocks the end-to-end path.)
+    /// cargo-nextest 0.9.100 publishes only a `universal-apple-darwin` fat binary for macOS, in a
+    /// GitHub release tagged `cargo-nextest-0.9.100`. Resolving it therefore exercises two
+    /// heuristics at once: the `{crate}-{version}` monorepo tag form to find the release,
+    /// and the `universal-apple-darwin` compatible-target token to match the asset.
     #[test]
     #[cfg(target_os = "macos")]
-    fn github_provider_universal_nextest_blocked_by_239() {
+    fn github_provider_resolves_universal_nextest() {
         let mut cgx = Cgx::with_test_fs();
 
-        let (assert, _messages) = cgx
+        let (assert, messages) = cgx
             .cmd
             .with_json_messages()
             .arg("--prebuilt-binary")
@@ -1050,9 +1162,35 @@ mod github_releases {
             .arg("cargo-nextest@=0.9.100")
             .assert_with_messages();
 
-        // BLOCKED by #239: the `cargo-nextest-0.9.100` release tag is not matched, so no binary is
-        // found and `always` mode fails. Flip to `.success()` (see doc comment) once #239 lands.
-        assert.failure();
+        assert.success();
+
+        let binary = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::Resolved { binary }) => Some(binary),
+                _ => None,
+            })
+            .expect("Expected PrebuiltBinaryMessage::Resolved");
+        assert_eq!(binary.provider, BinaryProvider::GithubReleases);
+
+        // The fat binary's pseudo-target, not the host triple, is what the binary resolved to.
+        assert_eq!(binary.target, "universal-apple-darwin");
+
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                Message::PrebuiltBinary(PrebuiltBinaryMessage::DownloadingBinary { url, .. })
+                    if url.contains("universal-apple-darwin")
+            )),
+            "Expected the downloaded asset URL to contain universal-apple-darwin"
+        );
+
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Message::Build(BuildMessage::Started { .. }))),
+            "Should not have BuildMessage::Started when using prebuilt binary"
+        );
     }
 }
 

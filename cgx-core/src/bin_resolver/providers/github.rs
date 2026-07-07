@@ -116,7 +116,13 @@ impl GithubProvider {
         repo: &str,
         tag: &str,
     ) -> Result<Vec<(String, String)>> {
-        let url = format!("{}/repos/{}/{}/releases/tags/{}", api_base, owner, repo, tag);
+        let url = format!(
+            "{}/repos/{}/{}/releases/tags/{}",
+            api_base,
+            owner,
+            repo,
+            super::tag_url_path_segment(tag)
+        );
 
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
@@ -150,6 +156,28 @@ impl GithubProvider {
             .into_iter()
             .map(|a| (a.name, a.browser_download_url))
             .collect())
+    }
+
+    /// Try each release tag form in order, returning the assets of the first tag whose release
+    /// has any.
+    ///
+    /// A tag whose release is absent (404) or exists but has no assets falls through to the next
+    /// form; an inconclusive [`Self::list_release_assets`] failure propagates as `Err`. Returns
+    /// an empty vec when no tag form yields assets, which is a conclusive absence.
+    fn find_release_assets_for_tags(
+        &self,
+        api_base: &str,
+        owner: &str,
+        repo: &str,
+        tags: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        for tag in tags {
+            let assets = self.list_release_assets(api_base, owner, repo, tag)?;
+            if !assets.is_empty() {
+                return Ok(assets);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Download a release asset from the given URL.
@@ -293,22 +321,12 @@ impl Provider for GithubProvider {
         };
 
         let version = krate.resolved.version.to_string();
+        let crate_name = krate.resolved.name.as_str();
 
-        // Try both v{version} and {version} tags; stop at the first that returns assets.
-        let tags = [format!("v{}", version), version.clone()];
-        let mut assets = Vec::new();
-        for tag in &tags {
-            // `list_release_assets` already handles 404 and just returns an empty vec, so we can
-            // just check if the result is empty or not.
-            match self.list_release_assets(&api_base, owner, repo, tag) {
-                Ok(a) if !a.is_empty() => {
-                    assets = a;
-                    break;
-                }
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
-        }
+        // Try each tag form the release might use (see [`super::generate_candidate_tags`]);
+        // stop at the first that returns assets.
+        let tags = super::generate_candidate_tags(crate_name, &version);
+        let assets = self.find_release_assets_for_tags(&api_base, owner, repo, &tags)?;
 
         if assets.is_empty() {
             self.reporter.report(|| {
@@ -320,7 +338,6 @@ impl Provider for GithubProvider {
             return Ok(ConclusiveResolution::Nonexistent);
         }
 
-        let crate_name = krate.resolved.name.as_str();
         let binary_names = krate.binary_names()?;
         let extra_binary_names: Vec<&str> = binary_names
             .iter()
@@ -437,8 +454,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::HttpConfig, crate_resolver::ResolvedSource, cratespec::Forge, error::Error,
-        messages::MessageReporter,
+        bin_resolver::providers::generate_candidate_tags, config::HttpConfig, crate_resolver::ResolvedSource,
+        cratespec::Forge, error::Error, messages::MessageReporter,
     };
 
     fn fast_retry_config() -> HttpConfig {
@@ -711,6 +728,108 @@ repository = "https://github.com/owner/mytool"
             .unwrap();
 
         assert!(assets.is_empty());
+        mock.assert_calls(1);
+    }
+
+    /// JSON body for a release whose only asset is `name`, for mocking the releases API.
+    fn release_json(name: &str) -> String {
+        format!(
+            r#"{{"assets": [{{"name": "{name}", "browser_download_url": "https://example.com/{name}"}}]}}"#
+        )
+    }
+
+    /// Mock a 404 for the given release tag path segment, for tags that must be probed and missed.
+    fn mock_tag_404<'a>(server: &'a MockServer, tag_segment: &str) -> httpmock::Mock<'a> {
+        let path = format!("/repos/owner/repo/releases/tags/{}", tag_segment);
+        server.mock(|when, then| {
+            when.method(GET).path(path);
+            then.status(404);
+        })
+    }
+
+    #[test]
+    fn find_release_assets_stops_at_first_tag_with_assets() {
+        let server = MockServer::start();
+        let first = server.mock(|when, then| {
+            when.method(GET).path("/repos/owner/repo/releases/tags/v1.0.0");
+            then.status(200)
+                .body(release_json("mytool-1.0.0-x86_64-unknown-linux-gnu.tar.gz"));
+        });
+        let later_tags = [
+            "1.0.0",
+            "mytool-v1.0.0",
+            "mytool-1.0.0",
+            "mytool%2Fv1.0.0",
+            "mytool%2F1.0.0",
+        ];
+        let later_mocks: Vec<_> = later_tags.iter().map(|t| mock_tag_404(&server, t)).collect();
+        let (provider, _temp_dir) = test_provider();
+
+        let tags = generate_candidate_tags("mytool", "1.0.0");
+        let assets = provider
+            .find_release_assets_for_tags(&server.base_url(), "owner", "repo", &tags)
+            .unwrap();
+
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].0, "mytool-1.0.0-x86_64-unknown-linux-gnu.tar.gz");
+        first.assert_calls(1);
+        for mock in &later_mocks {
+            mock.assert_calls(0);
+        }
+    }
+
+    /// The cargo-nextest shape: the first three tag forms 404 and the `{name}-{version}` form is
+    /// the release's actual tag. The two slash forms after it must never be probed.
+    #[test]
+    fn find_release_assets_falls_through_404s_to_name_prefixed_tag() {
+        let server = MockServer::start();
+        let missed_mocks: Vec<_> = ["v1.0.0", "1.0.0", "mytool-v1.0.0"]
+            .iter()
+            .map(|t| mock_tag_404(&server, t))
+            .collect();
+        let hit = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/owner/repo/releases/tags/mytool-1.0.0");
+            then.status(200)
+                .body(release_json("mytool-1.0.0-x86_64-unknown-linux-gnu.tar.gz"));
+        });
+        let slash_mocks: Vec<_> = ["mytool%2Fv1.0.0", "mytool%2F1.0.0"]
+            .iter()
+            .map(|t| mock_tag_404(&server, t))
+            .collect();
+        let (provider, _temp_dir) = test_provider();
+
+        let tags = generate_candidate_tags("mytool", "1.0.0");
+        let assets = provider
+            .find_release_assets_for_tags(&server.base_url(), "owner", "repo", &tags)
+            .unwrap();
+
+        assert_eq!(assets[0].0, "mytool-1.0.0-x86_64-unknown-linux-gnu.tar.gz");
+        hit.assert_calls(1);
+        for mock in &missed_mocks {
+            mock.assert_calls(1);
+        }
+        for mock in &slash_mocks {
+            mock.assert_calls(0);
+        }
+    }
+
+    /// Slash-form subcrate tags must reach the API as a single percent-encoded path segment.
+    #[test]
+    fn list_release_assets_percent_encodes_slash_tags() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/owner/repo/releases/tags/mytool%2Fv1.0.0");
+            then.status(200).body(release_json("mytool-v1.0.0.tar.gz"));
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let assets = provider
+            .list_release_assets(&server.base_url(), "owner", "repo", "mytool/v1.0.0")
+            .unwrap();
+
+        assert_eq!(assets[0].0, "mytool-v1.0.0.tar.gz");
         mock.assert_calls(1);
     }
 }
