@@ -461,13 +461,8 @@ pub(crate) mod tests {
     use crate::{
         cargo::{CargoMetadataOptions, CargoRunner},
         crate_resolver::ResolvedSource,
-        target::TargetTriple,
-        testdata::CrateTestCase,
+        testdata::{CrateTestCase, target_triple},
     };
-
-    fn target(target: &'static str) -> TargetTriple {
-        TargetTriple::from_static(target).unwrap()
-    }
 
     /// Get a [`CargoRunner`] for testing.
     ///
@@ -944,7 +939,7 @@ pub(crate) mod tests {
         let options = BuildOptions {
             profile: Some("release".to_string()),
             all_features: true,
-            target: Some(target("x86_64-unknown-linux-musl")),
+            target: Some(target_triple("x86_64-unknown-linux-musl")),
             toolchain: Some("stable".to_string()),
             ..Default::default()
         };

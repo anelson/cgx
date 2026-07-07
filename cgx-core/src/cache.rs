@@ -62,12 +62,19 @@ type CrateResolveCacheEntry = CacheEntry<ResolvedCrate>;
 
 /// Manages the various caches that cgx uses to operate.
 ///
-/// The root of the caches is controlled by [`Config::cache_dir`].  Below that are multiple
-/// subdirectories for caching various things:
+/// Most caches root at [`Config::cache_dir`], with a subdirectory per concern:
 /// - Results of crate spec resolution
+/// - Binary-resolution outcomes for prebuilt binaries
 /// - Downloaded/extracted crate source code packages
 /// - Git database (bare repos)
 /// - Git checkouts at specific commits
+///
+/// The binaries themselves are the exception: they live under [`Config::bin_dir`], rooted per
+/// crate at [`Cache::crate_bin_root`], keeping executables separate from the disposable download
+/// and metadata caches.  You might argue that that's not a cache at all and that this logic
+/// doesn't belong in a type called `Cache`.  I might argue that you're being unnecessarily
+/// pedantic and that the bin dir is absolutely a cache, in that if you delete it we have to do
+/// more work again to get the binaries back.
 ///
 /// More may be added over time.
 #[derive(Clone, Debug)]
@@ -233,9 +240,12 @@ impl Cache {
         })?;
 
         // Create a temp directory in the same parent directory for atomic rename
-        let temp_dir = tempfile::tempdir_in(parent).with_context(|_| error::TempDirInCreationSnafu {
-            parent: parent.to_path_buf(),
-        })?;
+        let temp_dir = tempfile::Builder::new()
+            .prefix(&format!("cgx-download-{}-temp", &resolved.name))
+            .tempdir_in(parent)
+            .with_context(|_| error::TempDirInCreationSnafu {
+                parent: parent.to_path_buf(),
+            })?;
 
         // Call the downloader with the temp path
         downloader(temp_dir.path())?;
@@ -326,7 +336,10 @@ impl Cache {
     ///
     /// Returns `Ok(None)` when there is no cache entry for the crate, or `Ok(Some(entry))` carrying
     /// the cached resolution outcome.
-    pub(crate) fn get_cached_binary(&self, krate: &ResolvedCrate) -> Result<Option<BinaryCacheEntry>> {
+    pub(crate) fn get_cached_binary_resolution(
+        &self,
+        krate: &ResolvedCrate,
+    ) -> Result<Option<BinaryCacheEntry>> {
         self.inner
             .reporter
             .report(|| PrebuiltBinaryMessage::cache_lookup(krate));
@@ -342,7 +355,11 @@ impl Cache {
     }
 
     /// Store a binary-resolution cache entry for the given [`ResolvedCrate`].
-    pub(crate) fn put_cached_binary(&self, krate: &ResolvedCrate, entry: BinaryCacheEntry) -> Result<()> {
+    pub(crate) fn put_cached_binary_resolution(
+        &self,
+        krate: &ResolvedCrate,
+        entry: BinaryCacheEntry,
+    ) -> Result<()> {
         let cache_file = self.binary_cache_path(krate)?;
 
         if let Some(parent) = cache_file.parent() {
@@ -547,6 +564,20 @@ impl Cache {
         Ok(path)
     }
 
+    /// Get the root directory under [`Config::bin_dir`] holding all binaries for one resolved
+    /// crate: `<bin_dir>/<name>-<version>/<source-hash>/`.
+    ///
+    /// Callers are expected to append their own leaf directory to this path.  A given bin root can
+    /// contain either binaries built from source or prebuilt binaries obtained from various
+    /// sources; each caller is responsible for avoiding collisions with all other callers.
+    pub(crate) fn crate_bin_root(&self, krate: &ResolvedCrate) -> PathBuf {
+        self.inner
+            .config
+            .bin_dir
+            .join(format!("{}-{}", krate.name, krate.version))
+            .join(krate.source.source_hash())
+    }
+
     /// Get the cache path for a git database (bare repo) for a URL.
     pub(crate) fn git_db_path(&self, url: &str) -> PathBuf {
         let ident = Self::compute_git_ident(url);
@@ -662,17 +693,10 @@ impl Cache {
             .reporter
             .report(|| BuildCacheMessage::cache_lookup(krate, options));
 
-        let source_hash = Self::compute_source_hash(&krate.source);
         let build_hash = Self::compute_build_hash(options);
         let binary_name = Self::expected_binary_name(&krate.name, &options.build_target);
 
-        let cache_dir = self
-            .inner
-            .config
-            .bin_dir
-            .join(format!("{}-{}", krate.name, krate.version))
-            .join(source_hash)
-            .join(build_hash);
+        let cache_dir = self.crate_bin_root(krate).join(build_hash);
 
         let cache_path = cache_dir.join(&binary_name);
         let sbom_path = cache_dir.join("sbom.cyclonedx.json");
@@ -722,25 +746,6 @@ impl Cache {
             .report(|| BuildCacheMessage::cache_stored(&cache_path, &sbom_path));
 
         Ok(cache_path)
-    }
-
-    /// Compute a hash of the resolved source to distinguish different crate origins.
-    ///
-    /// Different sources (crates.io vs git vs forge) will produce different hashes
-    /// even for the same crate name and version.
-    ///
-    /// Uses SHA-256 over the source's JSON serialization, so the resulting build-cache paths are
-    /// stable across toolchains and platforms (presuming, of course, that the JSON serialized
-    /// representation of the source is itself stable across toolchains and platforms, which we
-    /// hope that it is).
-    fn compute_source_hash(source: &ResolvedSource) -> String {
-        // It makes absolutely no sense to try to cache a local dir source!  Higher-level code
-        // should have already bypassed the cache for this source.
-        if matches!(source, ResolvedSource::LocalDir { .. }) {
-            panic!("BUG: Should not compute a build-cache hash for LocalDir sources");
-        }
-
-        source.source_hash()
     }
 
     /// Compute a hash of build options that affect the output binary.
@@ -829,12 +834,8 @@ mod tests {
     use super::*;
     use crate::{
         bin_resolver::{BinaryCacheEntry, ConclusiveResolution, ResolvedBinary},
-        target::TargetTriple,
+        testdata::target_triple,
     };
-
-    fn target(target: &'static str) -> TargetTriple {
-        TargetTriple::from_static(target).unwrap()
-    }
 
     fn test_cache() -> (Cache, TempDir) {
         test_cache_with_timeout(Duration::from_secs(3600))
@@ -935,6 +936,7 @@ mod tests {
                             },
                             provider: BinaryProvider::GithubReleases,
                             path: PathBuf::from("/cache/bin/eza"),
+                            target: "x86_64-pc-windows-gnu".to_string(),
                         }),
                         enabled_providers: vec![
                             BinaryProvider::Binstall,
@@ -970,6 +972,7 @@ mod tests {
   },
   "provider": "github-releases",
   "path": "/cache/bin/eza",
+  "target": "x86_64-pc-windows-gnu",
   "enabled_providers": [
     "binstall",
     "github-releases",
@@ -1278,7 +1281,8 @@ mod tests {
                     source: ResolvedSource::CratesIo,
                 };
                 assert_eq!(
-                    Cache::compute_binary_cache_hash(&krate, &target("x86_64-unknown-linux-gnu")).unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target_triple("x86_64-unknown-linux-gnu"))
+                        .unwrap(),
                     "e73c84363ece02d92a3dfe4ff390dcbe0dbe3381f050280505a1adb3916fad78"
                 );
             }
@@ -1291,8 +1295,9 @@ mod tests {
                     source: ResolvedSource::CratesIo,
                 };
                 assert_ne!(
-                    Cache::compute_binary_cache_hash(&krate, &target("x86_64-unknown-linux-gnu")).unwrap(),
-                    Cache::compute_binary_cache_hash(&krate, &target("aarch64-apple-darwin")).unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target_triple("x86_64-unknown-linux-gnu"))
+                        .unwrap(),
+                    Cache::compute_binary_cache_hash(&krate, &target_triple("aarch64-apple-darwin")).unwrap(),
                 );
             }
         }
@@ -1306,7 +1311,7 @@ mod tests {
             #[test]
             fn source_hash_crates_io() {
                 assert_eq!(
-                    Cache::compute_source_hash(&ResolvedSource::CratesIo),
+                    ResolvedSource::CratesIo.source_hash(),
                     "797cfdcfdf4d45ed0d3963577b0e549fe0c37295320d320d7173bfcf7bc42842"
                 );
             }
@@ -1326,7 +1331,7 @@ mod tests {
                     all_features: false,
                     no_default_features: true,
                     profile: Some("release".to_string()),
-                    target: Some(target("x86_64-unknown-linux-gnu")),
+                    target: Some(target_triple("x86_64-unknown-linux-gnu")),
                     build_target: BuildTarget::Bin("mybin".to_string()),
                     toolchain: Some("stable".to_string()),
                     locked: true,
@@ -1939,11 +1944,11 @@ mod tests {
         #[test]
         fn different_target_produces_different_hash() {
             let options1 = BuildOptions {
-                target: Some(target("x86_64-unknown-linux-gnu")),
+                target: Some(target_triple("x86_64-unknown-linux-gnu")),
                 ..Default::default()
             };
             let options2 = BuildOptions {
-                target: Some(target("aarch64-unknown-linux-gnu")),
+                target: Some(target_triple("aarch64-unknown-linux-gnu")),
                 ..Default::default()
             };
 
@@ -2095,54 +2100,60 @@ mod tests {
 
         #[test]
         fn source_hash_distinguishes_crates_io() {
-            let hash = Cache::compute_source_hash(&ResolvedSource::CratesIo);
+            let hash = ResolvedSource::CratesIo.source_hash();
             assert_eq!(hash.len(), 64, "SHA-256 hash should be 64 hex chars");
         }
 
         #[test]
         fn source_hash_distinguishes_git() {
-            let hash1 = Cache::compute_source_hash(&ResolvedSource::Git {
+            let hash1 = ResolvedSource::Git {
                 repo: "https://github.com/rust-lang/cargo".to_string(),
                 commit: "abc123".to_string(),
-            });
-            let hash2 = Cache::compute_source_hash(&ResolvedSource::Git {
+            }
+            .source_hash();
+            let hash2 = ResolvedSource::Git {
                 repo: "https://github.com/rust-lang/cargo".to_string(),
                 commit: "def456".to_string(),
-            });
+            }
+            .source_hash();
 
             assert_ne!(hash1, hash2, "Different commits should produce different hashes");
         }
 
         #[test]
         fn source_hash_distinguishes_forge() {
-            let hash1 = Cache::compute_source_hash(&ResolvedSource::Forge {
+            let hash1 = ResolvedSource::Forge {
                 forge: Forge::GitHub {
                     custom_url: None,
                     owner: "rust-lang".to_string(),
                     repo: "cargo".to_string(),
                 },
                 commit: "abc123".to_string(),
-            });
-            let hash2 = Cache::compute_source_hash(&ResolvedSource::Forge {
+            }
+            .source_hash();
+            let hash2 = ResolvedSource::Forge {
                 forge: Forge::GitHub {
                     custom_url: None,
                     owner: "rust-lang".to_string(),
                     repo: "cargo".to_string(),
                 },
                 commit: "def456".to_string(),
-            });
+            }
+            .source_hash();
 
             assert_ne!(hash1, hash2, "Different commits should produce different hashes");
         }
 
         #[test]
         fn source_hash_distinguishes_registry() {
-            let hash1 = Cache::compute_source_hash(&ResolvedSource::Registry {
+            let hash1 = ResolvedSource::Registry {
                 source: RegistrySource::Named("my-registry".to_string()),
-            });
-            let hash2 = Cache::compute_source_hash(&ResolvedSource::Registry {
+            }
+            .source_hash();
+            let hash2 = ResolvedSource::Registry {
                 source: RegistrySource::Named("other-registry".to_string()),
-            });
+            }
+            .source_hash();
 
             assert_ne!(
                 hash1, hash2,
@@ -2215,10 +2226,10 @@ mod tests {
             let krate = test_resolved();
             let providers = vec![BinaryProvider::Binstall, BinaryProvider::GithubReleases];
 
-            assert_matches!(cache.get_cached_binary(&krate), Ok(None));
+            assert_matches!(cache.get_cached_binary_resolution(&krate), Ok(None));
 
             cache
-                .put_cached_binary(
+                .put_cached_binary_resolution(
                     &krate,
                     BinaryCacheEntry {
                         outcome: ConclusiveResolution::Nonexistent,
@@ -2227,7 +2238,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let entry = cache.get_cached_binary(&krate).unwrap().unwrap();
+            let entry = cache.get_cached_binary_resolution(&krate).unwrap().unwrap();
             assert_eq!(entry.outcome, ConclusiveResolution::Nonexistent);
             assert_eq!(entry.enabled_providers, providers);
         }
@@ -2238,7 +2249,7 @@ mod tests {
             let krate = test_resolved();
 
             cache
-                .put_cached_binary(
+                .put_cached_binary_resolution(
                     &krate,
                     BinaryCacheEntry {
                         outcome: ConclusiveResolution::Nonexistent,
@@ -2252,12 +2263,13 @@ mod tests {
                     krate: test_resolved(),
                     provider: BinaryProvider::GithubReleases,
                     path: PathBuf::from("/cache/bin/serde"),
+                    target: build_context::TARGET.to_string(),
                 }),
                 enabled_providers: vec![BinaryProvider::GithubReleases],
             };
-            cache.put_cached_binary(&krate, found.clone()).unwrap();
+            cache.put_cached_binary_resolution(&krate, found.clone()).unwrap();
 
-            let entry = cache.get_cached_binary(&krate).unwrap().unwrap();
+            let entry = cache.get_cached_binary_resolution(&krate).unwrap().unwrap();
             assert_eq!(entry, found);
         }
     }

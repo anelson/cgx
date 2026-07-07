@@ -1,9 +1,7 @@
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use reqwest::StatusCode;
-use snafu::ResultExt;
+use tempfile::TempDir;
 
 use super::{ArchiveFormat, CandidateFilename, Provider};
 use crate::{
@@ -47,11 +45,14 @@ struct GitlabReleaseAssetCandidate {
     /// some projects publish assets under a name that differs from the crate's default
     /// binary name.
     binary_basename_hint: String,
+
+    /// The compatible target whose platform token produced this candidate's filename.
+    target: TargetTriple,
 }
 
 pub(in crate::bin_resolver) struct GitlabProvider {
     reporter: crate::messages::MessageReporter,
-    cache_dir: PathBuf,
+    staging_dir: PathBuf,
     verify_checksums: bool,
     http_client: HttpClient,
 }
@@ -59,13 +60,15 @@ pub(in crate::bin_resolver) struct GitlabProvider {
 impl GitlabProvider {
     pub(in crate::bin_resolver) fn new(
         reporter: crate::messages::MessageReporter,
-        cache_dir: PathBuf,
+        staging_dir: &TempDir,
         verify_checksums: bool,
         http_client: HttpClient,
     ) -> Self {
         Self {
             reporter,
-            cache_dir,
+            staging_dir: staging_dir
+                .path()
+                .join(<&'static str>::from(BinaryProvider::GitlabReleases)),
             verify_checksums,
             http_client,
         }
@@ -119,6 +122,7 @@ impl GitlabProvider {
                 filename,
                 binary_basename,
                 format,
+                target,
             } in &filename_candidates
             {
                 asset_candidates.push(GitlabReleaseAssetCandidate {
@@ -126,6 +130,7 @@ impl GitlabProvider {
                     archive_format: *format,
                     asset_filename: filename.clone(),
                     binary_basename_hint: binary_basename.clone(),
+                    target: target.clone(),
                 });
             }
         }
@@ -256,11 +261,9 @@ impl Provider for GitlabProvider {
         let expected_binary_names =
             super::expected_binary_names(&binary_name, Some(&candidate.binary_basename_hint), crate_name);
 
-        let temp_dir = tempfile::tempdir().context(error::TempDirCreationSnafu)?;
+        let work_dir = super::recreate_staging_work_dir(&self.staging_dir, &krate.resolved)?;
 
-        let archive_path = temp_dir
-            .path()
-            .join(candidate.archive_format.canonical_filename());
+        let archive_path = work_dir.join(candidate.archive_format.canonical_filename());
         match self.try_download_to_file(&candidate.url, &archive_path) {
             Ok(true) => {}
             Ok(false) => {
@@ -277,7 +280,7 @@ impl Provider for GitlabProvider {
 
         if self.verify_checksums {
             let checksum_url = format!("{}.sha256", candidate.url);
-            let checksum_path = temp_dir.path().join("checksum.sha256");
+            let checksum_path = work_dir.join("checksum.sha256");
             let checksum_found =
                 self.try_download_to_file(&checksum_url, &checksum_path)
                     .map_err(|source| {
@@ -304,7 +307,7 @@ impl Provider for GitlabProvider {
             }
         }
 
-        let extract_dir = temp_dir.path().join("extracted");
+        let extract_dir = work_dir.join("extracted");
         let binary_path = super::extract_binary_by_candidate_names(
             &archive_path,
             candidate.archive_format,
@@ -315,40 +318,12 @@ impl Provider for GitlabProvider {
             super::provider_asset_preparation_failed(BinaryProvider::GitlabReleases, &candidate.url, source)
         })?;
 
-        let final_dir = self
-            .cache_dir
-            .join("binaries")
-            .join("gitlab")
-            .join(&krate.resolved.name)
-            .join(krate.resolved.version.to_string())
-            .join(target.as_str());
-
-        std::fs::create_dir_all(&final_dir).with_context(|_| error::IoSnafu {
-            path: final_dir.clone(),
-        })?;
-
-        let final_path = final_dir.join(format!("{}{}", binary_name, target.binary_ext()));
-        std::fs::copy(&binary_path, &final_path).with_context(|_| error::IoSnafu {
-            path: final_path.clone(),
-        })?;
-
-        #[cfg(unix)]
-        {
-            let mut perms = std::fs::metadata(&final_path)
-                .with_context(|_| error::IoSnafu {
-                    path: final_path.clone(),
-                })?
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&final_path, perms).with_context(|_| error::IoSnafu {
-                path: final_path.clone(),
-            })?;
-        }
-
+        let staged_path = super::stage_extracted_binary(&work_dir, &binary_name, target, &binary_path)?;
         Ok(ConclusiveResolution::Found(ResolvedBinary {
             krate: krate.resolved.clone(),
             provider: BinaryProvider::GitlabReleases,
-            path: final_path,
+            path: staged_path,
+            target: candidate.target.to_string(),
         }))
     }
 }
@@ -365,7 +340,7 @@ mod tests {
     use super::*;
     use crate::{
         config::HttpConfig, crate_resolver::ResolvedSource, cratespec::Forge, error::Error,
-        messages::MessageReporter,
+        messages::MessageReporter, testdata::target_triple,
     };
 
     fn fast_retry_config() -> HttpConfig {
@@ -377,22 +352,13 @@ mod tests {
         }
     }
 
-    fn test_provider() -> (GitlabProvider, tempfile::TempDir) {
+    fn test_provider() -> (GitlabProvider, TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let http_client = HttpClient::new(&fast_retry_config()).unwrap();
         (
-            GitlabProvider::new(
-                MessageReporter::null(),
-                temp_dir.path().to_path_buf(),
-                false,
-                http_client,
-            ),
+            GitlabProvider::new(MessageReporter::null(), &temp_dir, false, http_client),
             temp_dir,
         )
-    }
-
-    fn target_triple(target: &'static str) -> TargetTriple {
-        TargetTriple::from_static(target).unwrap()
     }
 
     #[test]

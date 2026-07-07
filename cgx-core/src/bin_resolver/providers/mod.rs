@@ -5,9 +5,12 @@ mod github;
 mod gitlab;
 mod quickinstall;
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
-use snafu::IntoError;
+use snafu::{IntoError, ResultExt};
 
 pub(super) use self::{
     archive::{ArchiveFormat, extract_binary_at_archive_relative_path, extract_binary_by_candidate_names},
@@ -17,8 +20,8 @@ pub(super) use self::{
     quickinstall::QuickinstallProvider,
 };
 use crate::{
-    Result, bin_resolver::ConclusiveResolution, config::BinaryProvider, downloader::DownloadedCrate, error,
-    target::TargetTriple,
+    Result, bin_resolver::ConclusiveResolution, config::BinaryProvider, crate_resolver::ResolvedCrate,
+    downloader::DownloadedCrate, error, target::TargetTriple,
 };
 
 /// Trait for providers that can resolve pre-built binaries.
@@ -43,6 +46,42 @@ pub(super) trait Provider {
 
     /// The kind of this provider, used for progress reporting.
     fn kind(&self) -> BinaryProvider;
+}
+
+/// Create the per-resolution working directory for `krate` under a provider's staging directory.
+///
+/// Any leftover directory from an earlier attempt (eg a retried inconclusive resolution) is
+/// removed first, so stale downloads or extracted files don't contaminate a fresh resolution.
+pub(super) fn recreate_staging_work_dir(staging_dir: &Path, krate: &ResolvedCrate) -> Result<PathBuf> {
+    let work_dir = staging_dir.join(format!("{}-{}", krate.name, krate.version));
+    if work_dir.exists() {
+        std::fs::remove_dir_all(&work_dir).with_context(|_| error::IoSnafu {
+            path: work_dir.clone(),
+        })?;
+    }
+    std::fs::create_dir_all(&work_dir).with_context(|_| error::IoSnafu {
+        path: work_dir.clone(),
+    })?;
+    Ok(work_dir)
+}
+
+/// Move a freshly extracted binary to the top of its staging work dir under the canonical
+/// filename `<binary_name><host binary-ext>`, returning the staged path.
+///
+/// Release archives do not reliably name their member after the crate's default binary, so this
+/// is where the binary gets the name it will keep in `bin_dir` after relocation.
+pub(super) fn stage_extracted_binary(
+    work_dir: &Path,
+    binary_name: &str,
+    host_target: &TargetTriple,
+    extracted_binary_path: &Path,
+) -> Result<PathBuf> {
+    let staged_path = work_dir.join(format!("{}{}", binary_name, host_target.binary_ext()));
+    std::fs::rename(extracted_binary_path, &staged_path).with_context(|_| error::RenameFileSnafu {
+        src: extracted_binary_path.to_path_buf(),
+        dst: staged_path.clone(),
+    })?;
+    Ok(staged_path)
 }
 
 /// Wrap a downloaded asset preparation failure with the provider and asset URL that caused it.
@@ -101,6 +140,14 @@ pub(super) struct CandidateFilename {
 
     /// File format inferred from the filename suffix.
     pub format: ArchiveFormat,
+
+    /// The compatible target whose platform token produced this candidate, so a match can record
+    /// which target the downloaded binary is actually for. A token shared between siblings (eg
+    /// `linux-x86_64`) is attributed to the most-preferred target that produces it, which is
+    /// potentially misleading as we don't actually KNOW in that case what the target of the binary
+    /// is.  As long as it's compatible though, it will work, and the target is only used for
+    /// reporting and cache key purposes.
+    pub target: TargetTriple,
 }
 
 /// Generate candidate filenames that might be used for a release asset for a given crate, version,
@@ -123,16 +170,18 @@ pub(super) fn generate_candidate_filenames(
     target: &TargetTriple,
 ) -> Vec<CandidateFilename> {
     let formats = ArchiveFormat::all_formats();
-    // Get for the target the platform strings to try, corresponding to all targets, pseudo-targets,
-    // and alternative shorter forms of the target triple that are known to be used in release asset
-    // filenames. The host tokens are tried first and ABI-compatible fallback tokens (for example a
+    // The platform tokens to try, grouped per compatible target in target-preference order: the
+    // exact host's group first, then each ABI-compatible fallback's group (for example a
     // `x86_64-unknown-linux-musl` asset for a `x86_64-unknown-linux-gnu` host, or a
-    // `universal-apple-darwin` asset on macOS) are tried afterwards.
-    let platforms = target.compatible_asset_platform_aliases();
+    // `universal-apple-darwin` asset on macOS). Iterating group-major below makes target
+    // preference dominate name preference: every candidate for the exact host outranks every
+    // candidate for any fallback target.
+    let platform_groups = target.compatible_asset_platform_alias_groups();
 
     // Crate name first, then binary-name fallbacks. On Windows, also try `{name}.exe` as the name
     // component for projects that bake the extension into the asset name (e.g.
-    // `eza.exe_x86_64-pc-windows-gnu.tar.gz`); these come last as the least-likely form.
+    // `eza.exe_x86_64-pc-windows-gnu.tar.gz`); these come last within each target group as the
+    // least-likely form.
     let mut names: Vec<String> = Vec::new();
     names.push(crate_name.to_string());
     names.extend(extra_binary_names.iter().map(|&n| n.to_string()));
@@ -142,17 +191,20 @@ pub(super) fn generate_candidate_filenames(
     }
 
     let mut candidates = Vec::new();
-    for name in &names {
-        for platform_token in &platforms {
-            for &(format, suffix) in formats {
-                push_candidate_patterns(
-                    &mut candidates,
-                    name,
-                    version,
-                    platform_token.as_ref(),
-                    format,
-                    suffix,
-                );
+    for (group_target, platform_tokens) in &platform_groups {
+        for name in &names {
+            for platform_token in platform_tokens {
+                for &(format, suffix) in formats {
+                    push_candidate_patterns(
+                        &mut candidates,
+                        name,
+                        version,
+                        platform_token.as_ref(),
+                        format,
+                        suffix,
+                        group_target,
+                    );
+                }
             }
         }
     }
@@ -172,69 +224,35 @@ fn push_candidate_patterns(
     platform: &str,
     format: ArchiveFormat,
     suffix: &str,
+    target: &TargetTriple,
 ) {
-    candidates.push(CandidateFilename {
-        filename: format!("{}-{}-v{}{}", name, platform, version, suffix),
+    let patterns = [
+        format!("{}-{}-v{}{}", name, platform, version, suffix),
+        format!("{}-{}-{}{}", name, platform, version, suffix),
+        format!("{}-v{}-{}{}", name, version, platform, suffix),
+        format!("{}-{}-{}{}", name, version, platform, suffix),
+        format!("{}_{}_v{}{}", name, platform, version, suffix),
+        format!("{}_{}_{}{}", name, platform, version, suffix),
+        format!("{}_v{}_{}{}", name, version, platform, suffix),
+        format!("{}_{}_{}{}", name, version, platform, suffix),
+        format!("{}-{}{}", name, platform, suffix),
+        format!("{}_{}{}", name, platform, suffix),
+    ];
+    candidates.extend(patterns.into_iter().map(|filename| CandidateFilename {
+        filename,
         binary_basename: name.to_string(),
         format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}-{}-{}{}", name, platform, version, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}-v{}-{}{}", name, version, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}-{}-{}{}", name, version, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}_{}_v{}{}", name, platform, version, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}_{}_{}{}", name, platform, version, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}_v{}_{}{}", name, version, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}_{}_{}{}", name, version, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}-{}{}", name, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
-    candidates.push(CandidateFilename {
-        filename: format!("{}_{}{}", name, platform, suffix),
-        binary_basename: name.to_string(),
-        format,
-    });
+        target: target.clone(),
+    }));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testdata::target_triple;
 
     fn filenames(candidates: &[CandidateFilename]) -> Vec<&str> {
         candidates.iter().map(|c| c.filename.as_str()).collect()
-    }
-
-    fn target_triple(target: &'static str) -> TargetTriple {
-        TargetTriple::from_static(target).unwrap()
     }
 
     /// The taplo case: the crate is `taplo-cli`, but its GitHub assets are named after the `taplo`
@@ -265,20 +283,29 @@ mod tests {
         );
     }
 
-    /// Every crate-name candidate is ordered before any binary-name candidate.
+    /// Within a single target's group, every crate-name candidate is ordered before any
+    /// binary-name candidate. Across groups target preference dominates instead — see
+    /// `exact_host_candidates_precede_fallback_target_candidates`.
     #[test]
-    fn crate_name_candidates_precede_binary_name_candidates() {
+    fn crate_name_candidates_precede_binary_name_candidates_within_target_group() {
         let target = target_triple("x86_64-unknown-linux-gnu");
         let candidates = generate_candidate_filenames("taplo-cli", &["taplo"], "0.10.0", &target);
-        let names = filenames(&candidates);
-        let last_crate = names.iter().rposition(|n| n.starts_with("taplo-cli")).unwrap();
-        let first_binary = names
+        let host_names: Vec<&str> = candidates
+            .iter()
+            .filter(|c| c.target == target)
+            .map(|c| c.filename.as_str())
+            .collect();
+        let last_crate = host_names
+            .iter()
+            .rposition(|n| n.starts_with("taplo-cli"))
+            .unwrap();
+        let first_binary = host_names
             .iter()
             .position(|n| n.starts_with("taplo-") && !n.starts_with("taplo-cli"))
             .unwrap();
         assert!(
             last_crate < first_binary,
-            "all taplo-cli candidates should precede the taplo (binary) candidates"
+            "within the host group, all taplo-cli candidates should precede the taplo (binary) candidates"
         );
     }
 
@@ -417,6 +444,45 @@ mod tests {
         assert!(
             names.iter().any(|n| n.contains("universal-apple-darwin")),
             "expected a universal-apple-darwin fallback candidate"
+        );
+    }
+
+    /// Target preference must dominate name preference: a binary-name candidate for the exact host
+    /// target must outrank a crate-name candidate for an ABI-compatible fallback target, otherwise
+    /// a fallback asset is selected even when an exact-host asset exists in the same release.
+    #[test]
+    fn exact_host_candidates_precede_fallback_target_candidates() {
+        let target = target_triple("x86_64-unknown-linux-gnu");
+        let candidates = generate_candidate_filenames("ripgrep", &["rg"], "15.1.0", &target);
+        let names = filenames(&candidates);
+
+        let host_binary_name = names
+            .iter()
+            .position(|n| *n == "rg-15.1.0-x86_64-unknown-linux-gnu.tar.gz")
+            .expect("expected an exact-host binary-name candidate");
+        let fallback_crate_name = names
+            .iter()
+            .position(|n| *n == "ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz")
+            .expect("expected a musl fallback crate-name candidate");
+
+        assert!(
+            host_binary_name < fallback_crate_name,
+            "exact-host candidate (index {host_binary_name}) must precede fallback-target candidate (index \
+             {fallback_crate_name})"
+        );
+    }
+
+    /// `arm64` is a far more common asset-name spelling than `aarch64` for Apple Silicon releases;
+    /// candidates must include it or assets like `foo-arm64-darwin.tar.gz` are invisible.
+    #[test]
+    fn aarch64_target_generates_arm64_spelling_candidates() {
+        let target = target_triple("aarch64-apple-darwin");
+        let candidates = generate_candidate_filenames("foo", &[], "1.0.0", &target);
+        let names = filenames(&candidates);
+
+        assert!(
+            names.iter().any(|n| *n == "foo-arm64-darwin.tar.gz"),
+            "expected a foo-arm64-darwin.tar.gz candidate"
         );
     }
 }

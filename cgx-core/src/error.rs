@@ -139,9 +139,6 @@ pub enum Error {
     #[snafu(display("Failed to create temporary directory in {}: {}", parent.display(), source))]
     TempDirInCreation { parent: PathBuf, source: std::io::Error },
 
-    #[snafu(display("Failed to create temporary directory: {}", source))]
-    TempDirCreation { source: std::io::Error },
-
     #[snafu(display("Failed to execute command: {}", source))]
     CommandExecution { source: std::io::Error },
 
@@ -308,9 +305,6 @@ pub enum Error {
         template: String,
         source: leon::RenderError,
     },
-
-    #[snafu(display("Invalid target triple '{target}': {message}"))]
-    InvalidTargetTriple { target: String, message: String },
 
     #[snafu(display("Failed to build HTTP client: {message}"))]
     HttpClientBuild { message: String },

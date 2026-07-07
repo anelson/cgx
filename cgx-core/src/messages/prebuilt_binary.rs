@@ -41,6 +41,9 @@ pub enum PrebuiltBinaryMessage {
         krate: ResolvedCrate,
         reason: ProviderChangeReason,
     },
+    /// A cached positive prebuilt binary resolution existed but the binary it points to is no
+    /// longer on disk, so the entry was discarded and the crate will be re-resolved.
+    CacheInvalidatedByMissingBinary { krate: ResolvedCrate, path: PathBuf },
     /// Checking a specific binary provider for prebuilt binaries
     CheckingProvider {
         krate: ResolvedCrate,
@@ -110,6 +113,13 @@ impl PrebuiltBinaryMessage {
         Self::CacheInvalidatedByProviderChange {
             krate: krate.clone(),
             reason,
+        }
+    }
+
+    pub fn cache_invalidated_by_missing_binary(krate: &ResolvedCrate, path: &std::path::Path) -> Self {
+        Self::CacheInvalidatedByMissingBinary {
+            krate: krate.clone(),
+            path: path.to_path_buf(),
         }
     }
 

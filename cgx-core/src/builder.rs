@@ -219,11 +219,10 @@ impl BuildOptions {
     /// which the CLI front-end has already produced from the raw arguments (tokenizing
     /// features, folding `--debug`, resolving `--bin`/`--example`).
     pub fn load(config: &Config, overrides: &BuildOverrides) -> Result<Self> {
-        let target = overrides
-            .target
-            .clone()
-            .map(TargetTriple::from_owned)
-            .transpose()?;
+        // The target string is deliberately NOT validated here: cargo accepts targets (and even
+        // target-spec JSON paths) that we cannot parse, so whatever the user passed is carried
+        // through verbatim.
+        let target = overrides.target.clone().map(TargetTriple::from_owned);
 
         Ok(BuildOptions {
             // These come from the config settings, `Config` will already apply any CLI overrides
@@ -1974,6 +1973,21 @@ mod tests {
                 assert_eq!(
                     options.target.as_ref().map(TargetTriple::as_str),
                     Some("x86_64-unknown-linux-gnu")
+                );
+            }
+
+            /// Any target rustc accepts must be forwarded to cargo verbatim, including triples
+            /// that `target-lexicon` cannot parse (`arm64ec-pc-windows-msvc` is a real rustc
+            /// target); cgx itself must not reject them.
+            #[test]
+            fn target_unparsable_by_target_lexicon() {
+                let config = Config::default();
+                let cli = Cli::parse_from_test_args(["--target", "arm64ec-pc-windows-msvc", "tool"]);
+                let options = BuildOptions::load(&config, &cli.crate_args().to_build_overrides()).unwrap();
+
+                assert_eq!(
+                    options.target.as_ref().map(TargetTriple::as_str),
+                    Some("arm64ec-pc-windows-msvc")
                 );
             }
 

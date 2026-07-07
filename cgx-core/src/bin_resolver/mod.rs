@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use providers::{BinstallProvider, GithubProvider, GitlabProvider, Provider, QuickinstallProvider};
 use serde::{Deserialize, Serialize};
 use snafu::{IntoError, ResultExt};
+use tempfile::TempDir;
+use tracing::warn;
 
 use crate::{
     Result,
@@ -34,6 +36,14 @@ pub struct ResolvedBinary {
 
     /// Path to the executable cgx should run
     pub path: std::path::PathBuf,
+
+    /// The target this binary was published for.
+    ///
+    /// In most cases this is just the host's target, but there are many edge cases where a
+    /// prebuilt binary will be published for a target that doesn't match the host's target but is
+    /// compatible with the host (the most common is a musl linux binary used on a glibc linux
+    /// host).
+    pub target: String,
 }
 
 pub trait BinaryResolver {
@@ -92,7 +102,7 @@ pub(crate) fn create_resolver(
     cache: Cache,
     reporter: MessageReporter,
     http_client: HttpClient,
-) -> impl BinaryResolver {
+) -> Result<impl BinaryResolver> {
     DefaultBinaryResolver::new(config, cache, reporter, http_client)
 }
 
@@ -145,56 +155,77 @@ struct DefaultBinaryResolver {
     cache: Cache,
     reporter: MessageReporter,
     mode: UsePrebuiltBinaries,
+    /// Staging area where the providers download and extract candidate binaries before
+    /// [`Self::relocate_to_bin_dir`] moves the winner to its durable home.
+    #[expect(
+        dead_code,
+        reason = "held for its Drop impl: the staging directory must stay alive for the providers that \
+                  write into it, and dropping it is what cleans the staging area up"
+    )]
+    staging: TempDir,
     providers: Vec<Box<dyn Provider + Send + Sync>>,
 }
 
 impl DefaultBinaryResolver {
-    fn new(config: Config, cache: Cache, reporter: MessageReporter, http_client: HttpClient) -> Self {
-        let providers = {
-            let cache_dir = &config.cache_dir;
-            let verify = config.prebuilt_binaries.verify_checksums;
+    fn new(config: Config, cache: Cache, reporter: MessageReporter, http_client: HttpClient) -> Result<Self> {
+        let staging = Self::create_staging_dir(&config)?;
+        let verify = config.prebuilt_binaries.verify_checksums;
 
-            config
-                .prebuilt_binaries
-                .binary_providers
-                .iter()
-                .map(|provider_type| -> Box<dyn Provider + Send + Sync> {
-                    match provider_type {
-                        BinaryProvider::Binstall => Box::new(BinstallProvider::new(
-                            reporter.clone(),
-                            cache_dir.clone(),
-                            verify,
-                            http_client.clone(),
-                        )),
-                        BinaryProvider::GithubReleases => Box::new(GithubProvider::new(
-                            reporter.clone(),
-                            cache_dir.clone(),
-                            verify,
-                            http_client.clone(),
-                        )),
-                        BinaryProvider::GitlabReleases => Box::new(GitlabProvider::new(
-                            reporter.clone(),
-                            cache_dir.clone(),
-                            verify,
-                            http_client.clone(),
-                        )),
-                        BinaryProvider::Quickinstall => Box::new(QuickinstallProvider::new(
-                            reporter.clone(),
-                            cache_dir.clone(),
-                            http_client.clone(),
-                        )),
-                    }
-                })
-                .collect()
-        };
+        let providers = config
+            .prebuilt_binaries
+            .binary_providers
+            .iter()
+            .map(|provider_type| -> Box<dyn Provider + Send + Sync> {
+                match provider_type {
+                    BinaryProvider::Binstall => Box::new(BinstallProvider::new(
+                        reporter.clone(),
+                        &staging,
+                        verify,
+                        http_client.clone(),
+                    )),
+                    BinaryProvider::GithubReleases => Box::new(GithubProvider::new(
+                        reporter.clone(),
+                        &staging,
+                        verify,
+                        http_client.clone(),
+                    )),
+                    BinaryProvider::GitlabReleases => Box::new(GitlabProvider::new(
+                        reporter.clone(),
+                        &staging,
+                        verify,
+                        http_client.clone(),
+                    )),
+                    BinaryProvider::Quickinstall => Box::new(QuickinstallProvider::new(
+                        reporter.clone(),
+                        &staging,
+                        http_client.clone(),
+                    )),
+                }
+            })
+            .collect();
 
-        Self::with_providers(config, cache, reporter, providers)
+        Ok(Self::with_providers(config, cache, reporter, staging, providers))
+    }
+
+    /// Create the resolver's staging directory on the same filesystem as `bin_dir`, so that
+    /// relocation into `bin_dir` never crosses filesystems.
+    fn create_staging_dir(config: &Config) -> Result<TempDir> {
+        std::fs::create_dir_all(&config.bin_dir).with_context(|_| error::IoSnafu {
+            path: config.bin_dir.clone(),
+        })?;
+        tempfile::Builder::new()
+            .prefix("cgx-bin-resolver-temp")
+            .tempdir_in(&config.bin_dir)
+            .with_context(|_| error::TempDirInCreationSnafu {
+                parent: config.bin_dir.clone(),
+            })
     }
 
     fn with_providers(
         config: Config,
         cache: Cache,
         reporter: MessageReporter,
+        staging: TempDir,
         providers: Vec<Box<dyn Provider + Send + Sync>>,
     ) -> Self {
         let mode = config.prebuilt_binaries.use_prebuilt_binaries;
@@ -203,6 +234,7 @@ impl DefaultBinaryResolver {
             cache,
             reporter,
             mode,
+            staging,
             providers,
         }
     }
@@ -324,7 +356,7 @@ impl DefaultBinaryResolver {
     /// Returns `None` (so resolution falls through to the providers) when there is no entry or it
     /// is stale for the current configuration.
     fn get_cached_resolution(&self, krate: &ResolvedCrate) -> Option<ConclusiveResolution> {
-        let entry = self.cache.get_cached_binary(krate).ok()??;
+        let entry = self.cache.get_cached_binary_resolution(krate).ok()??;
         let enabled = &self.config.prebuilt_binaries.binary_providers;
 
         // If a provider that is enabled now was not enabled when this cache entry was written, then we
@@ -349,6 +381,19 @@ impl DefaultBinaryResolver {
                         ProviderChangeReason::SourceProviderDisabled(binary.provider),
                     )
                 });
+                return None;
+            }
+
+            // A positive entry points at a binary under `bin_dir`; if that file has been deleted
+            // since the entry was written, serving the entry would hand out a dangling path.
+            if !binary.path.exists() {
+                self.reporter.report(|| {
+                    PrebuiltBinaryMessage::cache_invalidated_by_missing_binary(krate, &binary.path)
+                });
+                warn!(
+                    "Cached binary resolution for {}@{} points to missing file {:?}; ignoring cache entry",
+                    krate.name, krate.version, binary.path
+                );
                 return None;
             }
         }
@@ -414,25 +459,24 @@ impl DefaultBinaryResolver {
         Ok(Self::combine_resolutions(results))
     }
 
-    /// Relocate a resolved binary from the provider's internal path to the `bin_dir` structure.
+    /// Move a resolved binary from the transient staging area to its durable home under
+    /// `bin_dir`.
     ///
-    /// Pre-built binaries are copied into `bin_dir` so the path cgx returns is stable and separate
-    /// from provider-specific download/cache directories.
+    /// The provider leaves the binary in the resolver's staging directory, which gets cleaned up
+    /// when the resolver is dropped; this rename is what makes the binary outlive the resolution
+    /// at a stable path under `bin_dir`. The staging temp dir is created on `bin_dir`'s
+    /// filesystem, so the rename never crosses filesystems.
     fn relocate_to_bin_dir(
         &self,
         mut binary: ResolvedBinary,
         krate: &ResolvedCrate,
         target: &TargetTriple,
     ) -> Result<ResolvedBinary> {
-        let source_hash = krate.source.source_hash();
-
-        // Build target directory: bin_dir/<crate>-<version>/<source-hash>/prebuilt-<provider>-<platform>/
-        let target_dir = self
-            .config
-            .bin_dir
-            .join(format!("{}-{}", krate.name, krate.version))
-            .join(source_hash)
-            .join(format!("prebuilt-{:?}-{}", binary.provider, target.as_str()));
+        let target_dir = self.cache.crate_bin_root(krate).join(format!(
+            "prebuilt-{:?}-{}",
+            binary.provider,
+            target.as_str()
+        ));
 
         std::fs::create_dir_all(&target_dir).with_context(|_| error::IoSnafu {
             path: target_dir.clone(),
@@ -445,8 +489,7 @@ impl DefaultBinaryResolver {
 
         let target_path = target_dir.join(binary_name);
 
-        // Copy (don't move) so the provider's cache remains intact
-        std::fs::copy(&binary.path, &target_path).with_context(|_| error::CopyBinarySnafu {
+        std::fs::rename(&binary.path, &target_path).with_context(|_| error::RenameFileSnafu {
             src: binary.path.clone(),
             dst: target_path.clone(),
         })?;
@@ -537,7 +580,8 @@ impl BinaryResolver for DefaultBinaryResolver {
         let resolution = self.resolve_via_providers(krate, target)?;
 
         // For a found binary, relocate it into `bin_dir` (so the cached/returned path is stable and
-        // separate from provider caches) and report it. Report the terminal non-found states too.
+        // outlives the transient staging area) and report it. Report the terminal non-found states
+        // too.
         let resolution = match resolution {
             BinaryResolution::Found(binary) => {
                 let relocated = self.relocate_to_bin_dir(binary, resolved_krate, target)?;
@@ -569,7 +613,7 @@ impl BinaryResolver for DefaultBinaryResolver {
                 outcome,
                 enabled_providers: self.config.prebuilt_binaries.binary_providers.clone(),
             };
-            self.cache.put_cached_binary(resolved_krate, entry)?;
+            self.cache.put_cached_binary_resolution(resolved_krate, entry)?;
         }
 
         Self::apply_mode(resolution, self.mode, resolved_krate)
@@ -623,6 +667,7 @@ mod tests {
                     krate: test_downloaded_crate().resolved,
                     provider,
                     path,
+                    target: build_context::TARGET.to_string(),
                 }),
                 calls: Arc::new(AtomicUsize::new(0)),
             }
@@ -698,8 +743,9 @@ mod tests {
             outcome,
             calls: calls.clone(),
         })];
+        let staging = DefaultBinaryResolver::create_staging_dir(&config).unwrap();
         (
-            DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), providers),
+            DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), staging, providers),
             calls,
         )
     }
@@ -716,7 +762,8 @@ mod tests {
         let mut config = config;
         config.prebuilt_binaries.use_prebuilt_binaries = UsePrebuiltBinaries::Auto;
         config.prebuilt_binaries.binary_providers = enabled;
-        DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), providers)
+        let staging = DefaultBinaryResolver::create_staging_dir(&config).unwrap();
+        DefaultBinaryResolver::with_providers(config, cache, MessageReporter::null(), staging, providers)
     }
 
     fn test_downloaded_crate() -> DownloadedCrate {
@@ -735,6 +782,7 @@ mod tests {
             krate: test_downloaded_crate().resolved,
             provider: BinaryProvider::GithubReleases,
             path: PathBuf::from("/fake/bin/serde"),
+            target: build_context::TARGET.to_string(),
         }
     }
 
@@ -827,7 +875,7 @@ mod tests {
     #[test]
     fn test_disqualification_custom_target() {
         let options = BuildOptions {
-            target: Some(TargetTriple::from_static("x86_64-unknown-linux-musl").unwrap()),
+            target: Some(TargetTriple::from_static("x86_64-unknown-linux-musl")),
             ..Default::default()
         };
         assert_eq!(
@@ -1077,6 +1125,7 @@ mod tests {
             krate: test_downloaded_crate().resolved,
             provider: BinaryProvider::GithubReleases,
             path: src,
+            target: build_context::TARGET.to_string(),
         };
         let (resolver, calls) = resolver_with(
             cache,
@@ -1104,6 +1153,7 @@ mod tests {
             krate: test_downloaded_crate().resolved,
             provider: BinaryProvider::GithubReleases,
             path: src.clone(),
+            target: build_context::TARGET.to_string(),
         };
         let (resolver, _calls) = resolver_with(
             cache,
@@ -1145,7 +1195,7 @@ mod tests {
         assert_eq!(result, None);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_matches!(
-            cache.get_cached_binary(&test_downloaded_crate().resolved),
+            cache.get_cached_binary_resolution(&test_downloaded_crate().resolved),
             Ok(None),
             "an inconclusive resolution must not be persisted"
         );
@@ -1194,7 +1244,7 @@ mod tests {
             .unwrap();
 
         assert_matches!(
-            cache.get_cached_binary(&test_downloaded_crate().resolved),
+            cache.get_cached_binary_resolution(&test_downloaded_crate().resolved),
             Ok(Some(BinaryCacheEntry {
                 outcome: ConclusiveResolution::Nonexistent,
                 ..
@@ -1223,7 +1273,7 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_matches!(
-            cache.get_cached_binary(&test_downloaded_crate().resolved),
+            cache.get_cached_binary_resolution(&test_downloaded_crate().resolved),
             Ok(None)
         );
     }
@@ -1313,6 +1363,60 @@ mod tests {
             gh2_calls.load(Ordering::SeqCst),
             0,
             "cache hit must not re-consult providers"
+        );
+    }
+
+    /// A positive cache entry whose relocated binary has been deleted from `bin_dir` must not be
+    /// served as a dangling path: the entry is invalidated, the providers are consulted again, and
+    /// the returned path exists.
+    #[test]
+    fn positive_cache_hit_with_deleted_binary_reresolves() {
+        let (cache, config, temp) = test_env();
+        let src = temp.path().join("serde");
+        std::fs::write(&src, b"binary").unwrap();
+
+        let first = StubProvider::found(BinaryProvider::GithubReleases, src.clone());
+        let first_calls = first.calls.clone();
+        let r1 = resolver_with_enabled_providers(
+            cache.clone(),
+            config.clone(),
+            vec![BinaryProvider::GithubReleases],
+            vec![Box::new(first)],
+        );
+        let relocated = r1
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert!(relocated.path.exists());
+
+        std::fs::remove_file(&relocated.path).unwrap();
+        // A real provider stages a fresh copy on every consultation; recreate the file the stub
+        // hands out so the re-resolution has something to relocate.
+        std::fs::write(&src, b"binary").unwrap();
+
+        let second = StubProvider::found(BinaryProvider::GithubReleases, src);
+        let second_calls = second.calls.clone();
+        let r2 = resolver_with_enabled_providers(
+            cache,
+            config,
+            vec![BinaryProvider::GithubReleases],
+            vec![Box::new(second)],
+        );
+        let result = r2
+            .resolve(&test_downloaded_crate(), &BuildOptions::default())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            1,
+            "a positive entry pointing at a deleted binary must be re-resolved via providers"
+        );
+        assert!(
+            result.path.exists(),
+            "the re-resolved binary path must exist, got {}",
+            result.path.display()
         );
     }
 

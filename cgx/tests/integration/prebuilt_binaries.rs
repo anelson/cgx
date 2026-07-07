@@ -891,6 +891,24 @@ mod github_releases {
             .expect("Expected PrebuiltBinaryMessage::Resolved");
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
+        // The provenance report must name the ABI-compatible target that actually matched (just
+        // 1.42.4 ships only musl Linux and msvc Windows assets)
+        #[cfg(target_os = "linux")]
+        let expected_target = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
+        #[cfg(target_os = "windows")]
+        let expected_target = "x86_64-pc-windows-msvc".to_string();
+
+        let target_platform = messages
+            .iter()
+            .find_map(|m| match m {
+                Message::Cgx(cgx::messages::CgxMessage::CrateProvenance { target_platform, .. }) => {
+                    Some(target_platform)
+                }
+                _ => None,
+            })
+            .expect("Expected CgxMessage::CrateProvenance");
+        assert_eq!(target_platform, &expected_target);
+
         assert!(
             !messages
                 .iter()
