@@ -12,11 +12,11 @@ use std::{
 
 use snafu::{IntoError, ResultExt};
 
+use self::archive::{
+    ArchiveFormat, extract_binary_at_archive_relative_path, extract_binary_by_candidate_names,
+};
 pub(super) use self::{
-    archive::{ArchiveFormat, extract_binary_at_archive_relative_path, extract_binary_by_candidate_names},
-    binstall::BinstallProvider,
-    github::GithubProvider,
-    gitlab::GitlabProvider,
+    binstall::BinstallProvider, github::GithubProvider, gitlab::GitlabProvider,
     quickinstall::QuickinstallProvider,
 };
 use crate::{
@@ -52,7 +52,7 @@ pub(super) trait Provider {
 ///
 /// Any leftover directory from an earlier attempt (eg a retried inconclusive resolution) is
 /// removed first, so stale downloads or extracted files don't contaminate a fresh resolution.
-pub(super) fn recreate_staging_work_dir(staging_dir: &Path, krate: &ResolvedCrate) -> Result<PathBuf> {
+fn recreate_staging_work_dir(staging_dir: &Path, krate: &ResolvedCrate) -> Result<PathBuf> {
     let work_dir = staging_dir.join(format!("{}-{}", krate.name, krate.version));
     if work_dir.exists() {
         std::fs::remove_dir_all(&work_dir).with_context(|_| error::IoSnafu {
@@ -70,7 +70,7 @@ pub(super) fn recreate_staging_work_dir(staging_dir: &Path, krate: &ResolvedCrat
 ///
 /// Release archives do not reliably name their member after the crate's default binary, so this
 /// is where the binary gets the name it will keep in `bin_dir` after relocation.
-pub(super) fn stage_extracted_binary(
+fn stage_extracted_binary(
     work_dir: &Path,
     binary_name: &str,
     host_target: &TargetTriple,
@@ -85,7 +85,7 @@ pub(super) fn stage_extracted_binary(
 }
 
 /// Wrap a downloaded asset preparation failure with the provider and asset URL that caused it.
-pub(super) fn provider_asset_preparation_failed(
+fn provider_asset_preparation_failed(
     provider: BinaryProvider,
     url: &str,
     source: error::Error,
@@ -106,7 +106,7 @@ pub(super) fn provider_asset_preparation_failed(
 /// `taplo` binary. The crate name is tried last for projects whose package and binary names differ
 /// in metadata but whose release archives still use the crate name. Duplicate and empty names are
 /// removed while preserving this priority order.
-pub(super) fn expected_binary_names(
+fn expected_binary_names(
     primary: &str,
     matched_candidate_name: Option<&str>,
     crate_name: &str,
@@ -127,7 +127,7 @@ fn push_expected_binary_name(names: &mut Vec<String>, name: &str) {
 }
 
 /// A candidate release asset filename paired with instructions for extracting or copying it.
-pub(super) struct CandidateFilename {
+struct CandidateFilename {
     /// Release asset filename to probe or download, without any provider-specific URL prefix.
     pub filename: String,
 
@@ -163,7 +163,7 @@ pub(super) struct CandidateFilename {
 /// `cgx taplo-cli` find the `taplo`-named assets of the `taplo-cli` crate. For each name,
 /// variations with multiple forms of platform strings are generated. Duplicate filenames are
 /// removed.
-pub(super) fn generate_candidate_filenames(
+fn generate_candidate_filenames(
     crate_name: &str,
     extra_binary_names: &[&str],
     version: &str,
@@ -244,6 +244,41 @@ fn push_candidate_patterns(
         format,
         target: target.clone(),
     }));
+}
+
+/// Generate the release-tag forms a project might have used for a crate release, in priority
+/// order (most likely first). Callers should stop at the first tag that yields a release.
+///
+/// `crate_name` is the crate's package name, never a binary name.
+///
+/// The forms, and the conventions that motivate them:
+/// - `v{version}` and `{version}`: the dominant single-crate conventions.
+/// - `{name}-v{version}`: monorepos tagging per-member with a `v`, eg release-plz's
+///   `release-plz-v0.3.159`.
+/// - `{name}-{version}`: monorepos tagging per-member without a `v`, eg cargo-nextest's
+///   `cargo-nextest-0.9.140`.
+/// - `{name}/v{version}` and `{name}/{version}`: cargo-binstall's subcrate tag inference. When
+///   embedded in a URL path these need the `/` encoded — see [`tag_url_path_segment`].
+fn generate_candidate_tags(crate_name: &str, version: &str) -> Vec<String> {
+    vec![
+        format!("v{}", version),
+        version.to_string(),
+        format!("{}-v{}", crate_name, version),
+        format!("{}-{}", crate_name, version),
+        format!("{}/v{}", crate_name, version),
+        format!("{}/{}", crate_name, version),
+    ]
+}
+
+/// Encode a release tag from [`generate_candidate_tags`] for use as a single URL path segment.
+///
+/// Those tags contain only crates.io package-name characters (`[a-zA-Z0-9_-]`), semver version
+/// characters, and the `/` of the subcrate forms. Of these only `/` changes path-segment
+/// semantics; `+` (semver build metadata) is a legal literal character in a URL path, and both
+/// GitHub and GitLab accept it unencoded. So encoding `/` alone is sufficient, and a general
+/// percent-encoder would add a dependency for nothing.
+fn tag_url_path_segment(tag: &str) -> String {
+    tag.replace('/', "%2F")
 }
 
 #[cfg(test)]
@@ -484,5 +519,35 @@ mod tests {
             names.iter().any(|n| *n == "foo-arm64-darwin.tar.gz"),
             "expected a foo-arm64-darwin.tar.gz candidate"
         );
+    }
+
+    /// The tag order is a contract: providers stop at the first tag that yields a release, so the
+    /// dominant single-crate forms must come before the monorepo forms, and the
+    /// cargo-binstall-style subcrate forms last.
+    #[test]
+    fn candidate_tags_are_generated_in_priority_order() {
+        assert_eq!(
+            generate_candidate_tags("cargo-nextest", "0.9.140"),
+            vec![
+                "v0.9.140",
+                "0.9.140",
+                "cargo-nextest-v0.9.140",
+                "cargo-nextest-0.9.140",
+                "cargo-nextest/v0.9.140",
+                "cargo-nextest/0.9.140",
+            ]
+        );
+    }
+
+    /// Only `/` needs encoding in a generated tag; everything else, including semver build
+    /// metadata's `+`, must pass through literally.
+    #[test]
+    fn tag_url_path_segment_encodes_only_slash() {
+        assert_eq!(
+            tag_url_path_segment("cargo-nextest/v1.2.3"),
+            "cargo-nextest%2Fv1.2.3"
+        );
+        assert_eq!(tag_url_path_segment("cargo-nextest-1.2.3"), "cargo-nextest-1.2.3");
+        assert_eq!(tag_url_path_segment("v1.0.0+build.1"), "v1.0.0+build.1");
     }
 }

@@ -98,26 +98,30 @@ impl GitlabProvider {
 
     /// Generate GitLab release asset candidates to probe and download.
     ///
-    /// Uses the came candidate filename generator in [`super::generate_candidate_filenames`], then
-    /// adds some Gitlab-specific fields to produce a list of [`GitlabReleaseAssetCandidate`]s that
-    /// can be probed for existence.
+    /// Uses the same candidate filename generator in [`super::generate_candidate_filenames`], then
+    /// combines each filename with each of the caller-supplied release `tags` to produce a list of
+    /// [`GitlabReleaseAssetCandidate`]s that can be probed for existence.  It is assumed that the
+    /// caller has already confirmed that the `tags` exist, so the cross-product of tags and
+    /// filenames is limited at least to those tags that are known to exist.
+    ///
+    /// Tag-major ordering preserves candidate priority within each tag.
     fn generate_release_asset_candidates(
         repo_url: &str,
         crate_name: &str,
         extra_binary_names: &[&str],
         version: &str,
         target: &TargetTriple,
+        tags: &[String],
     ) -> Vec<GitlabReleaseAssetCandidate> {
         // Generate candidate filenames for the crate and platform
         let filename_candidates =
             super::generate_candidate_filenames(crate_name, extra_binary_names, version, target);
 
-        // Make a separate Gitlab release asset candidate for each possible variant the release tag
-        // might have (with or without a leading "v" prefix).
-        let tags = [format!("v{}", version), version.to_string()];
-
+        // Make a separate Gitlab release asset candidate for each release tag supplied by the
+        // caller (which we assume the caller already verified exist).
         let mut asset_candidates = Vec::new();
-        for tag in &tags {
+        for tag in tags {
+            let tag_segment = super::tag_url_path_segment(tag);
             for CandidateFilename {
                 filename,
                 binary_basename,
@@ -126,7 +130,10 @@ impl GitlabProvider {
             } in &filename_candidates
             {
                 asset_candidates.push(GitlabReleaseAssetCandidate {
-                    url: format!("{}/-/releases/{}/downloads/binaries/{}", repo_url, tag, filename),
+                    url: format!(
+                        "{}/-/releases/{}/downloads/binaries/{}",
+                        repo_url, tag_segment, filename
+                    ),
                     archive_format: *format,
                     asset_filename: filename.clone(),
                     binary_basename_hint: binary_basename.clone(),
@@ -150,6 +157,31 @@ impl GitlabProvider {
             return Err(Self::provider_throttled_error(url, response.status()));
         }
         Ok(response.status().is_success())
+    }
+
+    /// HEAD-probe `{repo_url}/-/releases/{tag}` to check whether a release exists for `tag`.
+    ///
+    /// This is the cheap pre-filter that keeps the per-tag filename cross-product bounded: a tag
+    /// whose release page 404s cannot have any `downloads/binaries/` assets, so it is skipped
+    /// entirely. 404 → `Ok(false)`; any 2xx → `Ok(true)`; 429 → provider-throttled error. Any
+    /// other cleanly delivered status → `Ok(true)`: fail open and keep the tag in play, so a
+    /// GitLab instance whose release pages misbehave (auth walls, odd proxies) degrades to
+    /// exhaustive filename probing rather than wrongly concluding
+    /// [`ConclusiveResolution::Nonexistent`]. 5xx statuses are retried by the HTTP client and
+    /// surface as `Err` after exhaustion, which callers propagate as an inconclusive resolution.
+    ///
+    /// Not implemented in terms of [`Self::head_probe`], which maps every non-2xx status to
+    /// `false` — the wrong semantics here, where only a 404 may prune the tag.
+    fn release_tag_exists(&self, repo_url: &str, tag: &str) -> Result<bool> {
+        let url = format!("{}/-/releases/{}", repo_url, super::tag_url_path_segment(tag));
+        let response = self
+            .http_client
+            .head_retrying_status(&url, Self::should_retry_status)?;
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err(Self::provider_throttled_error(&url, status));
+        }
+        Ok(status != StatusCode::NOT_FOUND)
     }
 
     /// Download a GitLab release asset from the given URL.
@@ -207,6 +239,27 @@ impl Provider for GitlabProvider {
         };
 
         let crate_name = krate.resolved.name.as_str();
+        let version = krate.resolved.version.to_string();
+
+        // Pre-filter the candidate tag forms by probing each tag's release page, so the much
+        // larger filename cross-product below only runs for tags that actually have a release.
+        // The common no-release case stops here after at most one cheap HEAD per tag form.
+        let mut live_tags = Vec::new();
+        for tag in super::generate_candidate_tags(crate_name, &version) {
+            if self.release_tag_exists(&repo_url, &tag)? {
+                live_tags.push(tag);
+            }
+        }
+        if live_tags.is_empty() {
+            self.reporter.report(|| {
+                PrebuiltBinaryMessage::provider_has_no_binary(
+                    BinaryProvider::GitlabReleases,
+                    "no release found for any tag variant",
+                )
+            });
+            return Ok(ConclusiveResolution::Nonexistent);
+        }
+
         let binary_names = krate.binary_names()?;
         let extra_binary_names: Vec<&str> = binary_names
             .iter()
@@ -217,20 +270,21 @@ impl Provider for GitlabProvider {
             &repo_url,
             crate_name,
             &extra_binary_names,
-            &krate.resolved.version.to_string(),
+            &version,
             target,
+            &live_tags,
         );
 
         // Probe sequentially with HEAD requests
         //
         // If we hit a connection/timeout error, bail immediately rather than continuing to probe
-        // every candidate URL against a broken/unresponsive server. The candidate set is the full
-        // cross-product of names (crate + binary), platform aliases, archive formats, and tag
-        // variants, so the worst-case (no asset exists) is on the order of ~1,400 sequential
-        // HEADs. That only happens for a crate actually hosted on gitlab.com whose release lacks
-        // any matching asset (a slow fallback to a source build); `get_repo_url` short-circuits to
-        // `None` for every non-GitLab crate, which is the overwhelming majority and does zero
-        // probes.
+        // every candidate URL against a broken/unresponsive server. The candidate set is the
+        // cross-product of names (crate + binary), platform aliases, and archive formats — on the
+        // order of ~1,000 sequential HEADs per surviving tag when no asset exists (a slow
+        // fallback to a source build). The release-page pre-filter above bounds that: a repo with
+        // no release for any tag form does at most one HEAD per tag form, and repos rarely have
+        // releases for more than one form. `get_repo_url` short-circuits to `None` for every
+        // non-GitLab crate, which is the overwhelming majority and does zero probes.
         let mut found = None;
         for candidate in &candidates {
             match self.head_probe(&candidate.url) {
@@ -247,7 +301,7 @@ impl Provider for GitlabProvider {
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::provider_has_no_binary(
                     BinaryProvider::GitlabReleases,
-                    "no matching release found",
+                    "no matching asset found in release",
                 )
             });
             return Ok(ConclusiveResolution::Nonexistent);
@@ -361,6 +415,12 @@ mod tests {
         )
     }
 
+    /// The two historical tag forms, for candidate-generation tests that don't care about the
+    /// monorepo forms.
+    fn v_and_bare_tags(version: &str) -> Vec<String> {
+        vec![format!("v{version}"), version.to_string()]
+    }
+
     #[test]
     fn test_release_asset_candidate_generation_includes_version_patterns() {
         let candidates = GitlabProvider::generate_release_asset_candidates(
@@ -369,6 +429,7 @@ mod tests {
             &[],
             "1.2.3",
             &target_triple("x86_64-unknown-linux-gnu"),
+            &v_and_bare_tags("1.2.3"),
         );
 
         assert!(
@@ -391,6 +452,7 @@ mod tests {
             &[],
             "1.2.3",
             &target_triple("x86_64-unknown-linux-gnu"),
+            &v_and_bare_tags("1.2.3"),
         );
 
         assert!(
@@ -413,6 +475,7 @@ mod tests {
             &[],
             "1.2.3",
             &target_triple("x86_64-unknown-linux-gnu"),
+            &v_and_bare_tags("1.2.3"),
         );
 
         assert!(
@@ -441,16 +504,24 @@ mod tests {
             &[],
             "1.2.3",
             &target_triple("x86_64-unknown-linux-gnu"),
+            &v_and_bare_tags("1.2.3"),
         );
 
         for candidate in &candidates {
             if candidate.url.ends_with(".tar.gz") || candidate.url.ends_with(".tgz") {
                 assert_eq!(candidate.archive_format, ArchiveFormat::TarGz);
-            } else if candidate.url.ends_with(".tar.xz") {
+            } else if candidate.url.ends_with(".tar.xz") || candidate.url.ends_with(".txz") {
                 assert_eq!(candidate.archive_format, ArchiveFormat::TarXz);
-            } else if candidate.url.ends_with(".tar.zst") {
+            } else if candidate.url.ends_with(".tar.zst")
+                || candidate.url.ends_with(".tzst")
+                || candidate.url.ends_with(".tzstd")
+            {
                 assert_eq!(candidate.archive_format, ArchiveFormat::TarZst);
-            } else if candidate.url.ends_with(".tar.bz2") {
+            } else if candidate.url.ends_with(".tar.bz2")
+                || candidate.url.ends_with(".tbz2")
+                || candidate.url.ends_with(".tbz")
+                || candidate.url.ends_with(".tar.bz")
+            {
                 assert_eq!(candidate.archive_format, ArchiveFormat::TarBz2);
             } else if candidate.url.ends_with(".tar") {
                 assert_eq!(candidate.archive_format, ArchiveFormat::Tar);
@@ -668,5 +739,169 @@ repository = "https://gitlab.com/upstream/mytool"
 
         assert_matches!(result, Err(Error::HttpStatus { status: 500, .. }));
         mock.assert_calls(3);
+    }
+
+    /// Slash-form subcrate tags must appear percent-encoded in every generated download URL, so
+    /// the tag stays a single path segment.
+    #[test]
+    fn test_release_asset_candidates_use_encoded_slash_tags() {
+        let candidates = GitlabProvider::generate_release_asset_candidates(
+            "https://gitlab.com/owner/repo",
+            "mytool",
+            &[],
+            "1.2.3",
+            &target_triple("x86_64-unknown-linux-gnu"),
+            &["mytool/v1.2.3".to_string()],
+        );
+
+        assert!(!candidates.is_empty());
+        for candidate in &candidates {
+            assert!(
+                candidate
+                    .url
+                    .contains("/-/releases/mytool%2Fv1.2.3/downloads/binaries/"),
+                "expected encoded tag in URL, got: {}",
+                candidate.url
+            );
+        }
+    }
+
+    #[test]
+    fn release_tag_exists_200_returns_true() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/owner/repo/-/releases/v1.0.0");
+            then.status(200);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let exists = provider
+            .release_tag_exists(&server.url("/owner/repo"), "v1.0.0")
+            .unwrap();
+
+        assert!(exists);
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn release_tag_exists_404_returns_false() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/owner/repo/-/releases/v1.0.0");
+            then.status(404);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let exists = provider
+            .release_tag_exists(&server.url("/owner/repo"), "v1.0.0")
+            .unwrap();
+
+        assert!(!exists);
+        mock.assert_calls(1);
+    }
+
+    /// A status that is neither 2xx, 404, nor 429 (eg an auth wall's 403) must keep the tag in
+    /// play rather than prune it: only a conclusive 404 may skip a tag's filename probing.
+    #[test]
+    fn release_tag_exists_unexpected_status_fails_open() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/owner/repo/-/releases/v1.0.0");
+            then.status(403);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let exists = provider
+            .release_tag_exists(&server.url("/owner/repo"), "v1.0.0")
+            .unwrap();
+
+        assert!(exists);
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn release_tag_exists_429_becomes_provider_throttled() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/owner/repo/-/releases/v1.0.0");
+            then.status(429).header("retry-after", "30");
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let result = provider.release_tag_exists(&server.url("/owner/repo"), "v1.0.0");
+
+        assert_matches!(result, Err(Error::ProviderThrottled { status: 429, .. }));
+        mock.assert_calls(1);
+    }
+
+    #[test]
+    fn release_tag_exists_encodes_slash_tags() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(HEAD).path("/owner/repo/-/releases/mytool%2Fv1.0.0");
+            then.status(200);
+        });
+        let (provider, _temp_dir) = test_provider();
+
+        let exists = provider
+            .release_tag_exists(&server.url("/owner/repo"), "mytool/v1.0.0")
+            .unwrap();
+
+        assert!(exists);
+        mock.assert_calls(1);
+    }
+
+    /// The release-page pre-probe is what keeps the filename cross-product bounded: when no tag
+    /// form has a release, resolution must conclude Nonexistent after exactly one HEAD per tag
+    /// form, without a single `downloads/binaries` probe.
+    #[test]
+    fn try_resolve_prunes_filename_probing_to_surviving_tags() {
+        let server = MockServer::start();
+        let tag_segments = [
+            "v1.0.0",
+            "1.0.0",
+            "mytool-v1.0.0",
+            "mytool-1.0.0",
+            "mytool%2Fv1.0.0",
+            "mytool%2F1.0.0",
+        ];
+        let tag_mocks: Vec<_> = tag_segments
+            .iter()
+            .map(|segment| {
+                let path = format!("/owner/repo/-/releases/{}", segment);
+                server.mock(move |when, then| {
+                    when.method(HEAD).path(path);
+                    then.status(404);
+                })
+            })
+            .collect();
+        let asset_probes = server.mock(|when, then| {
+            when.method(HEAD).path_includes("/downloads/binaries/");
+            then.status(404);
+        });
+        let (provider, _temp_dir) = test_provider();
+        let krate = DownloadedCrate {
+            resolved: crate::crate_resolver::ResolvedCrate {
+                name: "mytool".to_string(),
+                version: Version::new(1, 0, 0),
+                source: ResolvedSource::Forge {
+                    forge: Forge::GitLab {
+                        custom_url: Some(Url::parse(&server.base_url()).unwrap()),
+                        owner: "owner".to_string(),
+                        repo: "repo".to_string(),
+                    },
+                    commit: "abc123".to_string(),
+                },
+            },
+            crate_path: PathBuf::from("/nonexistent"),
+        };
+
+        let result = provider.try_resolve(&krate, &target_triple("x86_64-unknown-linux-gnu"));
+
+        assert_matches!(result, Ok(ConclusiveResolution::Nonexistent));
+        for mock in &tag_mocks {
+            mock.assert_calls(1);
+        }
+        asset_probes.assert_calls(0);
     }
 }
