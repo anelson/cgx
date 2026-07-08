@@ -1,0 +1,27 @@
+id: no-llm-ticks-md
+valid:
+  # Plain ASCII prose with ASCII punctuation.
+  - |
+    # A heading
+
+    A paragraph - with dashes, "quotes", and an arrow ->.
+
+    - `input` - description of the input.
+  # Non-ASCII letters are allowed; only punctuation, symbols, and spaces are banned.
+  - |
+    Русский текст и كلمات عربية in one paragraph.
+  # Fenced code blocks are not prose; captured CLI output may contain whatever it contains.
+  - |
+    ```text
+    resolver output: Tag("v1.0") → commit
+    ```
+invalid:
+  # Em dash in a list item.
+  - |
+    - `version` — cgx version to install.
+  # Rightwards arrow in a paragraph.
+  - |
+    The cache maps Tag → commit.
+  # Curly quotes in a heading.
+  - |
+    # A “fancy” heading

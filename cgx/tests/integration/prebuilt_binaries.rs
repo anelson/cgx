@@ -238,7 +238,7 @@ eza = { version = "=0.23.1", default-features = false }
     assert_built_from_source(&messages);
 }
 
-/// Test cache flow: default (binary) → never (source) → default (binary from cache).
+/// Test cache flow: default (binary) -> never (source) -> default (binary from cache).
 #[test]
 fn cache_flow_switching_modes() {
     let mut cgx = Cgx::with_test_fs();
@@ -675,7 +675,7 @@ mod github_releases {
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
         // eza 0.23.1 publishes exact-triple Linux assets, but its only Windows asset is
-        // `x86_64-pc-windows-gnu` — so on an msvc host the resolved target must be the
+        // `x86_64-pc-windows-gnu` - so on an msvc host the resolved target must be the
         // ABI-compatible gnu one, not the host triple.
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         let expected_target = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
@@ -698,8 +698,8 @@ mod github_releases {
     /// This exercises all three of the asset-matching heuristics the fix added: the asset is named
     /// after the `taplo` binary (not the `taplo-cli` crate), uses a short `{os}-{arch}` platform
     /// token (`taplo-linux-x86_64`, not the full triple), and on Linux/macOS is a bare `.gz` (a
-    /// gzipped binary, not a tarball). `--no-exec` runs the full download+extract path — so the
-    /// naked-`.gz` extraction is covered end to end — without executing the binary,
+    /// gzipped binary, not a tarball). `--no-exec` runs the full download+extract path - so the
+    /// naked-`.gz` extraction is covered end to end - without executing the binary,
     /// sidestepping any glibc/musl run-host mismatch. Gated to the OS/arch combinations for
     /// which taplo publishes an asset that the `{os}-{arch}` alias matches.
     #[test]
@@ -881,7 +881,7 @@ mod github_releases {
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
         // With no `x86_64-unknown-linux-gnu` asset, an x86_64 Linux host (gnu or musl) must
-        // resolve the musl asset — the gnu host via ABI fallback. Every other gated host has an
+        // resolve the musl asset - the gnu host via ABI fallback. Every other gated host has an
         // exact-triple asset.
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let expected_target = "x86_64-unknown-linux-musl".to_string();
@@ -905,8 +905,8 @@ mod github_releases {
 
     /// Test the `{crate}-{version}` monorepo release-tag heuristic end to end.
     ///
-    /// The nextest repository tags its cargo-nextest releases `cargo-nextest-0.9.100` — no
-    /// `v{version}` or `{version}` tag exists — so the GitHub provider only finds the release
+    /// The nextest repository tags its cargo-nextest releases `cargo-nextest-0.9.100` - no
+    /// `v{version}` or `{version}` tag exists - so the GitHub provider only finds the release
     /// through the name-prefixed tag form. The asset names themselves
     /// (`cargo-nextest-0.9.100-{target}.tar.gz`) match the standard candidate templates.
     ///
@@ -948,7 +948,7 @@ mod github_releases {
         assert_eq!(binary.provider, BinaryProvider::GithubReleases);
 
         // On macOS the only asset is the `universal-apple-darwin` fat binary, and on Windows the
-        // only assets are msvc ones (an ABI fallback for a windows-gnu host) — in both cases the
+        // only assets are msvc ones (an ABI fallback for a windows-gnu host) - in both cases the
         // resolved target is not necessarily the host triple. Linux hosts get exact-triple assets.
         #[cfg(target_os = "macos")]
         let expected_target = "universal-apple-darwin".to_string();

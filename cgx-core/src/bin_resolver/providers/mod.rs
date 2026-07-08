@@ -158,7 +158,7 @@ struct CandidateFilename {
 /// separators. Each candidate carries its [`ArchiveFormat`] representing what the expected format
 /// would be for a given candidate file, if it is found to exist.
 ///
-/// Names are tried in priority order: `crate_name` first, then any `extra_binary_names` — binaries
+/// Names are tried in priority order: `crate_name` first, then any `extra_binary_names` - binaries
 /// the crate declares whose name differs from the crate name. This is what lets, for example,
 /// `cgx taplo-cli` find the `taplo`-named assets of the `taplo-cli` crate. For each name,
 /// variations with multiple forms of platform strings are generated. Duplicate filenames are
@@ -258,7 +258,7 @@ fn push_candidate_patterns(
 /// - `{name}-{version}`: monorepos tagging per-member without a `v`, eg cargo-nextest's
 ///   `cargo-nextest-0.9.140`.
 /// - `{name}/v{version}` and `{name}/{version}`: cargo-binstall's subcrate tag inference. When
-///   embedded in a URL path these need the `/` encoded — see [`tag_url_path_segment`].
+///   embedded in a URL path these need the `/` encoded - see [`tag_url_path_segment`].
 fn generate_candidate_tags(crate_name: &str, version: &str) -> Vec<String> {
     vec![
         format!("v{}", version),
@@ -319,7 +319,7 @@ mod tests {
     }
 
     /// Within a single target's group, every crate-name candidate is ordered before any
-    /// binary-name candidate. Across groups target preference dominates instead — see
+    /// binary-name candidate. Across groups target preference dominates instead - see
     /// `exact_host_candidates_precede_fallback_target_candidates`.
     #[test]
     fn crate_name_candidates_precede_binary_name_candidates_within_target_group() {

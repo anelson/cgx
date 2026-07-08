@@ -12,9 +12,9 @@ use crate::{
 
 /// Engine-level messages emitted by [`crate::Cgx`] around the pre-built-vs-source decision.
 ///
-/// These capture the full set of facts about a crate invocation — its resolved identity and source,
+/// These capture the full set of facts about a crate invocation - its resolved identity and source,
 /// where its code lives on disk, the chosen build options and target, and how its binary was
-/// obtained — so that callers (and tests) can observe what cgx decided without inspecting the built
+/// obtained - so that callers (and tests) can observe what cgx decided without inspecting the built
 /// binary itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

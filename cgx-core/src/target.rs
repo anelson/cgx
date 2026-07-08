@@ -201,13 +201,13 @@ impl TargetTriple {
 
         if triple.operating_system.is_like_darwin() {
             // A universal (fat) binary carries a slice for every macOS architecture, so it runs
-            // natively on any Mac — Intel or Apple Silicon. These are Apple `lipo` asset naming
+            // natively on any Mac - Intel or Apple Silicon. These are Apple `lipo` asset naming
             // conventions, not real triples, so they are carried as opaque targets.
             fallbacks.push(Self::from_static("universal-apple-darwin"));
             fallbacks.push(Self::from_static("universal2-apple-darwin"));
 
             // An Apple Silicon host can also run an `x86_64-apple-darwin` binary, but only through
-            // Rosetta 2 — so it is a fallback only when the probe found Rosetta.
+            // Rosetta 2 - so it is a fallback only when the probe found Rosetta.
             if matches!(triple.architecture, Architecture::Aarch64(_)) && caps.x86_64_macos_runnable {
                 fallbacks.push(Self::sibling_with_architecture(triple, Architecture::X86_64));
             }
@@ -225,8 +225,8 @@ impl TargetTriple {
         } else if triple.operating_system == OperatingSystem::Linux && triple.environment == Environment::Gnu
         {
             // A glibc host can also run a musl binary (musl release binaries are statically linked).
-            // The reverse does NOT hold — a musl-only host generally cannot run a glibc-linked binary
-            // — so a musl host is intentionally left with no fallback.
+            // The reverse does NOT hold - a musl-only host generally cannot run a glibc-linked binary
+            // - so a musl host is intentionally left with no fallback.
             fallbacks.push(Self::sibling_with_environment(triple, Environment::Musl));
         }
 
@@ -292,7 +292,7 @@ impl TargetTriple {
     ///
     /// Every Windows target compiles to a standalone PE linked against the system UCRT, so a binary
     /// built for a sibling ABI runs on the host; we just prefer the closest ABI first. The host's
-    /// own ABI is omitted because the sole caller wants only the *additional* targets — the host is
+    /// own ABI is omitted because the sole caller wants only the *additional* targets - the host is
     /// already covered by `self`.
     fn windows_fallback_environments(host: Environment) -> &'static [Environment] {
         match host {
@@ -597,7 +597,7 @@ mod tests {
     }
 
     /// The full "targets to try" list puts the exact host first, then its fallbacks. Uses a Linux
-    /// host so the result does not depend on the machine running the test — only the
+    /// host so the result does not depend on the machine running the test - only the
     /// `aarch64-apple-darwin` arm consults runtime-probed capabilities.
     #[test]
     fn compatible_targets_list_host_first_then_fallbacks() {
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(target.compatible_fallback_targets_with(caps(true)), expected);
     }
 
-    /// An OS with no known ABI-compatible siblings gets no fallbacks — only its exact host triple,
+    /// An OS with no known ABI-compatible siblings gets no fallbacks - only its exact host triple,
     /// which `compatible_fallback_targets` excludes.
     #[test]
     fn unhandled_os_has_no_fallback() {
@@ -751,7 +751,7 @@ mod tests {
     }
 
     /// On Apple Silicon with Rosetta, the common `arm64` asset spelling must be generated, and
-    /// every native (aarch64/arm64) token must precede every emulated x86_64 token — otherwise a
+    /// every native (aarch64/arm64) token must precede every emulated x86_64 token - otherwise a
     /// release shipping `foo-arm64-darwin.tar.gz` plus `foo-x86_64-darwin.tar.gz` matches only the
     /// Intel asset and cgx silently runs it under Rosetta instead of natively.
     #[test]

@@ -84,7 +84,7 @@ impl CrateRequest {
         // Only `name` is set; `source`, `version`, and `git_ref` are intentionally left at their
         // defaults. That is sufficient because [`CrateSpec::load`] will resolve this request with
         // a default `source` by looking up the crate name in the  `[tools]` config section and
-        // applying its configured source and version — exactly the way a bare `cgx <name>`
+        // applying its configured source and version - exactly the way a bare `cgx <name>`
         // invocation resolves. Pre-filling those fields here would duplicate that lookup.
         //
         // Of course that assumes that the caller is already certain that `name` appears in the
@@ -182,7 +182,7 @@ impl CrateSpec {
     /// Resolve a [`CrateRequest`] into a [`CrateSpec`], respecting config-based overrides.
     ///
     /// This method applies config-based transformations and overrides:
-    /// 1. Alias resolution: Maps short names to full crate names (e.g., `rg` → `ripgrep`)
+    /// 1. Alias resolution: Maps short names to full crate names (e.g., `rg` -> `ripgrep`)
     /// 2. Tool pinning: Applies version pinning from config for known tools
     /// 3. Default registry: Uses config's default registry when no registry specified
     ///

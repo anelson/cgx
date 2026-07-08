@@ -1856,7 +1856,7 @@ mod tests {
         use super::*;
         use crate::builder::BuildOptions;
 
-        /// Test loading config from a 3-level hierarchy (root → work → project1).
+        /// Test loading config from a 3-level hierarchy (root -> work -> project1).
         ///
         /// Verifies that config files are merged in order of precedence, with closer files
         /// overriding values from parent directories. The `resolve_cache_timeout` should be 3m
@@ -1884,7 +1884,7 @@ mod tests {
             assert_eq!(config.aliases.len(), 3);
         }
 
-        /// Test loading config from a parallel 3-level hierarchy (root → work → project2).
+        /// Test loading config from a parallel 3-level hierarchy (root -> work -> project2).
         ///
         /// Similar to project1, but verifies that sibling project directories maintain
         /// independent configurations. The `resolve_cache_timeout` should be 5m (from project2),
@@ -1912,7 +1912,7 @@ mod tests {
             assert_eq!(config.aliases.len(), 3);
         }
 
-        /// Test loading config from a 2-level hierarchy (root → work).
+        /// Test loading config from a 2-level hierarchy (root -> work).
         ///
         /// Verifies config merging at an intermediate level in the hierarchy. The
         /// `resolve_cache_timeout` should be 2m (from work), tools should include entries from
