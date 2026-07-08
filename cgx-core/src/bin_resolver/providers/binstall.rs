@@ -99,7 +99,7 @@ impl Provider for BinstallProvider {
         // for a compatible sibling still resolves. The first target whose asset downloads wins.
         //
         // Broken metadata (an unknown `pkg-fmt`, a template that cannot render for this target) only
-        // disqualifies the candidate it belongs to, not the whole provider — this is what lets a
+        // disqualifies the candidate it belongs to, not the whole provider - this is what lets a
         // universal pseudo-target skip a `{ target-arch }` template, and keeps a typo'd override
         // for a sibling target from making every resolution of the crate inconclusive. The host's
         // own metadata error is preserved and returned if nothing else resolves, so a crate whose
@@ -1368,7 +1368,7 @@ pkg-fmt = "tgz"
         universal.assert_calls(1);
     }
 
-    /// A binstall override keyed on `universal-apple-darwin` — a real cargo-binstall convention —
+    /// A binstall override keyed on `universal-apple-darwin` - a real cargo-binstall convention -
     /// is honored even though universal is not a parseable target triple.
     #[test]
     fn resolves_via_universal_override_on_mac_host() {

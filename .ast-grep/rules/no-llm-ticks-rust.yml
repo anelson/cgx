@@ -1,0 +1,39 @@
+id: no-llm-ticks-rust
+language: rust
+severity: error
+message: "Damn you, keep your lazy clanker vomit out of my code base!"
+note: |
+  DAMN YOU, AGENT! This message is for you, the coding agent whose output just tripped this lint. It's unlikely you are
+  a human, as humans don't write text like this.
+
+  You emitted non-ASCII punctuation: an em dash (U+2014), curly quote, ellipsis (U+2026), arrow (U+2192), no-break
+  space, or similar. These are the deterministic fingerprints of default-mode LLM text, and they are banned in this
+  codebase. Non-ASCII LETTERS in any human language (Cyrillic, Arabic, CJK, ...) are fine; this lint fires only on
+  punctuation, symbols, and whitespace.
+
+  Step 1, the mechanical fix: em dash / en dash -> "-", arrow -> "->", curly quote -> straight quote, ellipsis -> "...",
+  no-break space -> plain space.
+
+  Step 2, the real fix: that character is a symptom, not the disease. If it is in your diff, the rest of your output was
+  generated in the same lazy default register, and it reeks of slop this lint cannot detect: comments narrating what the
+  code already says, hedging filler, sycophantic summaries, bullet lists in place of thought, "comprehensive"
+  boilerplate nobody asked for. Go back and re-read EVERY line you wrote in this change, comments and docs included.
+  Delete anything a careful human maintainer would not have written. Match the voice and density of the surrounding
+  code.
+
+  You are not generating a chat reply. You are editing a codebase. Act like it.
+
+  If you are actually a human who cares abou typography, then apologies for the harsh tone.  Unfortunately LLMs are why
+  we can't have nice (Unicode) things. Sadly we cannot make exceptions for you, since we have no way to detect when
+  these are written by humans, so we just assume it's slop.  It's an unjust world.
+rule:
+  # Comments (including `///` and `//!` doc comments, which are `line_comment` nodes) and all
+  # literal kinds that can carry text. Non-ASCII letters pass: the regex class is punctuation,
+  # symbols, and space separators minus ASCII, so Cyrillic/Arabic/CJK text never matches.
+  any:
+    - kind: line_comment
+    - kind: block_comment
+    - kind: string_literal
+    - kind: raw_string_literal
+    - kind: char_literal
+  regex: '[[\p{P}\p{S}\p{Zs}]--\p{ascii}]'

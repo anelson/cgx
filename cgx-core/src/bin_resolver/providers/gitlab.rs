@@ -163,15 +163,15 @@ impl GitlabProvider {
     ///
     /// This is the cheap pre-filter that keeps the per-tag filename cross-product bounded: a tag
     /// whose release page 404s cannot have any `downloads/binaries/` assets, so it is skipped
-    /// entirely. 404 → `Ok(false)`; any 2xx → `Ok(true)`; 429 → provider-throttled error. Any
-    /// other cleanly delivered status → `Ok(true)`: fail open and keep the tag in play, so a
+    /// entirely. 404 -> `Ok(false)`; any 2xx -> `Ok(true)`; 429 -> provider-throttled error. Any
+    /// other cleanly delivered status -> `Ok(true)`: fail open and keep the tag in play, so a
     /// GitLab instance whose release pages misbehave (auth walls, odd proxies) degrades to
     /// exhaustive filename probing rather than wrongly concluding
     /// [`ConclusiveResolution::Nonexistent`]. 5xx statuses are retried by the HTTP client and
     /// surface as `Err` after exhaustion, which callers propagate as an inconclusive resolution.
     ///
     /// Not implemented in terms of [`Self::head_probe`], which maps every non-2xx status to
-    /// `false` — the wrong semantics here, where only a 404 may prune the tag.
+    /// `false` - the wrong semantics here, where only a 404 may prune the tag.
     fn release_tag_exists(&self, repo_url: &str, tag: &str) -> Result<bool> {
         let url = format!("{}/-/releases/{}", repo_url, super::tag_url_path_segment(tag));
         let response = self
@@ -279,7 +279,7 @@ impl Provider for GitlabProvider {
         //
         // If we hit a connection/timeout error, bail immediately rather than continuing to probe
         // every candidate URL against a broken/unresponsive server. The candidate set is the
-        // cross-product of names (crate + binary), platform aliases, and archive formats — on the
+        // cross-product of names (crate + binary), platform aliases, and archive formats - on the
         // order of ~1,000 sequential HEADs per surviving tag when no asset exists (a slow
         // fallback to a source build). The release-page pre-filter above bounds that: a repo with
         // no release for any tag form does at most one HEAD per tag form, and repos rarely have

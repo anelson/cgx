@@ -86,42 +86,42 @@ A fuller example:
 
 ### Inputs
 
-- `version` — cgx version to install (`0.0.11` or `v0.0.11`; leading `v` optional).
+- `version` - cgx version to install (`0.0.11` or `v0.0.11`; leading `v` optional).
   - Default: `latest`.
-- `target` — target triple to install. When set, downloads that exact prebuilt archive.
+- `target` - target triple to install. When set, downloads that exact prebuilt archive.
   - Default: the runner's native target (auto-detected).
-- `cargo-cgx` — also install the `cargo-cgx` binary (the `cargo cgx ...` subcommand).
+- `cargo-cgx` - also install the `cargo-cgx` binary (the `cargo cgx ...` subcommand).
   - Default: `false`.
-- `github-token` — token for the action's own downloads and prefetch. Never exported to later steps.
+- `github-token` - token for the action's own downloads and prefetch. Never exported to later steps.
   - Default: `${{ github.token }}`.
-- `cache` — cache cgx's state (resolve cache + downloaded tool binaries) across runs.
+- `cache` - cache cgx's state (resolve cache + downloaded tool binaries) across runs.
   - Default: `true`.
-- `cache-key-prefix` — prefix for the cache key; bump it to invalidate.
+- `cache-key-prefix` - prefix for the cache key; bump it to invalidate.
   - Default: `cgx`.
-- `app-dir` — directory for cgx's state, exported as `CGX_APP_DIR` for later steps.
+- `app-dir` - directory for cgx's state, exported as `CGX_APP_DIR` for later steps.
   - Default: a stable per-runner path under the runner tool cache.
-- `prefetch-all` — after install, run `cgx --prefetch-all` (uses this repo's `cgx.toml`).
+- `prefetch-all` - after install, run `cgx --prefetch-all` (uses this repo's `cgx.toml`).
   - Default: `true`.
-- `prefetch` — newline-separated crate specs to prefetch with `cgx --prefetch`.
+- `prefetch` - newline-separated crate specs to prefetch with `cgx --prefetch`.
   - Default: empty (nothing prefetched).
 
 ### Outputs
 
-- `version` — the requested version (`latest` or `vX.Y.Z`).
-- `cgx-version` — the concrete version reported by `cgx --version`.
-- `path` — absolute path to the installed `cgx` binary.
-- `app-dir` — the `CGX_APP_DIR` used for cgx's state.
+- `version` - the requested version (`latest` or `vX.Y.Z`).
+- `cgx-version` - the concrete version reported by `cgx --version`.
+- `path` - absolute path to the installed `cgx` binary.
+- `app-dir` - the `CGX_APP_DIR` used for cgx's state.
 
 ### Caching and prefetch
 
-With `cache: true` (the default) the action caches cgx's on-disk state — the resolve cache and the tool
-binaries cgx downloads — keyed by OS and architecture, restoring it before your steps and saving it after the
+With `cache: true` (the default) the action caches cgx's on-disk state (the resolve cache and the tool
+binaries cgx downloads) keyed by OS and architecture, restoring it before your steps and saving it after the
 job. The cgx binary itself is downloaded fresh each run.
 
 Prefetch warms that cache at setup time so later `cgx <crate>` steps are instant. `prefetch-all` prepares
 every tool and alias in your repository's `cgx.toml` (so run `actions/checkout` before this action, otherwise
-there is no `cgx.toml` to read); `prefetch` prepares the crate specs you list. **Prefetch failures are reported
-as warnings and never fail your build**, and any tools prepared successfully are still cached.
+there is no `cgx.toml` to read); `prefetch` prepares the crate specs you list. Prefetch failures are reported
+as warnings and never fail your build, and any tools prepared successfully are still cached.
 
 ### GitHub token
 
@@ -437,6 +437,25 @@ cargo cgx ripgrep --version
 
 This is functionally the same as running `cgx ripgrep --version`. It exists for users who prefer the `cargo <command>`
 style or want `cgx` available as a Cargo plugin.
+
+## AI Use
+
+**For users:**
+
+Agentic coding tools are used by the developers of `cgx`, but subject to the AI policy rules. Be assured that this
+project is not vibe-coded Dunning-Kruger slop, but is the product of many years of human experience in Rust and the Rust
+ecosystem, solving a real human problem that has been a pain point for the human maintainers and many other human Rust
+developers. Users are encouraged to review the source code and docs for themselves, looking for the telltale LLM tics
+that pervade the vast expanse of slop now being regurgitated out onto the Internet; we trust that you will not find any.
+
+In particular, you are encouraged to regard this project with skepticism, given how potentially security-sensitive
+a tool like this is. Review the security considerations that the maintainers have put into place, and satisfy yourself
+that this tool is built responsibly and with care to avoid the pitfalls that one would expect in a performative
+vibe-coded clout-chasing garbage project.
+
+**For contributors:**
+
+Contributions to this repo are subject to our [AI Policy](AI_POLICY.md). Please read it carefully before contributing.
 
 ## License
 

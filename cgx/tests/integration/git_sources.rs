@@ -37,8 +37,8 @@ fn run_from_git_source_with_tag() {
     // --- First run assertions: verify cold cache behavior ---
     //
     // NOTE: There are TWO git checkout sequences in a single run:
-    // 1. Crate resolution: Tag("v1.14.0") → resolves to commit hash
-    // 2. Build phase: Commit("<hash>") → gets source for building
+    // 1. Crate resolution: Tag("v1.14.0") -> resolves to commit hash
+    // 2. Build phase: Commit("<hash>") -> gets source for building
     //
     // The second operation will show local hits because the first operation
     // already populated the bare repo. We test the TAG-based operations to verify
@@ -124,12 +124,12 @@ fn run_from_git_source_with_tag() {
     // --- Second run assertions: verify multi-level caching ---
     //
     // On the second run, there are THREE levels of caching at play:
-    // - Crate resolution cache: The Tag→commit mapping is cached, so NO git operations happen at all
+    // - Crate resolution cache: The Tag->commit mapping is cached, so NO git operations happen at all
     //   for the crate resolution phase (no Tag-based ResolvingRef).
     // - Git: The build phase does a Commit-based lookup, which finds it locally.
     // - Binary cache: The compiled binary is cached, so no actual build happens.
 
-    // CrateResolution CacheHit proves: The Tag→commit resolution was served from cache,
+    // CrateResolution CacheHit proves: The Tag->commit resolution was served from cache,
     // completely bypassing git operations for the crate resolution phase.
     assert!(
         messages.iter().any(|m| matches!(

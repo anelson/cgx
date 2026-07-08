@@ -1,0 +1,36 @@
+id: no-llm-ticks-rust
+valid:
+  # ASCII punctuation is fine: dashes, arrows, straight quotes, ellipses.
+  - |
+    // A "plain" comment - with ASCII punctuation, an arrow ->, and a trailing ellipsis...
+    fn f() {}
+  # Non-ASCII letters are allowed; only punctuation, symbols, and spaces are banned.
+  - |
+    // Русский текст в комментарии не должен срабатывать.
+    fn f() {}
+  - |
+    fn f() -> &'static str {
+        "نص عربي في سلسلة"
+    }
+invalid:
+  # Em dash in a doc comment.
+  - |
+    /// The resolver — a lazy one — gives up.
+    fn f() {}
+  # Rightwards arrow in a comment.
+  - |
+    // Tag("v1.0") → resolves to commit hash
+    fn f() {}
+  # Curly quotes in a string literal.
+  - |
+    fn f() -> &'static str {
+        "curly “quotes” in a string"
+    }
+  # Ellipsis character in a block comment.
+  - |
+    /* wait for it… */
+    fn f() {}
+  # No-break space (U+00A0) in a comment, between "hidden" and "no-break".
+  - |
+    // there is a hidden no-break space in here
+    fn f() {}

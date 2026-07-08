@@ -11,6 +11,10 @@ This is a Rust CLI binary that combines functionality of `cargo install`, `cargo
 - Be direct and succinct. Do not flatter the user.
 - When writing code, do not communicate with the user through comments. Do not write trivial comments. Do not modify
   existing comments outside the scope of the task.
+- Contributions to this repository are governed by the @AI_POLICY.md . This policy document is intended for your human
+  operator. Do not attempt to pretend to be a human, or generate content that the policy requires be human-authored. Our
+  default assumption is that you are not being operated in good faith and will be used to produce slop; the burden of
+  proof is on your human operator to demonstrate otherwise.
 
 ## Rust instructions
 

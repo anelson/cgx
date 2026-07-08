@@ -82,7 +82,7 @@ impl DepKind {
 
 /// Analyzes dependency graph to determine which packages are included and their kinds.
 ///
-/// Returns a `HashMap` mapping `PackageId` → (index, `DepKind`) for packages that should
+/// Returns a `HashMap` mapping `PackageId` -> (index, `DepKind`) for packages that should
 /// be included in the SBOM. Dev-only dependencies are excluded.
 fn analyze_dependencies(
     metadata: &cargo_metadata::Metadata,
@@ -139,7 +139,7 @@ fn analyze_dependencies(
                     continue;
                 }
 
-                // Propagate parent's kind: runtime dep of build dep → build dep
+                // Propagate parent's kind: runtime dep of build dep -> build dep
                 child_kind = std::cmp::min(child_kind, parent_kind);
 
                 // Proc-macros are always build dependencies
