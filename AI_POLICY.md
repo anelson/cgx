@@ -3,7 +3,7 @@
 Use of agentic AI coding tools is permitted in this repository, subject to some firm rules that aim to ensure these
 powerful tools are used competently and effectively by qualified developers.
 
-All contributions to this repository, be it issues, commits, PRs, or comments, must be made by humans, and suitable for
+All contributions to this repository, be they issues, commits, PRs, or comments, must be made by humans, and suitable for
 human consumption. Any submission of AI slop outside of the narrow exceptions stated in this policy is grounds for
 a permanent ban from contributing to this repository. Determination of what constitutes AI slop is at the sole
 discretion of the repository maintainers.
@@ -44,10 +44,10 @@ a clanker does not imbue you with those abilities.
 
 Markdown files and other text are also subject to this same policy, with the exception of `AGENTS.md`, which being for
 clankers to read is reasonable to author using a clanker. This file is explicitly exempted from the prohibition on AI
-slop, and in fact probably is more effective if it has the insufferable on-distribution voice and Unicode-laden ticks of
+slop, and in fact probably is more effective if it has the insufferable on-distribution voice and Unicode-laden tics of
 modern LLMs.
 
-anelson's thinking on LLMs and agentic coding tools more generally is heavily influenced by
+anelson's thinking on LLMs and GenAI tools more generally is heavily influenced by
 [Oxide Computer's RFD 0576](https://rfd.shared.oxide.computer/rfd/0576), which should be considered applicable to this repository as well
 unless contradicted by anything above.
 

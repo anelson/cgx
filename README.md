@@ -114,14 +114,14 @@ A fuller example:
 
 ### Caching and prefetch
 
-With `cache: true` (the default) the action caches cgx's on-disk state - the resolve cache and the tool
-binaries cgx downloads - keyed by OS and architecture, restoring it before your steps and saving it after the
+With `cache: true` (the default) the action caches cgx's on-disk state (the resolve cache and the tool
+binaries cgx downloads) keyed by OS and architecture, restoring it before your steps and saving it after the
 job. The cgx binary itself is downloaded fresh each run.
 
 Prefetch warms that cache at setup time so later `cgx <crate>` steps are instant. `prefetch-all` prepares
 every tool and alias in your repository's `cgx.toml` (so run `actions/checkout` before this action, otherwise
-there is no `cgx.toml` to read); `prefetch` prepares the crate specs you list. **Prefetch failures are reported
-as warnings and never fail your build**, and any tools prepared successfully are still cached.
+there is no `cgx.toml` to read); `prefetch` prepares the crate specs you list. Prefetch failures are reported
+as warnings and never fail your build, and any tools prepared successfully are still cached.
 
 ### GitHub token
 
@@ -450,8 +450,8 @@ that pervade the vast expanse of slop now being regurgitated out onto the Intern
 
 In particular, you are encouraged to regard this project with skepticism, given how potentially security-sensitive
 a tool like this is. Review the security considerations that the maintainers have put into place, and satisfy yourself
-that this tool is built responsibly and with care to avoid the pitfalls that one would expect a vibe-coding
-clout-chaser.
+that this tool is built responsibly and with care to avoid the pitfalls that one would expect in a performative
+vibe-coded clout-chasing garbage project.
 
 **For contributors:**
 
