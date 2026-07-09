@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.0.14] - 2026-07-09
+
+### 🚀 Features
+
+- *(bin_resolver)* Further expand prebuilt binary heuristics ([#242](https://github.com/anelson/cgx/pull/242))
+
+### 🐛 Bug Fixes
+
+- Fix various typos in comments and docs and add `typos` check ([#222](https://github.com/anelson/cgx/pull/222))
+- Relative tool paths in config files are now evaluated relative to the config file's location ([#224](https://github.com/anelson/cgx/pull/224))
+- *(bin_resolver)* Improve binary provider support so `cgx ripgrep` can resolve a prebuilt binary ([#235](https://github.com/anelson/cgx/pull/235))
+
+### 📚 Documentation
+
+- Document and apply AI policy ([#243](https://github.com/anelson/cgx/pull/243))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.lock dependencies
+- Fix a typo that slipped in past the recent `typos` commit
 ## [0.0.13] - 2026-06-19
 
 ### 🚀 Features
