@@ -33,6 +33,10 @@ inputs:
       avoiding anonymous rate limits. Defaults to the workflow token.
     required: false
     default: ${{ github.token }}
+  verify-attestations:
+    description: Verify immutable-release and build-provenance attestations for downloaded release assets.
+    required: false
+    default: "true"
   cache:
     description: >-
       Cache cgx's on-disk state (resolve cache + downloaded tool binaries) across
@@ -127,6 +131,7 @@ runs:
         INPUT_VERSION: ${{ steps.prep.outputs.version }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_CARGO_CGX: ${{ inputs.cargo-cgx }}
+        INPUT_VERIFY_ATTESTATIONS: ${{ inputs.verify-attestations }}
       run: bash "$GITHUB_ACTION_PATH/.github/actions/cgx-action/install.sh"
 
     - name: Install cgx (Windows)
@@ -138,6 +143,7 @@ runs:
         INPUT_VERSION: ${{ steps.prep.outputs.version }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_CARGO_CGX: ${{ inputs.cargo-cgx }}
+        INPUT_VERIFY_ATTESTATIONS: ${{ inputs.verify-attestations }}
       run: |
         & "$env:GITHUB_ACTION_PATH/.github/actions/cgx-action/install.ps1"
 
