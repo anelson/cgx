@@ -113,11 +113,16 @@ apply_dry_run_safety_overlay() {
     s/    permissions:\n      "attestations": "write"\n      "contents": "write"\n      "id-token": "write"/    permissions:\n      "contents": "read"/g;
     s/"contents": "write"/"contents": "read"/g;
     s/description: Release Tag/description: Dry-run sentinel. Leave as dry-run; real tags are refused./;
-    s/(\n      - uses: actions\/checkout\@v6\n        with:\n          persist-credentials: false\n          submodules: recursive\n)(      - name: Install dist\n)/$1      - name: Refuse real release tags\n        if: \${{ inputs.tag != '\''dry-run'\'' }}\n        run: |\n          echo "::error::This workflow is only for cargo-dist dry runs. Leave the tag input set to dry-run."\n          exit 1\n$2/s;
+    s/(\n      - uses: actions\/checkout\@\S+\n        with:\n          persist-credentials: false\n          submodules: recursive\n)(      - name: Install dist\n)/$1      - name: Refuse real release tags\n        if: \${{ inputs.tag != '\''dry-run'\'' }}\n        run: |\n          echo "::error::This workflow is only for cargo-dist dry runs. Leave the tag input set to dry-run."\n          exit 1\n$2/s;
   ' "${workflow}"
 
   if grep -Eq '^[[:space:]]+"[^"]+": "write"[[:space:]]*$' "${workflow}"; then
     echo "Dry-run workflow still contains write permissions after applying the safety overlay" >&2
+    return 1
+  fi
+
+  if ! grep -q 'Refuse real release tags' "${workflow}"; then
+    echo "Dry-run workflow is missing the real-release-tag guard after applying the safety overlay" >&2
     return 1
   fi
 }
