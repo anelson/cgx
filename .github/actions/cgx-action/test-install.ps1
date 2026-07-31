@@ -157,3 +157,7 @@ function Expand-Archive {
   if ($originalPath) { $env:PATH = $originalPath }
   Remove-Item -Recurse -Force $testRoot -ErrorAction SilentlyContinue
 }
+
+# The GH Actions pwsh wrapper appends `exit $LASTEXITCODE`, and the expected-failure
+# test cases above leave it nonzero. A thrown test failure never reaches this line.
+exit 0
