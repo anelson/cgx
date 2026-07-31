@@ -6,6 +6,10 @@ members = ["cargo:cgx", "cargo:cargo-cgx"]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
+# Generate build-provenance attestations for every final GitHub Release asset.
+github-attestations = true
+# Attest the assembled release payload before publishing the GitHub Release.
+github-attestations-phase = "host"
 # We inject our own rust-cache restore in CI instead of using cargo-dist's built-in build cache.
 cache-builds = false
 # Whether to embed dependency information using cargo-auditable
