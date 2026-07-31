@@ -23,6 +23,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer-unit-tests:
+    name: Installer unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - name: Test Unix installer security paths
+        run: bash .github/actions/cgx-action/test-install.sh
+      - name: Test PowerShell installer security paths
+        shell: pwsh
+        run: ./.github/actions/cgx-action/test-install.ps1
+
   setup:
     name: ${{ matrix.os }} / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -33,10 +44,13 @@ jobs:
         name: [default, cargo-cgx]
         include:
           # Extra scenarios (run once, on Linux unless platform-specific).
-          # explicit-version must pin >= 0.0.12 (first release with the fresh-cargo-home fix),
-          # or the e2e `cgx ripgrep` step below fails on a clean runner.
-          - { os: ubuntu-24.04, name: explicit-version, version: "0.0.12" }
+          - { os: ubuntu-24.04, name: explicit-version, version: "0.1.0" }
           - { os: ubuntu-24.04, name: cache-off, cache: "false" }
+          - {
+              os: ubuntu-24.04,
+              name: unverified,
+              verify_attestations: "false",
+            }
           - {
               os: ubuntu-24.04,
               name: custom-app-dir,
@@ -65,6 +79,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
 
+      - name: Replace gh with a failing shim for the unverified path
+        if: matrix.name == 'unverified'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/failing-gh"
+          printf '#!/usr/bin/env sh\nexit 99\n' > "$RUNNER_TEMP/failing-gh/gh"
+          chmod +x "$RUNNER_TEMP/failing-gh/gh"
+          echo "$RUNNER_TEMP/failing-gh" >> "$GITHUB_PATH"
+
       - name: Run cgx action
         id: cgx
         uses: ./
@@ -74,6 +97,7 @@ jobs:
           cargo-cgx: ${{ matrix.name == 'cargo-cgx' }}
           cache: ${{ matrix.cache || 'true' }}
           app-dir: ${{ matrix.app-dir || '' }}
+          verify-attestations: ${{ matrix.verify_attestations || 'true' }}
           # prefetch-all defaults to true; disable it for these install/output
           # tests so prefetch behavior stays isolated to the `prefetch` job.
           prefetch-all: "false"
