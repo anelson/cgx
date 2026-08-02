@@ -6,17 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-## [0.0.14] - 2026-08-01
+
+## [0.1.0] - 2026-08-02
 
 ### 🚀 Features
 
-- *(bin_resolver)* Further expand prebuilt binary heuristics ([#242](https://github.com/anelson/cgx/pull/242))
+- Implement `anelson/cgx` custom GitHub Action to download and install `cgx` (and optionally `cargo-cgx`) in workflows, add it to `PATH` for later workflow steps, cache tool state, and prefetch configured tools ([#207](https://github.com/anelson/cgx/pull/207))
+- Fall back to ABI-compatible alternative targets when resolving prebuilt binaries ([#240](https://github.com/anelson/cgx/pull/240))
+- Further expand prebuilt binary heuristics ([#242](https://github.com/anelson/cgx/pull/242))
 
 ### 🐛 Bug Fixes
 
 - Fix various typos in comments and docs and add `typos` check ([#222](https://github.com/anelson/cgx/pull/222))
 - Relative tool paths in config files are now evaluated relative to the config file's location ([#224](https://github.com/anelson/cgx/pull/224))
-- *(bin_resolver)* Improve binary provider support so `cgx ripgrep` can resolve a prebuilt binary ([#235](https://github.com/anelson/cgx/pull/235))
+- Improve prebuilt binary discovery for alternate binary names and target layouts, and avoid reusing cached resolutions when the enabled providers change ([#232](https://github.com/anelson/cgx/pull/232))
+- Improve binary provider support so `cgx ripgrep` can resolve a prebuilt binary ([#235](https://github.com/anelson/cgx/pull/235))
 
 ### 📚 Documentation
 
@@ -26,20 +30,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Update Cargo.lock dependencies
 - Fix a typo that slipped in past the recent `typos` commit
+
+### 🛡️ Security
+
+- Enable Github release attestation on release builds and verify attestation by default in the `cgx` custom action ([#252](https://github.com/anelson/cgx/pull/252))
+- Pin the GitHub Actions used by the release workflows to commit SHA digests ([#252](https://github.com/anelson/cgx/pull/252))
+
 ## [0.0.13] - 2026-06-19
 
 ### 🚀 Features
 
-- Add GitHub Action for installing `cgx` ([#207](https://github.com/anelson/cgx/pull/207))
+- Add the `anelson/cgx` GitHub Action to download and install `cgx` (and optionally `cargo-cgx`), add it to `PATH` for later workflow steps, cache tool state, and prefetch configured tools ([#207](https://github.com/anelson/cgx/pull/207))
 
 ### ⚙️ Miscellaneous Tasks
 
 - Enable several more clippy lints and fix the code accordingly ([#212](https://github.com/anelson/cgx/pull/212))
+
 ## [0.0.12] - 2026-06-17
+
+### 🚀 Features
+
+- Add `--prefetch`, `--prefetch-all`, and `--list-tools` for warming caches and preparing configured tools for later offline execution ([#201](https://github.com/anelson/cgx/pull/201))
 
 ### 🐛 Bug Fixes
 
 - Handle fresh Cargo home ([#210](https://github.com/anelson/cgx/pull/210))
+
 ## [0.0.11] - 2026-06-03
 
 ### ⚙️ Miscellaneous Tasks
@@ -68,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 🛡️ Security
 
 - _(deps)_ Bump gix from 0.80.0 to 0.83.0 ([#148](https://github.com/anelson/cgx/pull/148))
+- _(release)_ Embed auditable dependency SBOMs in published binaries via cargo-auditable ([#166](https://github.com/anelson/cgx/pull/166))
 
 ## [0.0.9] - 2026-03-14
 
@@ -129,6 +146,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🚀 Features
 
+- Resolve crates from crates.io, other registries, Git repositories, or local paths, build their selected binaries, and execute them with forwarded arguments
+- Add offline-aware caches for crate resolution, source downloads, persistent Git checkouts, and built binaries
+- Generate CycloneDX SBOMs for binaries built from source
+- Automatically detect GitHub and GitLab repository URLs passed to `--git`
+- Add `--no-exec` to print the prepared binary path and `--list-targets` to inspect runnable targets
+- Load and merge `cgx.toml` configuration from system, user, and directory scopes ([#18](https://github.com/anelson/cgx/pull/18))
 - Add `cargo-cgx` binary crate for cargo subcommand integration ([#51](https://github.com/anelson/cgx/pull/51))
 - Honor tool versions in config when resolving crates ([#46](https://github.com/anelson/cgx/pull/46))
 
