@@ -27,7 +27,7 @@ jobs:
     name: Installer unit tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
       - name: Test Unix installer security paths
         run: bash .github/actions/cgx-action/test-install.sh
       - name: Test PowerShell installer security paths
@@ -77,7 +77,7 @@ jobs:
               target: x86_64-pc-windows-msvc,
             }
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - name: Replace gh with a failing shim for the unverified path
         if: matrix.name == 'unverified'
@@ -178,7 +178,7 @@ jobs:
     name: prefetch (default-on + warn-not-fail)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - name: Create cgx.toml fixture
         shell: bash
@@ -211,7 +211,7 @@ jobs:
     name: default usage (no cgx.toml present)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       # This job tests default-on --prefetch-all with nothing to prefetch, so it must run with no cgx.toml in scope, so
       # delete it explicitly to keep that assumption true.
@@ -238,7 +238,7 @@ jobs:
     name: cache round-trip (seed + save)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
       - name: Install cgx
         uses: ./
         with:
@@ -254,7 +254,7 @@ jobs:
     needs: cache-roundtrip-seed
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
       # In at least one case, this this smoke test failed as if the cache were not restored properly, although a re-run
       # of the same test subsequently succeeded.  It appears that the GHA cache mechanism may be eventually
       # consistent, such that we cannot safely assume that a previously saved cache entry is always immediately

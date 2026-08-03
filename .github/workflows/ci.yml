@@ -64,7 +64,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - &install-rust
         uses: dtolnay/rust-toolchain@master
@@ -143,7 +143,7 @@ jobs:
             cache_key: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - *install-rust
 
@@ -170,7 +170,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-release-plz == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - *install-rust
 
@@ -190,7 +190,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       # dtolnay in his infinite wisdom did not think that CI builds should honor
       # rust-toolchain files, so we must specify the toolchain version here AND
@@ -256,7 +256,7 @@ jobs:
     if: needs.detect-pr-type.outputs.is-dependabot == 'false' && needs.detect-pr-type.outputs.is-release-plz == 'false'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       # dtolnay in his infinite wisdom did not think that CI builds should honor
       # rust-toolchain files, so we must specify the toolchain version here AND
@@ -310,7 +310,7 @@ jobs:
             cache_key: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - *install-rust
 
@@ -347,7 +347,7 @@ jobs:
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - *install-rust
 
@@ -395,7 +395,7 @@ jobs:
             cache_key: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.1
 
       - *install-rust
 
