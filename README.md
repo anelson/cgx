@@ -31,7 +31,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://github.com/anelson/cgx/releas
 The installer will download the appropriate binary for your platform and add it to your PATH.
 
 > **Note:** To install a specific version for CI/reproducible builds, replace `latest` in the URL above with the desired
-> version tag from the [Releases page](https://github.com/anelson/cgx/releases), such as `v0.0.10`.
+> version tag from the [Releases page](https://github.com/anelson/cgx/releases), such as `v0.1.0`.
 
 ### Alternative Installation Methods
 
