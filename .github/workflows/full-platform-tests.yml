@@ -266,7 +266,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2.83.2
+        with:
+          tool: cargo-release@1.1.3
+
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5.131
         with:
           command: release-pr
@@ -277,3 +283,33 @@ jobs:
           # which would leave the release PR with no CI checks and therefore
           # unmergeable under the required-status branch protection.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Update README release version
+        if: steps.release-plz.outputs.prs_created == 'true'
+        env:
+          RELEASE_PLZ_BRANCH: ${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}
+        run: |
+          git fetch origin "$RELEASE_PLZ_BRANCH"
+          remote_head="$(git rev-parse FETCH_HEAD)"
+          git checkout -B "$RELEASE_PLZ_BRANCH" "$remote_head"
+
+          cargo release replace --package cgx --execute --no-confirm
+
+          changes="$(git status --porcelain=v1 --untracked-files=all)"
+          if [ -z "$changes" ]; then
+            echo "README release version already matches the cgx manifest."
+            exit 0
+          fi
+
+          if [ "$changes" != " M README.md" ]; then
+            echo "cargo-release changed unexpected files:"
+            echo "$changes"
+            exit 1
+          fi
+
+          git add -- README.md
+          git commit --amend --no-edit
+          git push \
+            --force-with-lease="refs/heads/$RELEASE_PLZ_BRANCH:$remote_head" \
+            origin \
+            "HEAD:refs/heads/$RELEASE_PLZ_BRANCH"
