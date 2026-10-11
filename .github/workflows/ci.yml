@@ -6,6 +6,19 @@ on:
   pull_request:
     branches: [master]
 
+# Each update of a release-plz PR pushes two commits a few seconds apart:
+# release-plz's own commit, which always fails the README version check,
+# and then the amended commit that fixes README.md. Our builds are pretty
+# expensive, it's wasteful to run one that is going to fail anyway. There's
+# not a good way to avoid the two commits, with the first one triggering a
+# GHA build, but with this configuration at least, that second commit a few
+# seconds later will cancel that first doomed build and run the GHA build
+# on the second commit, which has the correct README and should pass,
+# instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.head_ref, 'release-plz-') && github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -158,11 +171,12 @@ jobs:
 
   # Stage 1c: Minimal check for release-plz PRs (Linux amd64 only)
   # Release-plz PRs only edit Cargo.toml version numbers, Cargo.lock entries for
-  # those bumps, CHANGELOG.md, and the release reference in README.md. They
-  # cannot change source code. A `cargo check` catches lockfile resolution
-  # failures, while cargo-release verifies that the README version matches the
-  # bumped manifest. No other checks are needed, as the `master` branch upon
-  # which the release-plz branch is based is assumed to be green.
+  # those bumps, CHANGELOG.md, and the release version references in README.md.
+  # They cannot change source code. A `cargo check` catches lockfile resolution
+  # failures, while `just check-readme-version` verifies that the README
+  # references match the bumped manifest. No other checks are needed, as the
+  # `master` branch upon which the release-plz branch is based is assumed to be
+  # green.
   release-plz-check:
     name: Release-plz Check (Linux amd64)
     needs: detect-pr-type
@@ -173,10 +187,15 @@ jobs:
 
       - *install-rust
 
-      - name: Install cargo-release
-        uses: taiki-e/install-action@v2.83.2
+      - name: Install just
+        uses: taiki-e/install-action@v2.87.24
         with:
-          tool: cargo-release@1.1.3
+          tool: just
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2.87.24
+        with:
+          tool: cargo-release@1.1.6
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -188,9 +207,7 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Check README release version
-        run: |
-          cargo release replace --package cgx --execute --no-confirm
-          git diff --exit-code -- README.md
+        run: just check-readme-version
 
   # Stage 1: Lint and Format Check on Linux amd64, which is the cheapest and quickest build for us
   lint:
@@ -216,9 +233,9 @@ jobs:
           tool: just
 
       - name: Install cargo-release
-        uses: taiki-e/install-action@v2.83.2
+        uses: taiki-e/install-action@v2.87.24
         with:
-          tool: cargo-release@1.1.3
+          tool: cargo-release@1.1.6
 
       - name: Install taplo
         uses: taiki-e/install-action@v2.87.24
@@ -248,11 +265,6 @@ jobs:
 
       - name: Check TOML formatting
         run: taplo fmt --check
-
-      - name: Check README release version
-        run: |
-          cargo release replace --package cgx --execute --no-confirm
-          git diff --exit-code -- README.md
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2.87.24
