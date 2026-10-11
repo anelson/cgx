@@ -78,6 +78,13 @@ skip = [
   # leon/miette still use unicode-width 0.1, while clap and test-only httpmock
   # use unicode-width 0.2. No current update on Rust 1.85.1 converges these.
   { name = "unicode-width", version = "0.1.14" },
+  # zip 7.x always enables lzma-rust2's `xz` feature, which uses sha2 0.10;
+  # cgx-core uses sha2 0.11. Only zip 8+ accepts an lzma-rust2 on sha2 0.11,
+  # and zip 8+ requires Rust 1.88.
+  { name = "sha2", version = "0.10" },
+  # reqwest 0.13.5 uses base64 0.23, while gix-transport, headers and test-only
+  # httpmock still use base64 0.22 in their latest releases.
+  { name = "base64", version = "0.22" },
 ]
 skip-tree = [
   # vergen-gix (build dep) uses older gix 0.71

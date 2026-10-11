@@ -148,10 +148,13 @@ vibecheck: check-dist-release-generated ast-grep typos
     cargo clippy --all-targets --all-features --workspace -- -D warnings
     cargo doc --workspace --no-deps --document-private-items
 
+# cargo-machete gets each member manifest explicitly. Given the root manifest, which is a virtual workspace manifest, it
+# analyzes nothing; given a directory, it also analyzes the fixture crates under `cgx-core/testdata`. The glob assumes
+# that every workspace member is a top-level directory.
 # Check dependencies, looking for security vulns, unused dependencies, and duplicates
 depcheck:
     cargo deny check
-    cargo machete --with-metadata -- ./Cargo.toml
+    cargo machete --with-metadata -- */Cargo.toml
 
 # Wrapper around `cargo add` that adds a dependency to the workspace according to our standards
 wadd +args:

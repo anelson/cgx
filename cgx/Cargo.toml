@@ -11,6 +11,12 @@ repository.workspace   = true
 rust-version.workspace = true
 version                = "0.1.0"
 
+[package.metadata.cargo-machete]
+ignored = [
+  # Used only in build.rs, which cargo-machete does not scan
+  "vergen-gix",
+]
+
 [badges]
 maintenance = { status = "experimental" }
 
@@ -43,12 +49,9 @@ tracing-subscriber   = { workspace = true }
 vergen-gix = { workspace = true }
 
 [dev-dependencies]
-assert-json-diff = { workspace = true }
-assert_cmd       = { workspace = true }
-assert_fs        = { workspace = true }
-assert_matches   = { workspace = true }
-insta            = { workspace = true }
-predicates       = { workspace = true }
+assert_cmd = { workspace = true }
+assert_fs  = { workspace = true }
+predicates = { workspace = true }
 
 [lints]
 workspace = true
