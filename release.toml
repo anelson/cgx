@@ -1,0 +1,29 @@
+# cargo-release is used only for `cargo release replace`, which keeps the release version references in README.md in
+# sync with the version of the `cgx` package. See `just check-readme-version`.
+#
+# cargo-release resolves `file` relative to the directory of the package being processed, which is `cgx/`.
+allow-branch = ["*"]
+publish      = false
+push         = false
+tag          = false
+
+[[pre-release-replacements]]
+exactly    = 1
+file       = "../README.md"
+prerelease = false
+replace    = "${prefix}{{version}}${suffix}"
+search     = '(?P<prefix>`https://github\.com/anelson/cgx/releases/download/v)[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>/cgx-installer\.sh`)'
+
+[[pre-release-replacements]]
+exactly    = 1
+file       = "../README.md"
+prerelease = false
+replace    = "${prefix}{{version}}${suffix}"
+search     = '(?P<prefix>version: ")[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>" # default: latest release)'
+
+[[pre-release-replacements]]
+exactly    = 1
+file       = "../README.md"
+prerelease = false
+replace    = "${prefix}{{version}}${middle}{{version}}${suffix}"
+search     = '(?P<prefix>cgx version to install \(`)[0-9]+\.[0-9]+\.[0-9]+(?P<middle>` or `v)[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>`)'

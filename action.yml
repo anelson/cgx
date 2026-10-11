@@ -11,8 +11,8 @@ branding:
 inputs:
   version:
     description: >-
-      cgx version to install, e.g. "0.0.11" or "v0.0.11" (a leading "v" is
-      optional). Defaults to the latest release.
+      cgx version to install, with or without a leading "v". Defaults to the
+      latest release.
     required: false
     default: latest
   target:
