@@ -283,11 +283,17 @@ jobs:
           # which would leave the release PR with no CI checks and therefore
           # unmergeable under the required-status branch protection.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # release-plz runs cargo-semver-checks, which needs a newer rustc than
+          # the MSRV that rust-toolchain.toml selects. This overrides the
+          # toolchain file for this step only.
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Update README release version
         if: steps.release-plz.outputs.prs_created == 'true'
         env:
-          RELEASE_PLZ_BRANCH: ${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}
+          # The runner evaluates `env` before `if`, even for a step that is then
+          # skipped. If release-plz failed, `pr` is empty and `fromJSON` fails.
+          RELEASE_PLZ_BRANCH: ${{ fromJSON(steps.release-plz.outputs.pr || '{}').head_branch }}
         run: |
           git fetch origin "$RELEASE_PLZ_BRANCH"
           remote_head="$(git rev-parse FETCH_HEAD)"
