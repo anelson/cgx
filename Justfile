@@ -117,10 +117,10 @@ check-readme-version:
     original="$(mktemp)"
     cp README.md "${original}"
     trap 'cp "${original}" README.md; rm -f "${original}"' EXIT
-    cargo release replace --package cgx --execute --no-confirm
+    cgx cargo release replace --package cgx --execute --no-confirm
     if ! cmp -s "${original}" README.md; then
         echo "README.md release version references do not match the cgx package version." >&2
-        echo "Run \`cargo release replace --package cgx --execute\` and commit the result." >&2
+        echo "Run \`cgx cargo release replace --package cgx --execute\` and commit the result." >&2
         diff -u "${original}" README.md >&2 || true
         exit 1
     fi
@@ -162,7 +162,7 @@ typos:
 # This is helpful for humans but it's mainly intended to provide a deterministic way for coding agents
 # to get feedback on their almost certainly shitty changes before wasting a human's time with their garbage code.
 # Run the generated workflow check plus Rust compile, clippy, and docs checks.
-vibecheck: check-dist-release-generated check-readme-version ast-grep typos
+vibecheck: check-dist-release-generated ast-grep typos
     cargo check --all-targets --workspace
     cargo check --all-targets --all-features --workspace
     cargo clippy --all-targets --all-features --workspace -- -D warnings

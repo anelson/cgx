@@ -266,10 +266,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-release
-        uses: taiki-e/install-action@v2.87.24
-        with:
-          tool: cargo-release@1.1.6
+      - name: Install cgx
+        uses: anelson/cgx@v0.1.1
 
       - name: Run release-plz
         id: release-plz
@@ -291,6 +289,7 @@ jobs:
       - name: Update README release version
         if: steps.release-plz.outputs.prs_created == 'true'
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           # The runner evaluates `env` before `if`, even for a step that is then
           # skipped. If release-plz failed, `pr` is empty and `fromJSON` fails.
           RELEASE_PLZ_BRANCH: ${{ fromJSON(steps.release-plz.outputs.pr || '{}').head_branch }}
@@ -299,7 +298,7 @@ jobs:
           remote_head="$(git rev-parse FETCH_HEAD)"
           git checkout -B "$RELEASE_PLZ_BRANCH" "$remote_head"
 
-          cargo release replace --package cgx --execute --no-confirm
+          cgx cargo release replace --package cgx --execute --no-confirm
 
           changes="$(git status --porcelain=v1 --untracked-files=all)"
           if [ -z "$changes" ]; then
