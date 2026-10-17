@@ -30,6 +30,13 @@ ignore = [
   # time is pulled in by vergen-gix (build dep) and zip. cgx never parses user-provided
   # RFC 2822 date strings, so this vulnerability is not exploitable in practice.
   "RUSTSEC-2026-0009",
+  # zip < 9.0.0 `ZipArchive::extract` keeps SUID/SGID bits, creates symlinks to targets outside the destination
+  # directory, and applies permissions through symlinks. Fix requires Rust 1.88 (we're on 1.85.1).
+  # cgx extracts only archives of prebuilt binaries that it downloads in order to run them, so whoever controls an
+  # archive's contents can already run arbitrary code as the user.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
 version = 2
 yanked = "warn"
