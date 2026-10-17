@@ -192,10 +192,8 @@ jobs:
         with:
           tool: just
 
-      - name: Install cargo-release
-        uses: taiki-e/install-action@v2.87.24
-        with:
-          tool: cargo-release@1.1.6
+      - name: Install cgx
+        uses: anelson/cgx@v0.1.1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -207,6 +205,8 @@ jobs:
         run: cargo check --workspace --all-targets
 
       - name: Check README release version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: just check-readme-version
 
   # Stage 1: Lint and Format Check on Linux amd64, which is the cheapest and quickest build for us
@@ -232,10 +232,8 @@ jobs:
         with:
           tool: just
 
-      - name: Install cargo-release
-        uses: taiki-e/install-action@v2.87.24
-        with:
-          tool: cargo-release@1.1.6
+      - name: Install cgx
+        uses: anelson/cgx@v0.1.1
 
       - name: Install taplo
         uses: taiki-e/install-action@v2.87.24
@@ -259,6 +257,11 @@ jobs:
 
       - name: Run vibecheck
         run: just vibecheck
+
+      - name: Check README release version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: just check-readme-version
 
       - name: Check formatting
         run: just fmtcheck
