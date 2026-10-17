@@ -9,7 +9,7 @@ name                   = "cgx-core"
 readme                 = "../README.md"
 repository.workspace   = true
 rust-version.workspace = true
-version                = "0.1.1"
+version                = "0.1.2"
 
 [package.metadata.cargo-machete]
 ignored = [

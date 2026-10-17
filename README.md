@@ -32,7 +32,7 @@ The installer will download the appropriate binary for your platform and add it 
 
 > **Note:** To install a specific version for CI/reproducible builds, replace `latest/download` in the URL above with
 > `download/` followed by the desired version tag from the [Releases page](https://github.com/anelson/cgx/releases),
-> for example `https://github.com/anelson/cgx/releases/download/v0.1.1/cgx-installer.sh`.
+> for example `https://github.com/anelson/cgx/releases/download/v0.1.2/cgx-installer.sh`.
 
 ### Alternative Installation Methods
 
@@ -76,7 +76,7 @@ A fuller example:
 ```yaml
 - uses: anelson/cgx@v1
   with:
-    version: "0.1.1" # default: latest release
+    version: "0.1.2" # default: latest release
     cargo-cgx: true # also install the `cargo cgx` subcommand
     # prefetch specific crates (--prefetch-all is already enabled by default)
     prefetch: |
@@ -87,7 +87,7 @@ A fuller example:
 
 ### Inputs
 
-- `version` - cgx version to install (`0.1.1` or `v0.1.1`; leading `v` optional).
+- `version` - cgx version to install (`0.1.2` or `v0.1.2`; leading `v` optional).
   - Default: `latest`.
 - `target` - target triple to install. When set, downloads that exact prebuilt archive.
   - Default: the runner's native target (auto-detected).

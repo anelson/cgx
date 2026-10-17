@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.1.2] - 2026-10-17
+
+### 🐛 Bug Fixes
+
+- Invoke cargo subcommands using the correct cargo convention ([#285](https://github.com/anelson/cgx/pull/285))
+
+### 📚 Documentation
+
+- Manually update README version
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.lock dependencies
 ## [0.1.1] - 2026-09-20
 
 ### ⚙️ Miscellaneous Tasks
