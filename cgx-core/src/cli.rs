@@ -294,7 +294,7 @@ impl CrateArgs {
         };
 
         // `cgx cargo <subcommand>` is normalized to the `cargo-<subcommand>` plugin crate during
-        // invocation splitting, so a crate spec still named `cargo` means the user is trying to
+        // invocation normalization, so a crate spec still named `cargo` means the user is trying to
         // run cargo itself, which cgx cannot do.
         if name.as_deref() == Some("cargo") {
             return crate::error::CargoNotRunnableSnafu.fail();
@@ -726,7 +726,7 @@ pub enum MessageFormat {
     after_help = "To run a crate, pass its name (optionally with @VERSION) followed by any arguments for \
                   the tool, e.g. `cgx ripgrep --color=always`. cgx's own options must come before the crate \
                   name; everything after it is forwarded to the tool. Use `cgx cargo <subcommand>` to run a \
-                  cargo plugin (e.g. `cgx cargo deny` is equivalent to `cgx cargo-deny`)."
+                  cargo plugin (e.g. `cgx cargo deny` is equivalent to `cgx cargo-deny deny`)."
 )]
 struct RawCli {
     /// Build the binary but do not execute it; print its path to stdout instead.
@@ -793,48 +793,6 @@ struct RawCli {
 }
 
 impl RawCli {
-    /// Split the captured external-subcommand vector into a crate spec and trailing tool arguments.
-    fn split_invocation(invocation: Option<Invocation>) -> (Option<String>, Vec<OsString>) {
-        let Some(Invocation::Crate(mut parts)) = invocation else {
-            return (None, Vec::new());
-        };
-        if parts.is_empty() {
-            return (None, Vec::new());
-        }
-
-        let crate_spec = parts.remove(0).to_string_lossy().into_owned();
-        let (crate_spec, mut tool_args) = if crate_spec == "cargo" {
-            // A `--` may also separate `cargo` from its subcommand; drop it before deciding
-            // whether a subcommand follows.
-            if matches!(parts.first().and_then(|arg| arg.to_str()), Some("--")) {
-                parts.remove(0);
-            }
-            // Glue only a plausible subcommand name into the `cargo-<subcommand>` plugin crate
-            // name. A flag (or nothing) leaves the spec as bare `cargo`, which
-            // [`CrateArgs::crate_request`] rejects as unrunnable.
-            if parts
-                .first()
-                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'))
-            {
-                let subcommand = parts.remove(0);
-                (format!("cargo-{}", subcommand.to_string_lossy()), parts)
-            } else {
-                (crate_spec, parts)
-            }
-        } else {
-            (crate_spec, parts)
-        };
-
-        // A leading `--` immediately after the crate is the conventional argument separator; drop it
-        // so `cgx rg -- --flag` forwards `--flag` to the tool, matching the no-separator
-        // `cgx rg --flag`.
-        if matches!(tool_args.first().and_then(|arg| arg.to_str()), Some("--")) {
-            tool_args.remove(0);
-        }
-
-        (Some(crate_spec), tool_args)
-    }
-
     /// Validate the raw parse and render it into a typed [`Cli`] command.
     ///
     /// This is the single location where advanced CLI validation (which `clap` is not expressive
@@ -865,7 +823,11 @@ impl RawCli {
             toolchain,
         } = self;
 
-        let (crate_spec, tool_args) = Self::split_invocation(invocation);
+        let NormalizedInvocation {
+            crate_spec,
+            mut tool_args,
+            cargo_subcommand,
+        } = invocation.map(Invocation::normalize).unwrap_or_default();
 
         if prefetch_all {
             let mode = "--prefetch-all";
@@ -971,6 +933,12 @@ impl RawCli {
             Self::ensure_no_crate_args(&tool_args, "--no-exec")?;
             Ok(Cli::NoExec(crate_args))
         } else {
+            // For `cgx cargo <subcommand>`, pass the subcommand name when executing the plugin, so
+            // match the behavior when `cargo <subcommand>` invokes the `cargo-<subcommand>` plugin
+            // crate.
+            if let Some(subcommand) = cargo_subcommand {
+                tool_args.insert(0, subcommand);
+            }
             Ok(Cli::Run {
                 args: crate_args,
                 tool_args,
@@ -1055,6 +1023,80 @@ impl RawCli {
 enum Invocation {
     #[command(external_subcommand)]
     Crate(Vec<OsString>),
+}
+
+/// The crate specification and arguments obtained by normalizing an [`Invocation`].
+#[derive(Default)]
+struct NormalizedInvocation {
+    /// Crate spec being invoked, or `None` if the invocation was empty (no crate name given).
+    crate_spec: Option<String>,
+
+    /// Arguments to pass through to the crate being invoked.  Arguments to `cgx` itself are not
+    /// included here.
+    tool_args: Vec<OsString>,
+
+    /// Cargo subcommand, set if the invocation is a cargo-style subcommand invocation, eg `cgx
+    /// cargo deny`, where `cargo_subcommand` would be `Some("deny")` and the crate spec would be
+    /// normalized to `cargo-deny`.
+    ///
+    /// For regular crate invocations, this is `None`.
+    cargo_subcommand: Option<OsString>,
+}
+
+impl Invocation {
+    /// Normalize the invocation into a crate spec and trailing tool arguments.
+    fn normalize(self) -> NormalizedInvocation {
+        let Self::Crate(mut parts) = self;
+        if parts.is_empty() {
+            return NormalizedInvocation::default();
+        }
+
+        let mut cargo_subcommand = None;
+        let crate_spec = parts.remove(0).to_string_lossy().into_owned();
+
+        // Does this look like the user is using cgx to invoke a cargo subcommand, ala `cgx cargo deny`?
+        // If so remove `cargo` and extract the subcommand name to properly form the actual CLI invocation.
+        let (crate_spec, mut tool_args) = if crate_spec == "cargo" {
+            // A `--` may also separate `cargo` from its subcommand; drop it before deciding
+            // whether a subcommand follows.
+            if matches!(parts.first().and_then(|arg| arg.to_str()), Some("--")) {
+                parts.remove(0);
+            }
+            // Extract only a plausible subcommand name into the `cargo-<subcommand>` plugin crate
+            // name. A flag (or nothing) leaves the spec as bare `cargo`, which
+            // [`CrateArgs::crate_request`] rejects as unrunnable.
+            if parts
+                .first()
+                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'))
+            {
+                let subcommand = parts.remove(0).to_string_lossy().into_owned();
+                let name = subcommand
+                    .split_once('@')
+                    .map_or(subcommand.as_str(), |(name, _)| name);
+                cargo_subcommand = Some(OsString::from(name));
+                (format!("cargo-{subcommand}"), parts)
+            } else {
+                (crate_spec, parts)
+            }
+        } else {
+            // Else this isn't a cargo subcommand, it's just a crate invoked by name, possibly with
+            // some args.
+            (crate_spec, parts)
+        };
+
+        // A leading `--` immediately after the crate is the conventional argument separator; drop it
+        // so `cgx rg -- --flag` forwards `--flag` to the tool, matching the no-separator
+        // `cgx rg --flag`.
+        if matches!(tool_args.first().and_then(|arg| arg.to_str()), Some("--")) {
+            tool_args.remove(0);
+        }
+
+        NormalizedInvocation {
+            crate_spec: Some(crate_spec),
+            tool_args,
+            cargo_subcommand,
+        }
+    }
 }
 
 /// Source selectors for commands that operate on one concrete crate invocation, to specify the
@@ -2617,7 +2659,67 @@ mod tests {
         fn cargo_subcommand_is_normalized_and_remaining_args_forwarded() {
             let cli = run(&["cargo", "deny", "--all"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["--all"]);
+            assert_eq!(tool_args(&cli), ["deny", "--all"]);
+        }
+
+        #[test]
+        fn cargo_subcommand_without_extra_args_still_forwards_subcommand() {
+            let cli = run(&["cargo", "deny"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(tool_args(&cli), ["deny"]);
+        }
+
+        #[test]
+        fn cargo_version_suffix_selects_crate_but_forwards_bare_subcommand() {
+            let cli = run(&["cargo", "deny@=1.2.3", "--version"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny@=1.2.3"));
+            let request = cli.crate_args().crate_request().unwrap();
+            assert_eq!(request.name.as_deref(), Some("cargo-deny"));
+            assert_eq!(request.version.as_deref(), Some("=1.2.3"));
+            assert_eq!(tool_args(&cli), ["deny", "--version"]);
+        }
+
+        #[test]
+        fn cargo_crate_version_flag_does_not_change_forwarded_subcommand() {
+            let cli = run(&["--crate-version", "1.2.3", "cargo", "deny"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(cli.crate_args().crate_version.as_deref(), Some("1.2.3"));
+            assert_eq!(tool_args(&cli), ["deny"]);
+        }
+
+        #[test]
+        fn cargo_subcommand_forwards_cgx_flags_and_argument_boundaries() {
+            let cli = run(&[
+                "--features",
+                "build-feature",
+                "cargo",
+                "deny",
+                "check",
+                "--features",
+                "plugin-feature",
+                "--offline",
+                "--version",
+                "two words",
+                "",
+            ]);
+            assert_eq!(
+                cli.crate_args().build_options.features.as_deref(),
+                Some("build-feature")
+            );
+            assert!(!cli.crate_args().cargo.offline);
+            assert_eq!(
+                tool_args(&cli),
+                [
+                    "deny",
+                    "check",
+                    "--features",
+                    "plugin-feature",
+                    "--offline",
+                    "--version",
+                    "two words",
+                    ""
+                ]
+            );
         }
 
         /// A `--` separator between `cargo` and the subcommand is permitted; the subcommand is
@@ -2626,7 +2728,7 @@ mod tests {
         fn cargo_separator_then_subcommand_is_normalized() {
             let cli = run(&["cargo", "--", "deny"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), Vec::<String>::new());
+            assert_eq!(tool_args(&cli), ["deny"]);
         }
 
         /// A flag after `cargo` is not a subcommand name; it stays a tool argument for the
@@ -2644,7 +2746,77 @@ mod tests {
         fn cargo_subcommand_separator_then_flags_forwards_flags() {
             let cli = run(&["cargo", "deny", "--", "--flag"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["--flag"]);
+            assert_eq!(tool_args(&cli), ["deny", "--flag"]);
+        }
+
+        #[test]
+        fn cargo_separators_are_consumed_but_later_separator_is_forwarded() {
+            let cli = run(&[
+                "cargo",
+                "--",
+                "deny",
+                "--",
+                "--features",
+                "plugin-feature",
+                "--",
+                "literal",
+            ]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
+            assert_eq!(
+                tool_args(&cli),
+                ["deny", "--features", "plugin-feature", "--", "literal"]
+            );
+        }
+
+        #[test]
+        fn direct_cargo_plugin_crate_does_not_inject_subcommand() {
+            for (args, expected) in [
+                (vec!["cargo-deny"], vec![]),
+                (vec!["cargo-deny", "--features", "x"], vec!["--features", "x"]),
+                (vec!["cargo-deny@1.2.3", "--", "--version"], vec!["--version"]),
+            ] {
+                let cli = run(&args);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(args[0]));
+                assert_eq!(tool_args(&cli), expected, "args: {args:?}");
+            }
+        }
+
+        #[test]
+        fn cargo_plugin_non_run_modes_accept_subcommand_without_tool_args() {
+            for mode in ["--no-exec", "--prefetch", "--list-targets"] {
+                for (invocation, expected_spec) in [
+                    (vec!["cargo", "deny"], "cargo-deny"),
+                    (vec!["cargo", "deny@1.2.3"], "cargo-deny@1.2.3"),
+                    (vec!["--crate-version", "1.2.3", "cargo", "deny"], "cargo-deny"),
+                ] {
+                    let mut args = vec![mode];
+                    args.extend(invocation);
+                    let cli = Cli::try_parse_from_test_args(&args).unwrap();
+                    match mode {
+                        "--no-exec" => assert_matches!(&cli, Cli::NoExec(_)),
+                        "--prefetch" => assert_matches!(&cli, Cli::Prefetch(_)),
+                        "--list-targets" => assert_matches!(&cli, Cli::ListTargets(_)),
+                        _ => unreachable!("the mode table contains only non-run modes"),
+                    }
+                    assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(expected_spec));
+                    assert_eq!(tool_args(&cli), Vec::<String>::new());
+                }
+            }
+        }
+
+        #[test]
+        fn cargo_plugin_non_run_modes_reject_user_tool_args() {
+            for mode in ["--no-exec", "--prefetch", "--list-targets"] {
+                for subcommand in ["deny", "deny@1.2.3"] {
+                    let result = Cli::try_parse_from_test_args([mode, "cargo", subcommand, "--help"]);
+                    let err = result.unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        ErrorKind::UnknownArgument,
+                        "{mode} {subcommand}: {err}"
+                    );
+                }
+            }
         }
 
         #[test]
