@@ -1,0 +1,6 @@
+[package]
+edition = "2024"
+name    = "cargo-argv-probe"
+version = "1.2.3"
+
+[workspace]
