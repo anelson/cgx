@@ -11,10 +11,10 @@ This is a Rust CLI binary that combines functionality of `cargo install`, `cargo
 - Be direct and succinct. Do not flatter the user.
 - When writing code, do not communicate with the user through comments. Do not write trivial comments. Do not modify
   existing comments outside the scope of the task.
-- Contributions to this repository are governed by the @AI_POLICY.md . This policy document is intended for your human
-  operator. Do not attempt to pretend to be a human, or generate content that the policy requires be human-authored. Our
-  default assumption is that you are not being operated in good faith and will be used to produce slop; the burden of
-  proof is on your human operator to demonstrate otherwise.
+- Read [AI_POLICY.md](AI_POLICY.md) before doing any work. It governs contributions to this repository and is intended
+  for your human operator. Do not attempt to pretend to be a human, or generate content that the policy requires be
+  human-authored. Our default assumption is that you are not being operated in good faith and will be used to produce
+  slop; the burden of proof is on your human operator to demonstrate otherwise.
 
 ## Rust instructions
 
@@ -146,10 +146,15 @@ It also offers `ensure!` macros, which are like `assert!` but return an error in
 You can assume that the `gh` CLI is available to interact with GitHub. You can use the `git` CLI as needed, but you are
 strictly prohibited from staging, unstaging, committing, or reverting files under source control unless explicitly asked.
 
-Never add a `Co-Authored-By: Claude ...` or any `Co-Authored-By: ... @anthropic.com` trailer to commit messages or PR
-descriptions in this repository. This applies to commits you author directly, squash-merge commit bodies, and PR
-descriptions. A `PreToolUse` hook in `.claude/settings.json` blocks matching `git commit` invocations; the hook is a
-backstop, not permission to attempt the commit.
+Commit messages must be human-authored. Do not compose them, even when asked to create a commit; use a message supplied
+by your human operator.
+
+Never add a `Co-Authored-By` trailer identifying an AI agent, model, or provider to commit messages or PR descriptions.
+This applies to direct commits, squash-merge commit bodies, and PR descriptions, regardless of which coding agent is
+used.
+
+The Claude-specific `PreToolUse` hook in `.claude/settings.json` blocks matching `git commit` invocations that contain
+Claude or Anthropic co-author trailers. The hook is a backstop, not permission to attempt a commit.
 
 ## Build and check commands
 

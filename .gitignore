@@ -20,9 +20,11 @@ target
 # We need a directory where we can just dump crap without contaminating the repository
 scrap/
 
-# Local Claude worktrees obviously do not belong under source control
-# and should also be ignored
+# Local agent settings and generated state
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 .claude/worktrees/
+.pi/tasks/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
