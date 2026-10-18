@@ -215,8 +215,8 @@ impl Command {
     fn prefetch(cgx: Cgx, args: &CrateArgs) -> Result<Command> {
         let request = args.crate_request()?;
 
-        // Prefer the raw CLI spec (e.g. `ripgrep@1.0`) for the label; otherwise the resolved request
-        // name; otherwise a source-only invocation with no name to show.
+        // Prefer the raw CLI spec (e.g. `ripgrep@1.0`) for the label; otherwise the resolved
+        // request name; otherwise a source-only invocation with no name to show.
         let label = args
             .crate_spec
             .clone()

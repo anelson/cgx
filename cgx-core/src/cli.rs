@@ -1054,8 +1054,9 @@ impl Invocation {
         let mut cargo_subcommand = None;
         let crate_spec = parts.remove(0).to_string_lossy().into_owned();
 
-        // Does this look like the user is using cgx to invoke a cargo subcommand, ala `cgx cargo deny`?
-        // If so remove `cargo` and extract the subcommand name to properly form the actual CLI invocation.
+        // Does this look like the user is using cgx to invoke a cargo subcommand, ala `cgx cargo
+        // deny`? If so remove `cargo` and extract the subcommand name to properly form the
+        // actual CLI invocation.
         let (crate_spec, mut tool_args) = if crate_spec == "cargo" {
             // A `--` may also separate `cargo` from its subcommand; drop it before deciding
             // whether a subcommand follows.
@@ -1084,8 +1085,8 @@ impl Invocation {
             (crate_spec, parts)
         };
 
-        // A leading `--` immediately after the crate is the conventional argument separator; drop it
-        // so `cgx rg -- --flag` forwards `--flag` to the tool, matching the no-separator
+        // A leading `--` immediately after the crate is the conventional argument separator; drop
+        // it so `cgx rg -- --flag` forwards `--flag` to the tool, matching the no-separator
         // `cgx rg --flag`.
         if matches!(tool_args.first().and_then(|arg| arg.to_str()), Some("--")) {
             tool_args.remove(0);
@@ -2153,8 +2154,8 @@ mod tests {
 
         #[test]
         fn prefetch_all_controls_reach_loaders() {
-            // The parse test above checks the raw flags properly map to `PrefetchAll`; this checks they
-            // actually flow through into `BuildOptions` and `Config`
+            // The parse test above checks the raw flags properly map to `PrefetchAll`; this checks
+            // they actually flow through into `BuildOptions` and `Config`
             let cli = Cli::parse_from_test_args([
                 "--prefetch-all",
                 "--offline",

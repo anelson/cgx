@@ -275,7 +275,8 @@ fn cache_flow_switching_modes() {
 
     assert.success();
 
-    // Verify prebuilt binaries were disabled and the binary was built from source on the second run.
+    // Verify prebuilt binaries were disabled and the binary was built from source on the second
+    // run.
     assert!(
         messages.iter().any(|m| matches!(
             m,
@@ -1660,7 +1661,8 @@ fn transient_throttle_is_not_cached_as_negative() {
     // taplo-cli@0.10.0 publishes a GitHub binary, so an un-throttled unauthenticated run *succeeds*
     // (and we discard its cache); the first run that *fails* is the throttled one, whose cache we
     // keep for the verification step. `--prebuilt-binary always` makes a throttle surface as a
-    // non-zero exit (PrebuiltBinaryResolutionFailed) rather than a slow fall-back to a source build.
+    // non-zero exit (PrebuiltBinaryResolutionFailed) rather than a slow fall-back to a source
+    // build.
     const MAX_WARMUP_RUNS: usize = 80;
     let mut throttled = None;
     for _ in 0..MAX_WARMUP_RUNS {

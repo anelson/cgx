@@ -124,8 +124,8 @@ fn run_from_git_source_with_tag() {
     // --- Second run assertions: verify multi-level caching ---
     //
     // On the second run, there are THREE levels of caching at play:
-    // - Crate resolution cache: The Tag->commit mapping is cached, so NO git operations happen at all
-    //   for the crate resolution phase (no Tag-based ResolvingRef).
+    // - Crate resolution cache: The Tag->commit mapping is cached, so NO git operations happen at
+    //   all for the crate resolution phase (no Tag-based ResolvingRef).
     // - Git: The build phase does a Commit-based lookup, which finds it locally.
     // - Binary cache: The compiled binary is cached, so no actual build happens.
 

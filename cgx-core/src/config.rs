@@ -2056,7 +2056,8 @@ mod tests {
             // The explicit config has a different timeout (6m)
             let explicit_config = crate::testdata::ConfigTestCase::explicit_non_standard_name();
 
-            // Load config from project1 directory but with --config-file pointing to explicit config
+            // Load config from project1 directory but with --config-file pointing to explicit
+            // config
             let mut config_overrides = Cli::parse_from_test_args(["test-crate"]).to_config_overrides();
             config_overrides.config_file = Some(explicit_config.path().to_path_buf());
 

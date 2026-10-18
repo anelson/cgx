@@ -201,8 +201,8 @@ impl GitlabProvider {
     }
 
     fn provider_throttled_error(url: &str, status: StatusCode) -> error::Error {
-        // Build the provider-throttle error after GitLab-specific response classification has already
-        // identified HTTP 429 as rate limiting.
+        // Build the provider-throttle error after GitLab-specific response classification has
+        // already identified HTTP 429 as rate limiting.
         error::ProviderThrottledSnafu {
             url: url.to_string(),
             status: status.as_u16(),

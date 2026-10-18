@@ -224,8 +224,9 @@ impl TargetTriple {
             }
         } else if triple.operating_system == OperatingSystem::Linux && triple.environment == Environment::Gnu
         {
-            // A glibc host can also run a musl binary (musl release binaries are statically linked).
-            // The reverse does NOT hold - a musl-only host generally cannot run a glibc-linked binary
+            // A glibc host can also run a musl binary (musl release binaries are statically
+            // linked). The reverse does NOT hold - a musl-only host generally cannot
+            // run a glibc-linked binary
             // - so a musl host is intentionally left with no fallback.
             fallbacks.push(Self::sibling_with_environment(triple, Environment::Musl));
         }
@@ -266,8 +267,8 @@ impl TargetTriple {
     ) -> Vec<(TargetTriple, Vec<Cow<'static, str>>)> {
         // Within a group the strings are that target's [`Self::release_asset_platform_aliases`].
         // Across groups a string is kept only in the first (most preferred) group that produces it,
-        // so an ambiguous short form shared by multiple targets (eg, a gnu host and its musl fallback both
-        // emit `linux-x86_64`) is attributed to the primary target.
+        // so an ambiguous short form shared by multiple targets (eg, a gnu host and its musl
+        // fallback both emit `linux-x86_64`) is attributed to the primary target.
         //
         // Basically, take all compatible targets, and for each target make the various platform
         // alias strings for that target, and return a deduped list of all of those platform alias

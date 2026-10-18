@@ -262,9 +262,9 @@ impl BuildOptions {
         // overridden by the build overrides from the CLI.
         //
         // The `[tools]` settings that bear on building are the selected features and
-        // `default-features`. If features haven't been explicitly overridden on the command line but
-        // were specified in the config for this crate, use those. `default-features = false` disables
-        // default features the same as `--no-default-features`.
+        // `default-features`. If features haven't been explicitly overridden on the command line
+        // but were specified in the config for this crate, use those. `default-features =
+        // false` disables default features the same as `--no-default-features`.
         //
         // Under `--all-features` neither setting is applied: cargo is invoked with `--all-features`
         // alone, so they could not affect the build and would only perturb the build-cache key.

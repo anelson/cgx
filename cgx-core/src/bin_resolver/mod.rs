@@ -359,8 +359,8 @@ impl DefaultBinaryResolver {
         let entry = self.cache.get_cached_binary_resolution(krate).ok()??;
         let enabled = &self.config.prebuilt_binaries.binary_providers;
 
-        // If a provider that is enabled now was not enabled when this cache entry was written, then we
-        // consider the cache entry stale and must not use it.
+        // If a provider that is enabled now was not enabled when this cache entry was written, then
+        // we consider the cache entry stale and must not use it.
         if let Some(missing) = enabled.iter().find(|p| !entry.enabled_providers.contains(p)) {
             self.reporter.report(|| {
                 PrebuiltBinaryMessage::cache_invalidated_by_provider_change(
@@ -372,7 +372,8 @@ impl DefaultBinaryResolver {
         }
 
         // If the cached entry is a positive hit but it uses a provider that the user has currently
-        // disabled, then obviously we will not use that binary and the cache entry is considered stale.
+        // disabled, then obviously we will not use that binary and the cache entry is considered
+        // stale.
         if let ConclusiveResolution::Found(binary) = &entry.outcome {
             if !enabled.contains(&binary.provider) {
                 self.reporter.report(|| {
@@ -551,15 +552,16 @@ impl BinaryResolver for DefaultBinaryResolver {
         }
 
         // Check the binary resolution cache first unless refresh mode is enabled. Only conclusive
-        // outcomes are ever stored, so a cache hit is always authoritative. The cache itself reports
-        // the lookup/hit/miss events; here we only translate a hit into a resolution outcome.
+        // outcomes are ever stored, so a cache hit is always authoritative. The cache itself
+        // reports the lookup/hit/miss events; here we only translate a hit into a
+        // resolution outcome.
         if !self.config.refresh {
             if let Some(cached) = self.get_cached_resolution(resolved_krate) {
                 let resolution = match cached {
                     ConclusiveResolution::Found(binary) => BinaryResolution::Found(binary),
                     ConclusiveResolution::Nonexistent => {
-                        // `cached_resolution` already reported the negative hit.  There is no reason
-                        // to try to find a prebuilt binary again.
+                        // `cached_resolution` already reported the negative hit.  There is no
+                        // reason to try to find a prebuilt binary again.
                         self.reporter.report(|| {
                             PrebuiltBinaryMessage::no_binary_found(
                                 resolved_krate,
@@ -573,8 +575,8 @@ impl BinaryResolver for DefaultBinaryResolver {
             }
         }
 
-        // Always use the build target platform for pre-built binaries. If the user overrides this by
-        // specifying a custom target, execution is not supposed to reach this point.
+        // Always use the build target platform for pre-built binaries. If the user overrides this
+        // by specifying a custom target, execution is not supposed to reach this point.
         let target = TargetTriple::host();
 
         let resolution = self.resolve_via_providers(krate, target)?;
@@ -606,8 +608,8 @@ impl BinaryResolver for DefaultBinaryResolver {
         };
 
         // Persist only conclusive outcomes; an inconclusive result is structurally uncacheable. The
-        // entry records the providers enabled for this resolution so a future run can tell whether the
-        // cached answer still applies (see [`Self::cached_resolution`]).
+        // entry records the providers enabled for this resolution so a future run can tell whether
+        // the cached answer still applies (see [`Self::cached_resolution`]).
         if let Some(outcome) = resolution.to_cacheable() {
             let entry = BinaryCacheEntry {
                 outcome,

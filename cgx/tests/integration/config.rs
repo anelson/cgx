@@ -418,7 +418,8 @@ fn prefetch_single_tool_prepares_without_stdout() {
     let (assert, messages) = cgx.cmd.assert_with_messages();
     assert.success().stdout(predicates::str::is_empty());
 
-    // Preparing the crate emits a provenance message recording how (and where) the binary was obtained.
+    // Preparing the crate emits a provenance message recording how (and where) the binary was
+    // obtained.
     let binary_path = messages
         .iter()
         .find_map(|message| match message {

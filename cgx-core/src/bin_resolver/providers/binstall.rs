@@ -95,16 +95,17 @@ impl Provider for BinstallProvider {
         let work_dir = super::recreate_staging_work_dir(&self.staging_dir, resolved)?;
 
         // Try the exact host target first, then each ABI-compatible fallback target. Overrides are
-        // applied per candidate, so a crate whose base `pkg-url` renders one ABI but has an override
-        // for a compatible sibling still resolves. The first target whose asset downloads wins.
+        // applied per candidate, so a crate whose base `pkg-url` renders one ABI but has an
+        // override for a compatible sibling still resolves. The first target whose asset
+        // downloads wins.
         //
-        // Broken metadata (an unknown `pkg-fmt`, a template that cannot render for this target) only
-        // disqualifies the candidate it belongs to, not the whole provider - this is what lets a
-        // universal pseudo-target skip a `{ target-arch }` template, and keeps a typo'd override
-        // for a sibling target from making every resolution of the crate inconclusive. The host's
-        // own metadata error is preserved and returned if nothing else resolves, so a crate whose
-        // only metadata is broken still yields an uncacheable inconclusive result, exactly as if
-        // the fallback loop did not exist.
+        // Broken metadata (an unknown `pkg-fmt`, a template that cannot render for this target)
+        // only disqualifies the candidate it belongs to, not the whole provider - this is
+        // what lets a universal pseudo-target skip a `{ target-arch }` template, and keeps
+        // a typo'd override for a sibling target from making every resolution of the crate
+        // inconclusive. The host's own metadata error is preserved and returned if nothing
+        // else resolves, so a crate whose only metadata is broken still yields an
+        // uncacheable inconclusive result, exactly as if the fallback loop did not exist.
         let mut first_url: Option<String> = None;
         let mut attempted_urls = HashSet::new();
         let mut had_pkg_url = false;
