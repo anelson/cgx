@@ -14,7 +14,7 @@ use crate::{
     builder::{BuildOptions, BuildTarget},
     cache::Cache,
     config::{BinaryProvider, Config, UsePrebuiltBinaries},
-    crate_resolver::ResolvedCrate,
+    crate_resolver::{ResolvedCrate, ResolvedSource},
     downloader::DownloadedCrate,
     error::{self, Error},
     http::HttpClient,
@@ -275,6 +275,33 @@ impl DefaultBinaryResolver {
         None
     }
 
+    fn check_source_disqualification(source: &ResolvedSource) -> Option<&'static str> {
+        match source {
+            ResolvedSource::CratesIo | ResolvedSource::Registry { .. } => None,
+            ResolvedSource::LocalDir { .. } => Some("the crate was selected by local path"),
+            // TODO: Allow Git-backed sources once providers can verify that a binary corresponds
+            // to the resolved commit, rather than just the package version.
+            ResolvedSource::Git { .. } | ResolvedSource::Forge { .. } => {
+                Some("the crate has a Git-backed source")
+            }
+        }
+    }
+
+    fn check_provider_disqualification(
+        provider: BinaryProvider,
+        source: &ResolvedSource,
+    ) -> Option<&'static str> {
+        match provider {
+            BinaryProvider::Quickinstall if !matches!(source, ResolvedSource::CratesIo) => {
+                Some("Quickinstall only provides binaries for crates.io packages")
+            }
+            BinaryProvider::Quickinstall
+            | BinaryProvider::Binstall
+            | BinaryProvider::GithubReleases
+            | BinaryProvider::GitlabReleases => None,
+        }
+    }
+
     /// Combine the per-provider resolutions into a single outcome.
     ///
     /// Precedence is `Found` > `Inconclusive` > `Nonexistent`: a found binary wins outright;
@@ -352,6 +379,8 @@ impl DefaultBinaryResolver {
     ///   than are currently enabled stays valid.
     /// - (positive entries only) the provider that produced the cached binary is still enabled. A
     ///   binary must never be served from a provider the user has disabled.
+    /// - (positive entries only) the provider supports the resolved crate source. Entries written
+    ///   before source restrictions were introduced must not bypass those restrictions.
     ///
     /// Returns `None` (so resolution falls through to the providers) when there is no entry or it
     /// is stale for the current configuration.
@@ -371,10 +400,15 @@ impl DefaultBinaryResolver {
             return None;
         }
 
-        // If the cached entry is a positive hit but it uses a provider that the user has currently
-        // disabled, then obviously we will not use that binary and the cache entry is considered
-        // stale.
+        // A positive entry must satisfy current provider eligibility, including restrictions that
+        // may not have existed when it was cached.
         if let ConclusiveResolution::Found(binary) = &entry.outcome {
+            if Self::check_provider_disqualification(binary.provider, &krate.source).is_some() {
+                self.reporter
+                    .report(|| PrebuiltBinaryMessage::cache_invalidated_by_source(krate, binary.provider));
+                return None;
+            }
+
             if !enabled.contains(&binary.provider) {
                 self.reporter.report(|| {
                     PrebuiltBinaryMessage::cache_invalidated_by_provider_change(
@@ -426,6 +460,11 @@ impl DefaultBinaryResolver {
         let mut results = Vec::with_capacity(self.providers.len());
         for provider in &self.providers {
             let provider_kind = provider.kind();
+            if let Some(reason) = Self::check_provider_disqualification(provider_kind, &resolved.source) {
+                self.reporter
+                    .report(|| PrebuiltBinaryMessage::provider_has_no_binary(provider_kind, reason));
+                continue;
+            }
             self.reporter
                 .report(|| PrebuiltBinaryMessage::checking_provider(resolved, provider_kind));
 
@@ -533,6 +572,21 @@ impl BinaryResolver for DefaultBinaryResolver {
             return Ok(None);
         }
 
+        // Source restrictions apply to cached results as well as new provider lookups.
+        if let Some(reason) = Self::check_source_disqualification(&resolved_krate.source) {
+            if self.mode == UsePrebuiltBinaries::Always {
+                return error::PrebuiltBinaryDisqualifiedSnafu {
+                    name: resolved_krate.name.clone(),
+                    version: resolved_krate.version.to_string(),
+                    reason,
+                }
+                .fail();
+            }
+            self.reporter
+                .report(|| PrebuiltBinaryMessage::disqualified_due_to_source(reason));
+            return Ok(None);
+        }
+
         // Check build-options disqualification BEFORE touching the cache: the binary cache is keyed
         // on the resolved crate alone, so a cached binary must not be served to a build whose
         // options disqualify the user of prebuilt binaries (such as options that enable or disable
@@ -637,10 +691,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{
-        builder::{BuildOptions, BuildTarget},
-        crate_resolver::ResolvedSource,
-    };
+    use crate::builder::{BuildOptions, BuildTarget};
 
     /// The canned outcome a [`StubProvider`] returns.
     #[expect(
@@ -656,6 +707,7 @@ mod tests {
     /// A [`Provider`] standing in for a real provider, returning a canned provider result and
     /// counting how often it is consulted (so tests can assert short-circuiting and cache hits).
     struct StubProvider {
+        kind: BinaryProvider,
         outcome: StubOutcome,
         calls: Arc<AtomicUsize>,
     }
@@ -665,6 +717,7 @@ mod tests {
         /// `provider`, with a real on-disk file at `path` so relocation succeeds.
         fn found(provider: BinaryProvider, path: PathBuf) -> Self {
             Self {
+                kind: provider,
                 outcome: StubOutcome::Found(ResolvedBinary {
                     krate: test_downloaded_crate().resolved,
                     provider,
@@ -677,6 +730,7 @@ mod tests {
 
         fn nonexistent() -> Self {
             Self {
+                kind: BinaryProvider::GithubReleases,
                 outcome: StubOutcome::Nonexistent,
                 calls: Arc::new(AtomicUsize::new(0)),
             }
@@ -684,6 +738,7 @@ mod tests {
 
         fn error() -> Self {
             Self {
+                kind: BinaryProvider::GithubReleases,
                 outcome: StubOutcome::Error,
                 calls: Arc::new(AtomicUsize::new(0)),
             }
@@ -692,7 +747,7 @@ mod tests {
 
     impl Provider for StubProvider {
         fn kind(&self) -> BinaryProvider {
-            BinaryProvider::GithubReleases
+            self.kind
         }
 
         fn try_resolve(
@@ -742,6 +797,7 @@ mod tests {
         let mut config = config;
         config.prebuilt_binaries.use_prebuilt_binaries = mode;
         let providers: Vec<Box<dyn Provider + Send + Sync>> = vec![Box::new(StubProvider {
+            kind: BinaryProvider::GithubReleases,
             outcome,
             calls: calls.clone(),
         })];
@@ -1507,5 +1563,266 @@ mod tests {
             1,
             "must re-resolve once the finder is disabled"
         );
+    }
+
+    mod source_eligibility {
+        use std::sync::mpsc;
+
+        use super::*;
+        use crate::{
+            cratespec::{Forge, RegistrySource},
+            messages::Message,
+        };
+
+        // Local paths must use the supplied code. Git sources also require source builds until
+        // release binaries can be tied to the selected commit. Cover both generic Git URLs and
+        // forge-specific sources, including Git URLs that refer to local repositories.
+        fn ineligible_sources() -> Box<[ResolvedSource]> {
+            Box::new([
+                ResolvedSource::LocalDir {
+                    path: PathBuf::from("local-crate"),
+                },
+                ResolvedSource::Git {
+                    repo: "https://example.com/fork.git".to_string(),
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                },
+                ResolvedSource::Git {
+                    repo: "file:///local/crate.git".to_string(),
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                },
+                ResolvedSource::Git {
+                    repo: "local-crate.git".to_string(),
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                },
+                ResolvedSource::Forge {
+                    forge: Forge::GitHub {
+                        custom_url: None,
+                        owner: "owner".to_string(),
+                        repo: "fork".to_string(),
+                    },
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                },
+                ResolvedSource::Forge {
+                    forge: Forge::GitLab {
+                        custom_url: None,
+                        owner: "owner".to_string(),
+                        repo: "fork".to_string(),
+                    },
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                },
+            ])
+        }
+
+        fn assert_disqualified(source: ResolvedSource, mode: UsePrebuiltBinaries, cached: bool) {
+            let (_, config, temp) = test_env();
+            let (tx, rx) = mpsc::sync_channel(64);
+            let reporter = MessageReporter::channel(tx);
+            let cache = Cache::new(config.clone(), reporter.clone());
+            let mut krate = test_downloaded_crate();
+            krate.resolved.source = source;
+            let binary_path = temp.path().join("prebuilt");
+            // Resolution only checks and relocates this file; it does not execute the contents.
+            std::fs::write(&binary_path, b"unrelated prebuilt").unwrap();
+            let binary = ResolvedBinary {
+                krate: krate.resolved.clone(),
+                provider: BinaryProvider::GithubReleases,
+                path: binary_path,
+                target: build_context::TARGET.to_string(),
+            };
+            // An older version could have cached a prebuilt for this exact source. Source
+            // disqualification must override that entry, not just prevent new provider queries.
+            if cached {
+                cache
+                    .put_cached_binary_resolution(
+                        &krate.resolved,
+                        BinaryCacheEntry {
+                            outcome: ConclusiveResolution::Found(binary.clone()),
+                            enabled_providers: config.prebuilt_binaries.binary_providers.clone(),
+                        },
+                    )
+                    .unwrap();
+            }
+            let (mut resolver, calls) = resolver_with(cache, config, mode, StubOutcome::Found(binary));
+            resolver.reporter = reporter;
+
+            let result = resolver.resolve(&krate, &BuildOptions::default());
+
+            match mode {
+                UsePrebuiltBinaries::Auto | UsePrebuiltBinaries::Never => {
+                    assert_matches!(result, Ok(None), "source: {:?}", krate.resolved.source);
+                }
+                UsePrebuiltBinaries::Always => {
+                    assert_matches!(
+                        result,
+                        Err(Error::PrebuiltBinaryDisqualified { ref reason, .. }) if !reason.is_empty(),
+                        "source: {:?}", krate.resolved.source
+                    );
+                }
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "source: {:?}",
+                krate.resolved.source
+            );
+            // Reject before cache access, rather than reading the entry and discarding its binary.
+            let messages: Vec<_> = rx.try_iter().collect();
+            assert!(
+                !messages.iter().any(|message| matches!(
+                    message,
+                    Message::PrebuiltBinary(PrebuiltBinaryMessage::CacheLookup { .. })
+                )),
+                "ineligible source must bypass the prebuilt cache: {messages:#?}"
+            );
+        }
+
+        #[test]
+        fn auto_mode_skips_local_and_git_sources_without_provider_lookup() {
+            for source in ineligible_sources() {
+                assert_disqualified(source, UsePrebuiltBinaries::Auto, false);
+            }
+        }
+
+        #[test]
+        fn always_mode_rejects_local_and_git_sources_without_provider_lookup() {
+            for source in ineligible_sources() {
+                assert_disqualified(source, UsePrebuiltBinaries::Always, false);
+            }
+        }
+
+        #[test]
+        fn auto_mode_ignores_cached_prebuilts_for_local_and_git_sources() {
+            for source in ineligible_sources() {
+                assert_disqualified(source, UsePrebuiltBinaries::Auto, true);
+            }
+        }
+
+        #[test]
+        fn always_mode_rejects_cached_prebuilts_for_local_and_git_sources() {
+            for source in ineligible_sources() {
+                assert_disqualified(source, UsePrebuiltBinaries::Always, true);
+            }
+        }
+
+        // Quickinstall's name/version lookup identifies a crates.io release, not a release in
+        // another registry. Matching names and versions must not cross that source boundary.
+        fn assert_registry_quickinstall_rejected(cached: bool) {
+            for registry in [
+                RegistrySource::Named("private".to_string()),
+                RegistrySource::IndexUrl("sparse+https://example.com/index/".parse().unwrap()),
+            ] {
+                let (cache, config, temp) = test_env();
+                let mut krate = test_downloaded_crate();
+                krate.resolved.source = ResolvedSource::Registry { source: registry };
+                let binary_path = temp.path().join("quickinstall-prebuilt");
+                std::fs::write(&binary_path, b"crates.io prebuilt").unwrap();
+                let binary = ResolvedBinary {
+                    krate: krate.resolved.clone(),
+                    provider: BinaryProvider::Quickinstall,
+                    path: binary_path,
+                    target: build_context::TARGET.to_string(),
+                };
+                if cached {
+                    cache
+                        .put_cached_binary_resolution(
+                            &krate.resolved,
+                            BinaryCacheEntry {
+                                outcome: ConclusiveResolution::Found(binary.clone()),
+                                enabled_providers: vec![BinaryProvider::Quickinstall],
+                            },
+                        )
+                        .unwrap();
+                }
+                let provider = StubProvider {
+                    kind: BinaryProvider::Quickinstall,
+                    outcome: StubOutcome::Found(binary),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                };
+                let calls = provider.calls.clone();
+                let resolver = resolver_with_enabled_providers(
+                    cache,
+                    config,
+                    vec![BinaryProvider::Quickinstall],
+                    vec![Box::new(provider)],
+                );
+
+                let result = resolver.resolve(&krate, &BuildOptions::default()).unwrap();
+
+                assert_eq!(result, None, "source: {:?}", krate.resolved.source);
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "source: {:?}",
+                    krate.resolved.source
+                );
+            }
+        }
+
+        #[test]
+        fn alternate_registry_skips_quickinstall_without_provider_lookup() {
+            assert_registry_quickinstall_rejected(false);
+        }
+
+        #[test]
+        fn alternate_registry_ignores_cached_quickinstall_prebuilt() {
+            assert_registry_quickinstall_rejected(true);
+        }
+
+        // This is a provider-level restriction: a private-registry package can still use binaries
+        // published through its declared release metadata for some providers.
+        #[test]
+        fn alternate_registry_can_use_publisher_prebuilts() {
+            for kind in [
+                BinaryProvider::Binstall,
+                BinaryProvider::GithubReleases,
+                BinaryProvider::GitlabReleases,
+            ] {
+                let (cache, config, temp) = test_env();
+                let mut krate = test_downloaded_crate();
+                krate.resolved.source = ResolvedSource::Registry {
+                    source: RegistrySource::Named("private".to_string()),
+                };
+                let binary_path = temp.path().join("publisher-prebuilt");
+                std::fs::write(&binary_path, b"publisher prebuilt").unwrap();
+                let enabled = vec![kind, BinaryProvider::Quickinstall];
+                // Rejecting a legacy Quickinstall hit must still allow an eligible provider to run.
+                cache
+                    .put_cached_binary_resolution(
+                        &krate.resolved,
+                        BinaryCacheEntry {
+                            outcome: ConclusiveResolution::Found(ResolvedBinary {
+                                krate: krate.resolved.clone(),
+                                provider: BinaryProvider::Quickinstall,
+                                path: binary_path.clone(),
+                                target: build_context::TARGET.to_string(),
+                            }),
+                            enabled_providers: enabled.clone(),
+                        },
+                    )
+                    .unwrap();
+                let provider = StubProvider {
+                    kind,
+                    outcome: StubOutcome::Found(ResolvedBinary {
+                        krate: krate.resolved.clone(),
+                        provider: kind,
+                        path: binary_path,
+                        target: build_context::TARGET.to_string(),
+                    }),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                };
+                let calls = provider.calls.clone();
+                let resolver =
+                    resolver_with_enabled_providers(cache, config, enabled, vec![Box::new(provider)]);
+
+                let binary = resolver
+                    .resolve(&krate, &BuildOptions::default())
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(binary.provider, kind);
+                assert_eq!(binary.krate, krate.resolved);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
     }
 }
