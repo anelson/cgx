@@ -15,6 +15,13 @@ replace    = "${prefix}{{version}}${suffix}"
 search     = '(?P<prefix>`https://github\.com/anelson/cgx/releases/download/v)[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>/cgx-installer\.sh`)'
 
 [[pre-release-replacements]]
+exactly    = 2
+file       = "../README.md"
+prerelease = false
+replace    = "${prefix}{{version}}"
+search     = '(?m)^(?P<prefix>- uses: anelson/cgx@v)[0-9]+\.[0-9]+\.[0-9]+$'
+
+[[pre-release-replacements]]
 exactly    = 1
 file       = "../README.md"
 prerelease = false

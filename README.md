@@ -67,14 +67,14 @@ binary is available for the runner.
 ### Usage
 
 ```yaml
-- uses: anelson/cgx@v1
+- uses: anelson/cgx@v0.1.2
 - run: cgx ripgrep -- --version
 ```
 
 A fuller example:
 
 ```yaml
-- uses: anelson/cgx@v1
+- uses: anelson/cgx@v0.1.2
   with:
     version: "0.1.2" # default: latest release
     cargo-cgx: true # also install the `cargo cgx` subcommand
@@ -138,8 +138,10 @@ GitHub's anonymous API rate limits), set the token on those steps where `cgx` is
 
 ### Pinning
 
-`@v1` tracks the latest v1 release of the action. To pin exactly, reference a commit SHA
-(`anelson/cgx@<sha>`).
+The examples pin the action to an exact release tag. You can also reference a commit SHA (`anelson/cgx@<sha>`).
+
+The action reference pins the action's code, not the installed cgx binary. Set the `version` input to pin the binary;
+otherwise, the latest `cgx` CLI release is installed.
 
 ## Runtime Dependencies
 
