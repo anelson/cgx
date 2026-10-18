@@ -8,11 +8,79 @@ use cgx::messages::{
     BuildCacheMessage, BuildMessage, CrateResolutionMessage, Message, PrebuiltBinaryMessage, SourceMessage,
 };
 use cgx_core::config::BinaryProvider;
+use httpmock::prelude::*;
 
 use crate::utils::{
     Cgx, CommandExt, assert_built_from_source, assert_cached_source_build, assert_compiled_from_source,
     assert_prebuilt,
 };
+
+/// Local paths must bypass prebuilt discovery even when their manifests advertise binaries.
+///
+/// There is absolutely no way to look at a local path containing some crate's code, and know with
+/// any degree of confidence that some prebuilt binary on some remote server is derived from that
+/// code.  If the user wants to use pre-built binaries for that crate they need to point cgx at the
+/// published version of that crate.
+#[test]
+fn local_path_skips_prebuilt_lookup() {
+    // The server should not even be probed because local paths should skip prebuilt binaries.
+    // The mock also catches regressions where providers probe but still reject prebuilts for
+    // a crate at a local path.
+    let server = MockServer::start();
+    let prebuilt = server.mock(|when, then| {
+        when.method(GET).path("/prebuilt");
+        then.status(404);
+    });
+    let mut cgx = Cgx::with_test_fs();
+    let source = cgx.test_fs().cwd.child("local-source");
+    source
+        .child("Cargo.toml")
+        .write_str(&format!(
+            r#"
+[package]
+name = "local-source-probe"
+version = "1.0.0"
+edition = "2024"
+repository = "https://github.com/example/upstream"
+
+[package.metadata.binstall]
+pkg-url = "{}"
+pkg-fmt = "bin"
+"#,
+            server.url("/prebuilt")
+        ))
+        .unwrap();
+    source
+        .child("src/main.rs")
+        .write_str("fn main() { println!(\"selected-local-source\"); }\n")
+        .unwrap();
+
+    // Keep discovery on the mocked binstall URL, but leave prebuilt mode at its default (auto).
+    let (assert, messages) = cgx
+        .cmd
+        .with_json_messages()
+        .arg("--unlocked")
+        .arg("--prebuilt-binary-sources")
+        .arg("binstall")
+        .arg("--path")
+        .arg(source.path())
+        .assert_with_messages();
+
+    assert.success().stdout("selected-local-source");
+    prebuilt.assert_calls(0);
+    assert_compiled_from_source(&messages);
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            Message::PrebuiltBinary(
+                PrebuiltBinaryMessage::CacheLookup { .. }
+                    | PrebuiltBinaryMessage::CheckingProvider { .. }
+                    | PrebuiltBinaryMessage::DownloadingBinary { .. }
+            )
+        )),
+        "local source must bypass prebuilt resolution: {messages:#?}"
+    );
+}
 
 /// Test that `--prebuilt-binary never` forces building from source even when binaries exist.
 #[test]

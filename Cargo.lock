@@ -488,6 +488,7 @@ dependencies = [
  "assert_cmd",
  "assert_fs",
  "cgx-core",
+ "httpmock",
  "predicates",
  "serde_json",
  "snafu",

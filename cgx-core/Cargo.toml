@@ -57,9 +57,9 @@ tracing         = { workspace = true }
 url             = { workspace = true }
 uuid            = { workspace = true }
 which           = { workspace = true }
-xz2.workspace   = true
-zip.workspace   = true
-zstd.workspace  = true
+xz2             = { workspace = true }
+zip             = { workspace = true }
+zstd            = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 ctrlc = { workspace = true }

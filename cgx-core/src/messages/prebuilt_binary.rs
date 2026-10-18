@@ -41,6 +41,17 @@ pub enum PrebuiltBinaryMessage {
         krate: ResolvedCrate,
         reason: ProviderChangeReason,
     },
+    /// A cached prebuilt binary came from a provider that does not support the crate source.
+    ///
+    /// Normally this can't happen because if the provider doesn't support the crate source it would
+    /// not have produced a prebuilt binary resolution, however in the case of a cache entry that
+    /// predates a bug fix in which a provider incorrectly produced a prebuilt binary for an
+    /// unsupported crate source, this ensures that once the fixed code is shipped the cache entry
+    /// will be discarded.
+    CacheInvalidatedBySource {
+        krate: ResolvedCrate,
+        provider: BinaryProvider,
+    },
     /// A cached positive prebuilt binary resolution existed but the binary it points to is no
     /// longer on disk, so the entry was discarded and the crate will be re-resolved.
     CacheInvalidatedByMissingBinary { krate: ResolvedCrate, path: PathBuf },
@@ -80,6 +91,8 @@ pub enum PrebuiltBinaryMessage {
     ResolutionInconclusive { reason: String },
     /// Prebuilt binary cannot be used due to build customization
     DisqualifiedDueToCustomization { reason: String },
+    /// Prebuilt binaries cannot be used for the selected crate source.
+    DisqualifiedDueToSource { reason: String },
     /// Prebuilt binaries are disabled in config
     PrebuiltBinariesDisabled,
 }
@@ -113,6 +126,14 @@ impl PrebuiltBinaryMessage {
         Self::CacheInvalidatedByProviderChange {
             krate: krate.clone(),
             reason,
+        }
+    }
+
+    /// Report a cache entry whose provider does not support the crate source.
+    pub fn cache_invalidated_by_source(krate: &ResolvedCrate, provider: BinaryProvider) -> Self {
+        Self::CacheInvalidatedBySource {
+            krate: krate.clone(),
+            provider,
         }
     }
 
@@ -188,6 +209,13 @@ impl PrebuiltBinaryMessage {
 
     pub fn disqualified_due_to_customization(reason: impl Into<String>) -> Self {
         Self::DisqualifiedDueToCustomization {
+            reason: reason.into(),
+        }
+    }
+
+    /// Report a crate source that is not eligible for prebuilt binaries.
+    pub fn disqualified_due_to_source(reason: impl Into<String>) -> Self {
+        Self::DisqualifiedDueToSource {
             reason: reason.into(),
         }
     }
