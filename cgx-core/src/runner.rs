@@ -52,15 +52,26 @@ pub fn run_binary_crate(bin_path: &Path, args: &[OsString]) -> Result<()> {
 /// following the execution behavior of [`run_binary_crate`].
 ///
 /// The bare `subcommand` (ie `$FOO` in the example above) is passed before the user-supplied
-/// `args`, consistent with Cargo's own convention for how subcommands are invoked. An explicit
-/// `toolchain` takes precedence over the inherited `CARGO` path and normal executable discovery.
+/// `args`, consistent with Cargo's own convention for how subcommands are invoked.
+///
+/// An explicit `toolchain` (if present) is used to determine the runtime environment through
+/// `rustup run` and will always use the corresponding Cargo version, regardless of the inherited
+/// `CARGO` path and normal executable discovery.
 pub fn run_cargo_subcommand(
     bin_path: &Path,
     subcommand: &OsStr,
     args: &[OsString],
     toolchain: Option<&str>,
 ) -> Result<()> {
-    let mut cmd = Command::new(bin_path);
+    let mut cmd = if let Some(toolchain) = toolchain {
+        let mut cmd = Command::new(cargo::rustup_path(toolchain)?);
+        // Wrap the command un `rustup run $TOOLCHAIN` so the command is executed in the correct
+        // toolchain environment.
+        cmd.args(["run", toolchain]).arg(bin_path);
+        cmd
+    } else {
+        Command::new(bin_path)
+    };
     // This is an invocation of a cargo subcommand, ie `cgx cargo $FOO`, so we need to behave as
     // `cargo $FOO` would and set the CARGO env var to the path of the cargo binary, and pass the
     // subcommand name as the first argument

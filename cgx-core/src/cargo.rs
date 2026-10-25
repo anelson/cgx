@@ -152,6 +152,15 @@ pub(crate) fn create_cargo_runner(config: Config, reporter: MessageReporter) -> 
     })
 }
 
+/// Locate rustup for a requested toolchain.
+pub(crate) fn rustup_path(toolchain: &str) -> Result<PathBuf> {
+    find_executable("rustup", "RUSTUP")
+        .ok()
+        .with_context(|| error::RustupNotFoundSnafu {
+            toolchain: toolchain.to_owned(),
+        })
+}
+
 /// Resolve the Cargo executable for a launched Cargo subcommand.
 ///
 /// An explicit `toolchain` takes precedence over the inherited `CARGO` path. Without one,
@@ -161,11 +170,7 @@ pub(crate) fn cargo_path(toolchain: Option<&str>) -> Result<PathBuf> {
         return find_executable("cargo", "CARGO");
     };
 
-    let rustup = find_executable("rustup", "RUSTUP")
-        .ok()
-        .with_context(|| error::RustupNotFoundSnafu {
-            toolchain: toolchain.to_owned(),
-        })?;
+    let rustup = rustup_path(toolchain)?;
     let output = Command::new(&rustup)
         .args(["which", "--toolchain", toolchain, "cargo"])
         .output()
