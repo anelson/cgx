@@ -1,7 +1,7 @@
 pub mod logging;
 mod reporter;
 
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
 /// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
 ///
@@ -47,14 +47,15 @@ pub fn cgx_main() -> Result<()> {
 
     // Decode and prepare the command the user wants to run. This is where the heavy lifting
     // happens; the result is a `Command` describing what to print or execute.
-    let result = Command::try_from_cli(&cli, &reporter_thread, &config);
-
-    // Success or failure, there will be no more messages produced after this point, so join the
-    // reporter thread to make sure we've processed any that were emitted before we proceed.
-    reporter_thread.join();
-
-    let command = result?;
-    command.execute()
+    match Command::try_from_cli(&cli, &reporter_thread, &config) {
+        Ok(command) => command.execute(reporter_thread),
+        Err(err) => {
+            // Failed to create a `Command`, so we join the reporter thread here to ensure all
+            // messages are printed before we exit.
+            reporter_thread.join();
+            Err(err)
+        }
+    }
 }
 
 /// Build the version string shown by `-V`/`--version`.
@@ -79,11 +80,26 @@ fn cgx_version_string() -> String {
 /// Possible successful results of preparing a command for execution.
 enum Command {
     /// Binary is ready to go but user requested `--no-exec` so just print the path we'd execute
-    NoExec { bin_path: std::path::PathBuf },
-    /// Binary has been prepared and we're ready to execute it with a given args
-    Execute {
-        bin_path: std::path::PathBuf,
+    NoExec { bin_path: PathBuf },
+    /// Execute a prepared binary crate with the inherited environment.
+    /// This is the conventional `cgx $FOO` case, where `$FOO` is a binary crate/tool and we want to
+    /// run it with the user's arguments.
+    ExecuteBinaryCrate {
+        bin_path: PathBuf,
         binary_args: Vec<OsString>,
+    },
+    /// Execute a prepared Cargo subcommand with the same way `cargo` would invoke it.
+    /// This is the `cgx cargo $FOO` case, where `$FOO` is a Cargo subcommand whose actual
+    /// executable is called `cargo-$FOO`
+    ExecuteCargoSubcommand {
+        bin_path: PathBuf,
+        /// Bare subcommand name (ie `$FOO` in `cgx cargo $FOO`) being invoked
+        subcommand: OsString,
+        binary_args: Vec<OsString>,
+        /// Optional toolchain to use for the cargo subcommand, if specified by the user or config.
+        /// If specified, used to determine the path to `cargo` to use for the subcommand.  If not
+        /// specified, our default `cargo` discovery logic is used.
+        toolchain: Option<String>,
     },
     /// User just asked to list available targets of the crate
     ListTargets {
@@ -99,22 +115,57 @@ enum Command {
 }
 
 impl Command {
-    /// Execute the prepared command: run the binary, or print the resolved path, the crate's
-    /// targets, or the configured-tools TOML.
-    fn execute(self) -> Result<()> {
-        match self {
+    /// Execute the prepared command
+    ///
+    /// This function guarantees that `reporter_thread` will be joined before returning, so that all
+    /// messages are printed before the process exits or is replaced by the command we are
+    /// executing.
+    fn execute(self, reporter_thread: reporter::ReporterThread) -> Result<()> {
+        let result = match self {
             Command::NoExec { bin_path } => {
+                reporter_thread
+                    .message_reporter()
+                    .report(|| messages::RunnerMessage::binary_execution_plan(&bin_path, &[], true));
                 // Print path to stdout for scripting (e.g., binary=$(cgx --no-exec tool))
                 println!("{}", bin_path.display());
                 Ok(())
             }
-            Command::Execute {
+            Command::ExecuteBinaryCrate {
                 bin_path,
                 binary_args,
             } => {
-                // Run the binary - never returns on success. It either replaces the process
-                // (Unix) or exits with the child's code (Windows).
-                cgx_core::runner::run(&bin_path, &binary_args)
+                reporter_thread.message_reporter().report(|| {
+                    messages::RunnerMessage::binary_execution_plan(&bin_path, &binary_args, false)
+                });
+                // `run_binary_crate` will never return, so we join the reporter thread first to
+                // ensure all messages are printed before we exec.
+                reporter_thread.join();
+                cgx_core::runner::run_binary_crate(&bin_path, &binary_args)?;
+                unreachable!("run_binary_crate never returns on success")
+            }
+            Command::ExecuteCargoSubcommand {
+                bin_path,
+                subcommand,
+                binary_args,
+                toolchain,
+            } => {
+                reporter_thread.message_reporter().report(|| {
+                    messages::RunnerMessage::cargo_subcommand_execution_plan(
+                        &bin_path,
+                        &subcommand,
+                        &binary_args,
+                    )
+                });
+                // `run_cargo_subcommand` will never return, so we join the reporter thread first to
+                // ensure all messages are printed before we exec.
+                reporter_thread.join();
+                cgx_core::runner::run_cargo_subcommand(
+                    &bin_path,
+                    &subcommand,
+                    &binary_args,
+                    toolchain.as_deref(),
+                )?;
+                unreachable!("run_cargo_subcommand never returns on success")
             }
             Command::ListTargets {
                 crate_name,
@@ -124,6 +175,7 @@ impl Command {
             } => {
                 // Ensure there are executable targets
                 if bins.is_empty() && examples.is_empty() {
+                    reporter_thread.join();
                     return error::NoPackageBinariesSnafu { krate: crate_name }.fail();
                 }
 
@@ -148,7 +200,13 @@ impl Command {
                 Ok(())
             }
             Command::Prefetched => Ok(()),
-        }
+        };
+
+        // Block until the reporter thread has finished reporting all messages, so that we don't
+        // exit before the user sees all messages.
+        reporter_thread.join();
+
+        result
     }
 
     /// Decode the parsed CLI into the command to run, performing all resolution/build work and
@@ -165,9 +223,33 @@ impl Command {
             Cli::ListTools(_) => Self::list_tools(cgx),
             Cli::Prefetch(args) => Self::prefetch(cgx, args),
             Cli::PrefetchAll(prefetch_all) => Self::prefetch_all(cgx, prefetch_all),
-            Cli::NoExec(args) => Self::no_exec(cgx, reporter_thread, args),
-            Cli::Run { args, tool_args } => Self::run(cgx, reporter_thread, args, tool_args.clone()),
+            Cli::NoExec(args) => Self::no_exec(cgx, args),
+            Cli::RunBinaryCrate { args, tool_args } => {
+                let bin_path = Self::prepare_execution(cgx, args)?;
+                Ok(Command::ExecuteBinaryCrate {
+                    bin_path,
+                    binary_args: tool_args.clone(),
+                })
+            }
+            Cli::RunCargoSubcommand {
+                args,
+                subcommand,
+                tool_args,
+            } => {
+                let bin_path = Self::prepare_execution(cgx, args)?;
+                Ok(Command::ExecuteCargoSubcommand {
+                    bin_path,
+                    subcommand: subcommand.clone(),
+                    binary_args: tool_args.clone(),
+                    toolchain: args.toolchain.clone().or_else(|| config.toolchain.clone()),
+                })
+            }
         }
+    }
+
+    /// Prepare the selected binary using the crate's build options.
+    fn prepare_execution(cgx: Cgx, args: &CrateArgs) -> Result<PathBuf> {
+        cgx.prepare_bin_crate(&args.crate_request()?, &args.to_build_overrides())
     }
 
     fn list_tools(cgx: Cgx) -> Result<Command> {
@@ -180,34 +262,9 @@ impl Command {
         Ok(Command::Prefetched)
     }
 
-    /// Prepare and execute a crate, forwarding `tool_args` to the executed binary.
-    fn run(
-        cgx: Cgx,
-        reporter_thread: &reporter::ReporterThread,
-        args: &CrateArgs,
-        tool_args: Vec<OsString>,
-    ) -> Result<Command> {
-        let bin_path = cgx.prepare_bin_crate(&args.crate_request()?, &args.to_build_overrides())?;
-
-        reporter_thread
-            .message_reporter()
-            .report(|| messages::RunnerMessage::execution_plan(&bin_path, &tool_args, false));
-
-        Ok(Command::Execute {
-            bin_path,
-            binary_args: tool_args,
-        })
-    }
-
     /// Prepare a crate without executing it, printing the resolved binary path to stdout.
-    fn no_exec(cgx: Cgx, reporter_thread: &reporter::ReporterThread, args: &CrateArgs) -> Result<Command> {
-        let bin_path = cgx.prepare_bin_crate(&args.crate_request()?, &args.to_build_overrides())?;
-
-        let no_args: Vec<OsString> = Vec::new();
-        reporter_thread
-            .message_reporter()
-            .report(|| messages::RunnerMessage::execution_plan(&bin_path, &no_args, true));
-
+    fn no_exec(cgx: Cgx, args: &CrateArgs) -> Result<Command> {
+        let bin_path = Self::prepare_execution(cgx, args)?;
         Ok(Command::NoExec { bin_path })
     }
 

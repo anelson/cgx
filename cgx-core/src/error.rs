@@ -169,6 +169,18 @@ pub enum Error {
     #[snafu(display("Toolchain '{toolchain}' specified but rustup not found"))]
     RustupNotFound { toolchain: String },
 
+    #[snafu(display("Failed to locate Cargo for toolchain '{toolchain}': {stderr}"))]
+    RustupWhichFailed { toolchain: String, stderr: String },
+
+    #[snafu(display("Invalid Cargo path output from rustup for toolchain '{toolchain}': {source}"))]
+    RustupWhichOutput {
+        toolchain: String,
+        source: std::string::FromUtf8Error,
+    },
+
+    #[snafu(display("rustup returned an empty Cargo path for toolchain '{toolchain}'"))]
+    EmptyCargoPath { toolchain: String },
+
     #[snafu(display("Expected binary not found in cargo build output"))]
     BinaryNotFoundInOutput,
 

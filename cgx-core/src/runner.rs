@@ -7,19 +7,20 @@
 //! - **Windows**: Spawns child, ignores Ctrl-C while waiting, exits with child's code
 //! - **Other platforms**: Basic spawn+wait+exit fallback
 //!
-//! The `run()` function never returns on success - it either replaces the process (Unix)
-//! or exits with the child's exit code (Windows/other).
+//! Both [`run_binary_crate`] and [`run_cargo_subcommand`] never return on success: they replace the
+//! process (Unix) or exit with the child's exit code (Windows/other).
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::{ffi::OsString, path::Path, process::Command};
+use std::{
+    ffi::{OsStr, OsString},
+    path::Path,
+    process::Command,
+};
 
-#[cfg(windows)]
 use snafu::ResultExt;
 
-#[cfg(windows)]
-use crate::error;
-use crate::error::{Error, Result};
+use crate::{Result, cargo, error};
 
 /// Run a binary, replacing or waiting for it depending on platform.
 ///
@@ -39,22 +40,52 @@ use crate::error::{Error, Result};
 ///
 /// # Returns
 ///
-/// Only returns `Err` if the binary cannot be launched. On success, this function
-/// either replaces the current process or exits, and thus never returns.
-pub fn run(bin_path: &Path, args: &[OsString]) -> Result<()> {
+/// Only returns an error if the binary cannot be launched. On success, this function either
+/// replaces the current process or exits, and thus never returns.
+pub fn run_binary_crate(bin_path: &Path, args: &[OsString]) -> Result<()> {
+    let mut cmd = Command::new(bin_path);
+    cmd.args(args);
+    run(cmd)
+}
+
+/// Run a Cargo subcommand (ie, `cgx cargo $FOO`, where the binary to be run is `cargo-$FOO`),
+/// following the execution behavior of [`run_binary_crate`].
+///
+/// The bare `subcommand` (ie `$FOO` in the example above) is passed before the user-supplied
+/// `args`, consistent with Cargo's own convention for how subcommands are invoked. An explicit
+/// `toolchain` takes precedence over the inherited `CARGO` path and normal executable discovery.
+pub fn run_cargo_subcommand(
+    bin_path: &Path,
+    subcommand: &OsStr,
+    args: &[OsString],
+    toolchain: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new(bin_path);
+    // This is an invocation of a cargo subcommand, ie `cgx cargo $FOO`, so we need to behave as
+    // `cargo $FOO` would and set the CARGO env var to the path of the cargo binary, and pass the
+    // subcommand name as the first argument
+    cmd.env("CARGO", cargo::cargo_path(toolchain)?);
+    cmd.arg(subcommand).args(args);
+
+    run(cmd)
+}
+
+fn run(mut cmd: Command) -> Result<()> {
+    let bin_path = Path::new(cmd.get_program()).to_path_buf();
+
     #[cfg(unix)]
     {
-        exec_replace(bin_path, args)
+        exec_replace(&bin_path, &mut cmd)
     }
 
     #[cfg(windows)]
     {
-        spawn_and_wait_windows(bin_path, args)
+        spawn_and_wait_windows(&bin_path, &mut cmd)
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        spawn_and_wait_fallback(bin_path, args)
+        spawn_and_wait_fallback(&bin_path, &mut cmd)
     }
 }
 
@@ -64,19 +95,11 @@ pub fn run(bin_path: &Path, args: &[OsString]) -> Result<()> {
 /// This means cgx's process ID stays the same, but it becomes the target binary.
 /// Signals are handled naturally because the target binary receives them directly.
 #[cfg(unix)]
-fn exec_replace(bin_path: &Path, args: &[OsString]) -> Result<()> {
-    let mut cmd = Command::new(bin_path);
-    cmd.args(args);
-    // Environment and current directory are inherited by default
-
+fn exec_replace(bin_path: &Path, cmd: &mut Command) -> Result<()> {
     // exec() replaces the current process and never returns on success.
     // Only returns Err if exec fails (binary not found, not executable, etc.)
-    let err = cmd.exec();
-
-    // Only reachable if exec() failed
-    Err(err).map_err(|source| Error::ExecFailed {
+    Err(cmd.exec()).with_context(|_| error::ExecFailedSnafu {
         path: bin_path.to_owned(),
-        source,
     })
 }
 
@@ -91,7 +114,7 @@ fn exec_replace(bin_path: &Path, args: &[OsString]) -> Result<()> {
 /// Both the parent (cgx) and child receive Ctrl-C events. The parent ignores them,
 /// allowing the child to handle signals as it sees fit.
 #[cfg(windows)]
-fn spawn_and_wait_windows(bin_path: &Path, args: &[OsString]) -> Result<()> {
+fn spawn_and_wait_windows(bin_path: &Path, cmd: &mut Command) -> Result<()> {
     // Install handler that ignores Ctrl-C in parent process.
     // The child will receive and handle Ctrl-C directly from the Windows console.
     ctrlc::set_handler(|| {
@@ -100,17 +123,10 @@ fn spawn_and_wait_windows(bin_path: &Path, args: &[OsString]) -> Result<()> {
     })
     .context(error::ConsoleHandlerFailedSnafu)?;
 
-    // Spawn the child process
-    let mut child = Command::new(bin_path)
-        .args(args)
-        .spawn()
-        .map_err(|source| Error::SpawnFailed {
-            path: bin_path.to_owned(),
-            source,
-        })?;
-
-    // Wait for the child to complete
-    let status = child.wait().map_err(|source| Error::WaitFailed { source })?;
+    let mut child = cmd.spawn().with_context(|_| error::SpawnFailedSnafu {
+        path: bin_path.to_owned(),
+    })?;
+    let status = child.wait().context(error::WaitFailedSnafu)?;
 
     // Exit with the child's exit code (never returns)
     // This is intentional - the function contract specifies it never returns on success
@@ -125,18 +141,11 @@ fn spawn_and_wait_windows(bin_path: &Path, args: &[OsString]) -> Result<()> {
 /// On most POSIX-like systems, the default signal handling will likely be reasonable,
 /// but Ctrl-C behavior may not be optimal.
 #[cfg(not(any(unix, windows)))]
-fn spawn_and_wait_fallback(bin_path: &Path, args: &[OsString]) -> Result<()> {
-    // Spawn the child process
-    let mut child = Command::new(bin_path)
-        .args(args)
-        .spawn()
-        .map_err(|source| Error::SpawnFailed {
-            path: bin_path.to_owned(),
-            source,
-        })?;
-
-    // Wait for the child to complete
-    let status = child.wait().map_err(|source| Error::WaitFailed { source })?;
+fn spawn_and_wait_fallback(bin_path: &Path, cmd: &mut Command) -> Result<()> {
+    let mut child = cmd.spawn().with_context(|_| error::SpawnFailedSnafu {
+        path: bin_path.to_owned(),
+    })?;
+    let status = child.wait().context(error::WaitFailedSnafu)?;
 
     // Exit with the child's exit code (never returns)
     // This is intentional - the function contract specifies it never returns on success
@@ -147,20 +156,16 @@ fn spawn_and_wait_fallback(bin_path: &Path, args: &[OsString]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use assert_matches::assert_matches;
+
     use super::*;
 
     #[test]
-    fn test_run_nonexistent_binary() {
-        // Attempting to run a nonexistent binary should return an error
-        let result = run(Path::new("/nonexistent/binary"), &[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_run_with_args() {
-        // This test would need a test binary to actually execute,
-        // which would be better handled in integration tests
-        // For now, just verify the function signature is correct
-        let _: fn(&Path, &[OsString]) -> Result<()> = run;
+    fn test_run_binary_crate_nonexistent_binary() {
+        let result = run_binary_crate(Path::new("/nonexistent/binary"), &[]);
+        assert_matches!(
+            result,
+            Err(error::Error::ExecFailed { .. } | error::Error::SpawnFailed { .. })
+        );
     }
 }

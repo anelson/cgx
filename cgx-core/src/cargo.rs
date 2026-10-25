@@ -6,7 +6,7 @@ use std::{
 };
 
 pub(crate) use cargo_metadata::Metadata;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use tracing::debug;
 
 use crate::{
@@ -150,6 +150,43 @@ pub(crate) fn create_cargo_runner(config: Config, reporter: MessageReporter) -> 
         reporter,
         verbosity: config.verbosity,
     })
+}
+
+/// Resolve the Cargo executable for a launched Cargo subcommand.
+///
+/// An explicit `toolchain` takes precedence over the inherited `CARGO` path. Without one,
+/// use the same executable discovery as the internal Cargo commands.
+pub(crate) fn cargo_path(toolchain: Option<&str>) -> Result<PathBuf> {
+    let Some(toolchain) = toolchain else {
+        return find_executable("cargo", "CARGO");
+    };
+
+    let rustup = find_executable("rustup", "RUSTUP")
+        .ok()
+        .with_context(|| error::RustupNotFoundSnafu {
+            toolchain: toolchain.to_owned(),
+        })?;
+    let output = Command::new(&rustup)
+        .args(["which", "--toolchain", toolchain, "cargo"])
+        .output()
+        .with_context(|_| error::IoSnafu { path: rustup })?;
+    ensure!(
+        output.status.success(),
+        error::RustupWhichFailedSnafu {
+            toolchain: toolchain.to_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }
+    );
+    let path = String::from_utf8(output.stdout).with_context(|_| error::RustupWhichOutputSnafu {
+        toolchain: toolchain.to_owned(),
+    })?;
+    ensure!(
+        !path.trim().is_empty(),
+        error::EmptyCargoPathSnafu {
+            toolchain: toolchain.to_owned(),
+        }
+    );
+    Ok(PathBuf::from(path.trim()))
 }
 
 #[derive(Debug, Clone)]
