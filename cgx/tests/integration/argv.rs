@@ -1,4 +1,4 @@
-//! Executable-name dispatch through real symlinks, without registry or network access.
+//! Executable-name dispatch through real symlinks.
 //!
 //! These tests invoke `cgx` via a symlink where the symlink specifies a tool to run, making sure
 //! that this alternative tool calling mechanism works properly.
@@ -29,7 +29,6 @@ fn argv0_selects_tool() {
         .child("cgx.toml")
         .write_str(&format!(
             r#"
-offline = true
 [prebuilt_binaries]
 use_prebuilt_binaries = "never"
 [aliases]

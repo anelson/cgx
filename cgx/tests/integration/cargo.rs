@@ -92,7 +92,7 @@ fn cargo_plugin_argv_matches_real_cargo() {
         "Cargo must supply its absolute executable path"
     );
     Command::new(&real_cargo)
-        .args(["build", "--offline", "--locked"])
+        .args(["build", "--locked"])
         .current_dir(probe.path())
         .assert()
         .success();
@@ -269,7 +269,7 @@ fn selected_toolchain_applies_to_both_invocation_modes() {
                 .current_dir(cgx.test_fs().cwd.path())
                 .env("CARGO", inherited_cargo.path())
                 .env_remove("CARGO_PKG_NAME")
-                .args(["--offline", "--path"])
+                .arg("--path")
                 .arg(probe.path())
                 .args(invocation)
                 .assert_json_stdout();
@@ -293,7 +293,7 @@ fn cargo_plugin_no_exec_prints_only_binary_path() {
     let output = cgx
         .cmd
         .env_remove("CARGO")
-        .args(["--offline", "--no-exec", "--path"])
+        .args(["--no-exec", "--path"])
         .arg(probe.path())
         .args(["cargo", "argv-probe"])
         .assert()
