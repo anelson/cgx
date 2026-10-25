@@ -1,6 +1,6 @@
 //! Executable-name dispatch through real symlinks, without registry or network access.
 //!
-//! These tests invoke `cgx` via a symlink where the symlink specifies a tool to run, makign sure
+//! These tests invoke `cgx` via a symlink where the symlink specifies a tool to run, making sure
 //! that this alternative tool calling mechanism works properly.
 //!
 //! Rather than using a real crate, the tests leverage our argv-probe test crate so we can see
