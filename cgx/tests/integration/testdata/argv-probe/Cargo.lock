@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "cargo-argv-probe"
+name = "argv-probe"
 version = "1.2.3"
