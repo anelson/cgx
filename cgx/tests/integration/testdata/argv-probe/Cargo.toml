@@ -4,3 +4,6 @@ name    = "argv-probe"
 version = "1.2.3"
 
 [workspace]
+
+[dependencies]
+serde_json = "1.0.150"

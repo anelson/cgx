@@ -1,4 +1,4 @@
-//! Executable-name dispatch through real symlinks, without registry or network access.
+//! Executable-name dispatch through real symlinks.
 //!
 //! These tests invoke `cgx` via a symlink where the symlink specifies a tool to run, making sure
 //! that this alternative tool calling mechanism works properly.
@@ -13,8 +13,12 @@ use std::{
 
 use assert_cmd::{Command, cargo::cargo_bin};
 use assert_fs::prelude::*;
+use serde_json::{Value, json};
 
-use crate::{testdata::ArgvProbe, utils::Cgx};
+use crate::{
+    testdata::ArgvProbe,
+    utils::{Cgx, CommandExt},
+};
 
 #[test]
 fn argv0_selects_tool() {
@@ -25,7 +29,6 @@ fn argv0_selects_tool() {
         .child("cgx.toml")
         .write_str(&format!(
             r#"
-offline = true
 [prebuilt_binaries]
 use_prebuilt_binaries = "never"
 [aliases]
@@ -37,7 +40,7 @@ argv-probe = {{ path = {:?}, version = "=1.2.3" }}
         ))
         .unwrap();
 
-    let args: Vec<OsString> = [
+    let args = [
         "--",
         "--",
         "--help",
@@ -50,17 +53,20 @@ argv-probe = {{ path = {:?}, version = "=1.2.3" }}
         "cgx",
         "",
         "pattern",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .chain([OsString::from_vec(vec![0xff])])
-    .collect();
-    let expected = format!("{args:?}\n");
+    ];
+    let non_unicode = OsString::from_vec(vec![0xff]);
+    let mut expected = args.map(Value::from).to_vec();
+    expected.push(json!(non_unicode));
+    let args: Vec<OsString> = args
+        .into_iter()
+        .map(OsString::from)
+        .chain([non_unicode])
+        .collect();
 
     for name in ["rg", "rg@=1.2.3", "argv-probe"] {
         let link = fs.cwd.child(name);
         symlink(cargo_bin!("cgx"), link.path()).unwrap();
-        Command::new(link.path())
+        let output = Command::new(link.path())
             .current_dir(fs.cwd.path())
             .env("CGX_SYSTEM_CONFIG_DIR", fs.system_root.path())
             .env("CGX_APP_DIR", fs.app_root.path())
@@ -69,9 +75,8 @@ argv-probe = {{ path = {:?}, version = "=1.2.3" }}
             .env("CGX_HTTP_RETRIES", "0")
             .env_remove("CGX_HTTP_PROXY")
             .args(&args)
-            .assert()
-            .success()
-            .stdout(expected.clone());
+            .assert_json_stdout();
+        assert_eq!(output.query("$.argv"), [&json!(expected)], "invoked as {name}");
     }
 
     Command::new(fs.cwd.child("rg").path())

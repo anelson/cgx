@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,15 +12,23 @@ use crate::config::ToolConfig;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum RunnerMessage {
-    /// The resolved binary and arguments cgx is about to execute, or would execute under
-    /// `--no-exec`.
-    ExecutionPlan {
+    /// A conventional binary invocation, or path-only output under `--no-exec`.
+    BinaryExecutionPlan {
         /// Path to the resolved binary.
         binary_path: PathBuf,
         /// Arguments forwarded to the binary, lossily converted to UTF-8 for serialization.
         args: Vec<String>,
         /// True when `--no-exec` was given, so the plan is reported without being executed.
         no_exec: bool,
+    },
+    /// A Cargo subcommand invocation, with its bare name separate from its arguments.
+    CargoSubcommandExecutionPlan {
+        /// Path to the resolved plugin binary.
+        binary_path: PathBuf,
+        /// Bare subcommand name, lossily converted to UTF-8 for serialization.
+        subcommand: String,
+        /// User-supplied arguments after the subcommand, lossily converted to UTF-8.
+        args: Vec<String>,
     },
     /// One configured `[tools]` entry, reported by `--list-tools`.
     ListTool {
@@ -79,11 +90,31 @@ pub enum RunnerMessage {
 }
 
 impl RunnerMessage {
-    pub fn execution_plan(binary_path: &std::path::Path, args: &[OsString], no_exec: bool) -> Self {
-        Self::ExecutionPlan {
+    /// Describe conventional binary execution or path-only output under `--no-exec`.
+    pub fn binary_execution_plan(binary_path: &Path, args: &[OsString], no_exec: bool) -> Self {
+        Self::BinaryExecutionPlan {
             binary_path: binary_path.to_path_buf(),
-            args: args.iter().map(|s| s.to_string_lossy().into_owned()).collect(),
+            args: args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
             no_exec,
+        }
+    }
+
+    /// Describe Cargo subcommand execution of a specific subcommand
+    pub fn cargo_subcommand_execution_plan(
+        binary_path: &Path,
+        subcommand: &OsStr,
+        args: &[OsString],
+    ) -> Self {
+        Self::CargoSubcommandExecutionPlan {
+            binary_path: binary_path.to_path_buf(),
+            subcommand: subcommand.to_string_lossy().into_owned(),
+            args: args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
         }
     }
 
@@ -107,7 +138,7 @@ impl RunnerMessage {
         }
     }
 
-    pub fn prefetch_completed(crate_spec: &str, binary_path: &std::path::Path) -> Self {
+    pub fn prefetch_completed(crate_spec: &str, binary_path: &Path) -> Self {
         Self::PrefetchCompleted {
             crate_spec: crate_spec.to_string(),
             binary_path: binary_path.to_path_buf(),
@@ -121,7 +152,7 @@ impl RunnerMessage {
         }
     }
 
-    pub fn prefetch_all_completed(tool: &str, aliases: &[String], binary_path: &std::path::Path) -> Self {
+    pub fn prefetch_all_completed(tool: &str, aliases: &[String], binary_path: &Path) -> Self {
         Self::PrefetchAllCompleted {
             tool: tool.to_string(),
             aliases: aliases.to_vec(),

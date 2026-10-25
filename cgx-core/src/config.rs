@@ -1712,11 +1712,7 @@ mod tests {
         let cli = Cli::parse_from_test_args(["+nightly", "--offline", "--locked", "test-crate"]);
         let config_overrides = cli.to_config_overrides();
         let config = Config::load(&config_overrides).unwrap();
-        let build_overrides = if let Cli::Run { args, .. } = cli {
-            args.to_build_overrides()
-        } else {
-            panic!("Expected Run command")
-        };
+        let build_overrides = cli.crate_args().to_build_overrides();
 
         assert!(config.offline);
         assert!(config.locked);
@@ -2026,11 +2022,7 @@ mod tests {
             // but in build overrides.
             let cli = Cli::parse_from_test_args(["+stable", "--offline", "--locked", "test-crate"]);
             let config_overrides = cli.to_config_overrides();
-            let build_overrides = if let Cli::Run { args, .. } = cli {
-                args.to_build_overrides()
-            } else {
-                panic!("Expected Run command")
-            };
+            let build_overrides = cli.crate_args().to_build_overrides();
             let config = Config::load_from_dir(test_case.path(), &config_overrides).unwrap();
             let build_options = BuildOptions::load(&config, &build_overrides).unwrap();
 

@@ -137,9 +137,9 @@ fn messages_with_prebuilt_binary() {
     assert!(
         messages.iter().any(|m| matches!(
             m,
-            Message::Runner(RunnerMessage::ExecutionPlan { no_exec: true, .. })
+            Message::Runner(RunnerMessage::BinaryExecutionPlan { no_exec: true, .. })
         )),
-        "Expected RunnerMessage::ExecutionPlan"
+        "Expected RunnerMessage::BinaryExecutionPlan"
     );
 }
 

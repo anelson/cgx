@@ -1,8 +1,11 @@
 //! Utility functions to help run our CLI as part of a test
+use std::process::Output;
+
 use assert_cmd::{Command, assert::OutputAssertExt, cargo::cargo_bin_cmd};
 use assert_fs::{TempDir, prelude::*};
 use cgx::messages::{BuildCacheMessage, BuildMessage, CgxMessage, Message, Provenance};
-use serde_json::Deserializer;
+use serde_json::{Deserializer, Value};
+use serde_json_path::JsonPath;
 
 pub(crate) struct TestFs {
     pub(crate) app_root: TempDir,
@@ -98,13 +101,35 @@ impl Cgx {
     }
 }
 
-/// Extension trait to add helper methods to `Command` for testing `cgx`
+/// JSON stdout whose fields can be selected without displaying the rest of the document.
+pub(crate) struct JsonOutput(Value);
+
+impl JsonOutput {
+    /// Assert success and parse JSON stdout, omitting it from failure diagnostics.
+    pub(crate) fn from_output(mut output: Output) -> Self {
+        let stdout = std::mem::take(&mut output.stdout);
+        output.assert().success();
+        Self(serde_json::from_slice(&stdout).unwrap())
+    }
+
+    /// Return all values selected by a [`JsonPath`] query, or an empty list if none match.
+    pub(crate) fn query(&self, path: &str) -> Vec<&Value> {
+        JsonPath::parse(path).unwrap().query(&self.0).all()
+    }
+}
+
+/// Extension trait to add helper methods to [`Command`] for testing `cgx`.
 pub(crate) trait CommandExt {
+    /// Run the command successfully and parse its stdout as JSON.
+    ///
+    /// Keep the full stdout out of failure diagnostics because it may contain inherited secrets.
+    fn assert_json_stdout(&mut self) -> JsonOutput;
+
     /// Add the argument to enable JSON message output in `cgx`
     ///
     /// NOTE: If this is used, make sure to call [`CommandExt::assert_with_messages`] to capture
     /// and parse the cgx messages separately from the rest of the stdout output.  If you forget
-    /// tod o this, then assert helpers like `stdout` will see the JSON messages as well as the
+    /// to do this, then assert helpers like `stdout` will see the JSON messages as well as the
     /// usual output which will likely cause test failures.
     fn with_json_messages(&mut self) -> &mut Self;
 
@@ -115,6 +140,10 @@ pub(crate) trait CommandExt {
 }
 
 impl CommandExt for Command {
+    fn assert_json_stdout(&mut self) -> JsonOutput {
+        JsonOutput::from_output(self.output().unwrap())
+    }
+
     fn with_json_messages(&mut self) -> &mut Self {
         self.arg("--message-format").arg("json")
     }
@@ -137,7 +166,7 @@ impl CommandExt for Command {
             }
         }
 
-        let filtered_output = std::process::Output {
+        let filtered_output = Output {
             status: output.status,
             stdout: filtered_stdout.join("\n").into_bytes(),
             stderr: output.stderr,

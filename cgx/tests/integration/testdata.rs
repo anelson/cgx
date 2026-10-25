@@ -10,7 +10,7 @@ use std::{
 
 use assert_fs::{TempDir, prelude::*};
 
-/// A temporary crate whose executable reports its command-line arguments.
+/// A temporary crate whose executable reports its arguments and environment as JSON.
 pub(crate) struct ArgvProbe {
     root: TempDir,
 }

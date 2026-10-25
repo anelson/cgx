@@ -30,9 +30,19 @@ pub enum Cli {
     PrefetchAll(PrefetchAll),
     /// Prepare a crate without executing it; print the resolved binary path to stdout.
     NoExec(CrateArgs),
-    /// Prepare a crate and execute it, forwarding `tool_args` to the executed binary.
-    Run {
+    /// Prepare and execute a binary crate with its arguments and inherited environment.
+    ///
+    /// This is the standard `cgx $FOO` invocation.
+    RunBinaryCrate {
         args: CrateArgs,
+        tool_args: Vec<OsString>,
+    },
+    /// Prepare and execute a Cargo subcommand requested through `cgx cargo <subcommand>`.
+    RunCargoSubcommand {
+        args: CrateArgs,
+        /// Bare subcommand name, without a `cargo-` prefix or version suffix.
+        subcommand: OsString,
+        /// Arguments supplied after the subcommand.
         tool_args: Vec<OsString>,
     },
 }
@@ -54,9 +64,11 @@ impl Cli {
     /// easier to load and render the config in a single shared code path.
     pub fn to_config_overrides(&self) -> ConfigOverrides {
         match self {
-            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => {
-                args.to_config_overrides()
-            }
+            Cli::ListTargets(args)
+            | Cli::Prefetch(args)
+            | Cli::NoExec(args)
+            | Cli::RunBinaryCrate { args, .. }
+            | Cli::RunCargoSubcommand { args, .. } => args.to_config_overrides(),
             Cli::ListTools(list_tools) => list_tools.to_config_overrides(),
             Cli::PrefetchAll(prefetch_all) => prefetch_all.to_config_overrides(),
         }
@@ -75,9 +87,11 @@ impl Cli {
     /// The reporting controls carried by this command's variant.
     fn reporting(&self) -> &ReportingArgs {
         match self {
-            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => {
-                &args.reporting
-            }
+            Cli::ListTargets(args)
+            | Cli::Prefetch(args)
+            | Cli::NoExec(args)
+            | Cli::RunBinaryCrate { args, .. }
+            | Cli::RunCargoSubcommand { args, .. } => &args.reporting,
             Cli::ListTools(list_tools) => &list_tools.reporting,
             Cli::PrefetchAll(prefetch_all) => &prefetch_all.reporting,
         }
@@ -99,8 +113,9 @@ impl Cli {
 
                 if matches!(mode, ExecutableMode::CargoWrapper) && args.get(1).is_some_and(|arg| arg == "cgx")
                 {
-                    // `cargo cgx foo ...` invokes `cargo-cgx` with `cgx` and then `foo` and the ... args.
-                    // Remove that `cgx` from the CLI before parsing with clap.
+                    // `cargo cgx foo ...` invokes `cargo-cgx` with `cgx` and then `foo` and the ...
+                    // args. Remove that `cgx` from the CLI before parsing with
+                    // clap.
                     args.remove(1);
                 }
                 let (toolchain, filtered_args) = Self::extract_toolchain(args);
@@ -193,18 +208,23 @@ impl Cli {
     #[cfg(test)]
     pub fn crate_args(&self) -> &CrateArgs {
         match self {
-            Cli::ListTargets(args) | Cli::Prefetch(args) | Cli::NoExec(args) | Cli::Run { args, .. } => args,
+            Cli::ListTargets(args)
+            | Cli::Prefetch(args)
+            | Cli::NoExec(args)
+            | Cli::RunBinaryCrate { args, .. }
+            | Cli::RunCargoSubcommand { args, .. } => args,
             other @ (Cli::ListTools(_) | Cli::PrefetchAll(_)) => {
                 panic!("expected a crate-level command, got {other:?}")
             }
         }
     }
 
-    /// The trailing tool arguments of a [`Cli::Run`] command (empty for any other). Test helper.
+    /// The user-supplied tool arguments of [`Cli::RunBinaryCrate`] or [`Cli::RunCargoSubcommand`],
+    /// empty for other commands. Test helper.
     #[cfg(test)]
     pub fn tool_args(&self) -> &[OsString] {
         match self {
-            Cli::Run { tool_args, .. } => tool_args,
+            Cli::RunBinaryCrate { tool_args, .. } | Cli::RunCargoSubcommand { tool_args, .. } => tool_args,
             _ => &[],
         }
     }
@@ -899,7 +919,7 @@ impl RawCli {
 
         let NormalizedInvocation {
             crate_spec,
-            mut tool_args,
+            tool_args,
             cargo_subcommand,
         } = invocation
             .map(Invocation::normalize)
@@ -1010,15 +1030,16 @@ impl RawCli {
             Self::ensure_no_crate_args(&tool_args, "--no-exec")?;
             Ok(Cli::NoExec(crate_args))
         } else {
-            // For `cgx cargo <subcommand>`, pass the subcommand name when executing the plugin, so
-            // match the behavior when `cargo <subcommand>` invokes the `cargo-<subcommand>` plugin
-            // crate.
-            if let Some(subcommand) = cargo_subcommand {
-                tool_args.insert(0, subcommand);
-            }
-            Ok(Cli::Run {
-                args: crate_args,
-                tool_args,
+            Ok(match cargo_subcommand {
+                Some(subcommand) => Cli::RunCargoSubcommand {
+                    args: crate_args,
+                    subcommand,
+                    tool_args,
+                },
+                None => Cli::RunBinaryCrate {
+                    args: crate_args,
+                    tool_args,
+                },
             })
         }
     }
@@ -1350,6 +1371,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn execution_variants_preserve_shared_options() {
+        for invocation in [vec!["ripgrep", "--help"], vec!["cargo", "deny", "--help"]] {
+            let cli = Cli::parse_from_test_args(
+                ["+nightly", "--offline", "--message-format", "json", "-vv"]
+                    .into_iter()
+                    .chain(invocation),
+            );
+            assert_matches!(cli.message_format(), Some(MessageFormat::Json));
+            assert_eq!(cli.verbosity(), Verbosity::VeryVerbose);
+            let config_overrides = cli.to_config_overrides();
+            assert!(config_overrides.offline);
+            assert_eq!(config_overrides.verbosity, Verbosity::VeryVerbose);
+            assert_eq!(cli.crate_args().toolchain.as_deref(), Some("nightly"));
+            assert_eq!(
+                cli.crate_args().to_build_overrides().toolchain.as_deref(),
+                Some("nightly")
+            );
+        }
+    }
+
     mod executable_names {
         #[cfg(unix)]
         use std::os::unix::ffi::OsStringExt;
@@ -1373,10 +1415,11 @@ mod tests {
                 "cargo-cgx@=0.1.2",
             ] {
                 let cli = parse(&[name, "+nightly", "--offline", "cargo", "deny@1", "--", "--help"]);
+                assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
                 assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny@1"));
                 assert_eq!(cli.crate_args().toolchain.as_deref(), Some("nightly"));
                 assert!(cli.crate_args().cargo.offline);
-                assert_eq!(cli.tool_args(), ["deny", "--help"]);
+                assert_eq!(cli.tool_args(), ["--help"]);
                 assert_matches!(parse(&[name, "--list-tools"]), Cli::ListTools(_));
                 assert_matches!(parse(&[name, "--prefetch", "ripgrep"]), Cli::Prefetch(_));
                 let cli = parse(&[name, "--path", "."]);
@@ -1434,7 +1477,7 @@ mod tests {
             for tail in tails {
                 let args: Vec<_> = std::iter::once("rg").chain(tail.iter().copied()).collect();
                 let cli = parse(&args);
-                assert_matches!(cli, Cli::Run { .. });
+                assert_matches!(cli, Cli::RunBinaryCrate { .. });
                 assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("rg"));
                 assert_eq!(cli.tool_args(), *tail);
                 assert_eq!(cli.crate_args().toolchain, None);
@@ -1443,6 +1486,7 @@ mod tests {
             }
             let cli = parse(&["cargo-deny", "--", "check"]);
             assert_eq!(cli.tool_args(), ["--", "check"]);
+            assert_matches!(&cli, Cli::RunBinaryCrate { .. });
             let cli = parse(&["cargo", "deny", "--"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo"));
             assert_eq!(cli.tool_args(), ["deny", "--"]);
@@ -2980,33 +3024,37 @@ mod tests {
         #[test]
         fn cargo_subcommand_is_normalized_and_remaining_args_forwarded() {
             let cli = run(&["cargo", "deny", "--all"]);
+            assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["deny", "--all"]);
+            assert_eq!(tool_args(&cli), ["--all"]);
         }
 
         #[test]
-        fn cargo_subcommand_without_extra_args_still_forwards_subcommand() {
+        fn cargo_subcommand_without_extra_args_records_bare_name() {
             let cli = run(&["cargo", "deny"]);
+            assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["deny"]);
+            assert_eq!(tool_args(&cli), Vec::<String>::new());
         }
 
         #[test]
-        fn cargo_version_suffix_selects_crate_but_forwards_bare_subcommand() {
+        fn cargo_version_suffix_selects_crate_but_records_bare_subcommand() {
             let cli = run(&["cargo", "deny@=1.2.3", "--version"]);
+            assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny@=1.2.3"));
             let request = cli.crate_args().crate_request().unwrap();
             assert_eq!(request.name.as_deref(), Some("cargo-deny"));
             assert_eq!(request.version.as_deref(), Some("=1.2.3"));
-            assert_eq!(tool_args(&cli), ["deny", "--version"]);
+            assert_eq!(tool_args(&cli), ["--version"]);
         }
 
         #[test]
-        fn cargo_crate_version_flag_does_not_change_forwarded_subcommand() {
+        fn cargo_crate_version_flag_does_not_change_bare_subcommand() {
             let cli = run(&["--crate-version", "1.2.3", "cargo", "deny"]);
+            assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
             assert_eq!(cli.crate_args().crate_version.as_deref(), Some("1.2.3"));
-            assert_eq!(tool_args(&cli), ["deny"]);
+            assert_eq!(tool_args(&cli), Vec::<String>::new());
         }
 
         #[test]
@@ -3032,7 +3080,6 @@ mod tests {
             assert_eq!(
                 tool_args(&cli),
                 [
-                    "deny",
                     "check",
                     "--features",
                     "plugin-feature",
@@ -3049,8 +3096,9 @@ mod tests {
         #[test]
         fn cargo_separator_then_subcommand_is_normalized() {
             let cli = run(&["cargo", "--", "deny"]);
+            assert_matches!(&cli, Cli::RunCargoSubcommand { subcommand, .. } if subcommand == "deny");
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["deny"]);
+            assert_eq!(tool_args(&cli), Vec::<String>::new());
         }
 
         /// A flag after `cargo` is not a subcommand name; it stays a tool argument for the
@@ -3068,7 +3116,7 @@ mod tests {
         fn cargo_subcommand_separator_then_flags_forwards_flags() {
             let cli = run(&["cargo", "deny", "--", "--flag"]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(tool_args(&cli), ["deny", "--flag"]);
+            assert_eq!(tool_args(&cli), ["--flag"]);
         }
 
         #[test]
@@ -3084,10 +3132,7 @@ mod tests {
                 "literal",
             ]);
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny"));
-            assert_eq!(
-                tool_args(&cli),
-                ["deny", "--features", "plugin-feature", "--", "literal"]
-            );
+            assert_eq!(tool_args(&cli), ["--features", "plugin-feature", "--", "literal"]);
         }
 
         #[test]
@@ -3100,6 +3145,7 @@ mod tests {
                 let cli = run(&args);
                 assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(args[0]));
                 assert_eq!(tool_args(&cli), expected, "args: {args:?}");
+                assert_matches!(&cli, Cli::RunBinaryCrate { .. });
             }
         }
 
@@ -3145,7 +3191,7 @@ mod tests {
         fn crate_named_like_a_mode_flag_runs_that_crate() {
             // `prefetch` (no dashes) is a crate name, not the `--prefetch` mode.
             let cli = run(&["prefetch"]);
-            assert_matches!(&cli, Cli::Run { .. });
+            assert_matches!(&cli, Cli::RunBinaryCrate { .. });
             assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("prefetch"));
         }
     }
