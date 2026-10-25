@@ -1,11 +1,15 @@
 //! Tests for interactions with the `cargo` CLI and interoperability with Cargo-managed state.
+//!
+//! We have a dummy `argv-probe` crate that we use to inspect the actual arguments passed to
+//! whatever cgx executes.  For these tests we have to rename it to have a `cargo-` prefix so that
+//! Cargo recognizes it as a cargo plugin.
 
 use std::{env, path::PathBuf};
 
 use assert_cmd::Command;
 use assert_fs::{TempDir, prelude::*};
 
-use crate::{testdata::CargoArgvProbe, utils::Cgx};
+use crate::{testdata::ArgvProbe, utils::Cgx};
 
 /// `cgx` should be able to use a fresh Cargo home that has never initialized the crates.io sparse
 /// index.
@@ -70,7 +74,7 @@ itoa = "1"
 
 #[test]
 fn cargo_plugin_argv_matches_real_cargo() {
-    let probe = CargoArgvProbe::copy_to_temp();
+    let probe = ArgvProbe::copy_to_temp_as_crate("cargo-argv-probe");
     let cargo_home = TempDir::with_prefix("cgx-cargo-home-").unwrap();
     let mut cgx = Cgx::with_test_fs();
     let real_cargo = PathBuf::from(env!("CARGO"));
@@ -135,7 +139,7 @@ fn cargo_plugin_argv_matches_real_cargo() {
 
 #[test]
 fn direct_cargo_plugin_crate_keeps_literal_argv() {
-    let probe = CargoArgvProbe::copy_to_temp();
+    let probe = ArgvProbe::copy_to_temp_as_crate("cargo-argv-probe");
     let cargo_home = TempDir::with_prefix("cgx-cargo-home-").unwrap();
     let mut cgx = Cgx::with_test_fs();
     cgx.cmd
@@ -159,7 +163,7 @@ fn direct_cargo_plugin_crate_keeps_literal_argv() {
 
 #[test]
 fn versioned_cargo_plugin_forwards_bare_subcommand() {
-    let probe = CargoArgvProbe::copy_to_temp();
+    let probe = ArgvProbe::copy_to_temp_as_crate("cargo-argv-probe");
     let cargo_home = TempDir::with_prefix("cgx-cargo-home-").unwrap();
     let mut cgx = Cgx::with_test_fs();
     cgx.cmd

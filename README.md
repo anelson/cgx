@@ -188,6 +188,21 @@ You can also use `--` as an explicit separator:
 cgx ripgrep -- --version
 ```
 
+### Executable-name invocation
+
+A symlink to `cgx` can select a crate by its own name:
+
+```sh
+ln -s "$(command -v cgx)" "$HOME/.local/bin/ripgrep"
+ripgrep --version
+```
+
+The name can also be a configured alias, such as `rg`, or include a version requirement, such as `ripgrep@14`.
+All arguments after the executable name belong to the tool, including `--help`, `--version`, `+nightly`, and `--`.
+Use configuration or environment variables for cgx settings, or invoke `cgx` explicitly to pass its CLI options.
+
+The names `cgx` and `cargo-cgx` retain normal cgx behavior.
+
 ## Version Requirements
 
 The default is to use the latest version of the crate. To choose a subset of releases, use the same version requirement

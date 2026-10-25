@@ -5,6 +5,8 @@
               conventions should apply"
 )]
 
+#[cfg(unix)]
+mod argv;
 mod basic;
 mod cargo;
 mod config;

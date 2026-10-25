@@ -1,4 +1,7 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+};
 
 use clap::{
     ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
@@ -40,9 +43,7 @@ impl Cli {
     /// `version` is the string shown by `-V`/`--version`; clap prints it to stdout and exits. This
     /// uses clap, which will exit the process on `--help`, `--version`, or invalid arguments.
     pub fn parse_from_cli_args(version: String) -> Self {
-        let args: Vec<String> = std::env::args().collect();
-        let args = Self::strip_cargo_subcommand_arg(args);
-        Self::parse_from_arg_strings(args, Some(version)).unwrap_or_else(|err| err.exit())
+        Self::parse_from_args(std::env::args_os().collect(), Some(version)).unwrap_or_else(|err| err.exit())
     }
 
     /// Translate the configuration-affecting arguments this command supplies into a
@@ -84,68 +85,42 @@ impl Cli {
 
     /// Shared parse pipeline: extract a leading `+toolchain`, invoke clap (with an optional version
     /// string for the `--version` action), and validate into a [`Cli`] via [`RawCli::render`].
-    fn parse_from_arg_strings(args: Vec<String>, version: Option<String>) -> Result<Self, clap::Error> {
-        let (toolchain, filtered_args) = Self::extract_toolchain(args);
+    ///
+    /// Classifies the executable mode by looking at `args[0]` before parsing any arguments. Tool
+    /// invocations (where `cgx` is being run via a symlink pointing to `cgx` named after the crate
+    /// to run) skip toolchain extraction and only parse clap's defaults.
+    fn parse_from_args(mut args: Vec<OsString>, version: Option<String>) -> Result<Self, clap::Error> {
+        let mode = ExecutableMode::classify(args.first().map(OsString::as_os_str))?;
 
-        let mut command = RawCli::command();
-        if let Some(version) = version {
-            command = command.version(version);
-        }
+        let raw = match mode {
+            ExecutableMode::Normal | ExecutableMode::CargoWrapper => {
+                // The conventional invocation pattern, `cgx` is being invoked explicitly either as
+                // `cgx` or `cargo cgx`, with the crate name and other parameters are args.
 
-        let matches = command.try_get_matches_from(filtered_args)?;
-        let mut raw = RawCli::from_arg_matches(&matches)?;
-        raw.toolchain = toolchain;
+                if matches!(mode, ExecutableMode::CargoWrapper) && args.get(1).is_some_and(|arg| arg == "cgx")
+                {
+                    // `cargo cgx foo ...` invokes `cargo-cgx` with `cgx` and then `foo` and the ... args.
+                    // Remove that `cgx` from the CLI before parsing with clap.
+                    args.remove(1);
+                }
+                let (toolchain, filtered_args) = Self::extract_toolchain(args);
+                let mut clap_command = RawCli::command();
+                if let Some(version) = version {
+                    clap_command = clap_command.version(version);
+                }
+                let arg_matches = clap_command.try_get_matches_from(filtered_args)?;
+                let mut raw = RawCli::from_arg_matches(&arg_matches)?;
+                raw.toolchain = toolchain;
+                raw
+            }
+            ExecutableMode::Tool(crate_spec) => {
+                // `cgx` is being invoked via a symlink named after the crate to run, so all command
+                // line arguments are meant for the crate whose name is the symlink's base name
+                // (which is by convention passed in argv[0]).
+                RawCli::from_argv0(crate_spec, args.into_iter().skip(1).collect())?
+            }
+        };
         raw.render()
-    }
-
-    /// Strip the cargo subcommand argument when invoked as `cargo-cgx`.
-    ///
-    /// When cgx is invoked as a cargo subcommand (via the `cargo-cgx` binary),
-    /// cargo invokes it with argv like: `["cargo-cgx", "cgx", ...user_args]`.
-    /// This function detects that pattern and removes the redundant "cgx" argument.
-    ///
-    /// This pre-processing happens before all other argument parsing to ensure
-    /// that subsequent parsing logic sees the same argument structure regardless
-    /// of whether the user invoked `cgx` or `cargo cgx`.
-    ///
-    /// The function checks if the binary name (argv\[0\] or `std::env::current_exe()`)
-    /// contains "cargo-cgx". If so, and if argv\[1\] equals "cgx", then argv\[1\] is removed.
-    ///
-    /// # Examples
-    ///
-    /// ```text
-    /// Input:  ["cargo-cgx", "cgx", "ripgrep", "--help"]
-    /// Output: ["cargo-cgx", "ripgrep", "--help"]
-    ///
-    /// Input:  ["cgx", "ripgrep", "--help"]
-    /// Output: ["cgx", "ripgrep", "--help"]
-    ///
-    /// Input:  ["/usr/bin/cargo-cgx", "cgx", "+nightly", "just"]
-    /// Output: ["/usr/bin/cargo-cgx", "+nightly", "just"]
-    /// ```
-    fn strip_cargo_subcommand_arg<I, T>(args: I) -> Vec<String>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<String>,
-    {
-        let args: Vec<String> = args.into_iter().map(|s| s.into()).collect();
-
-        if args.is_empty() {
-            return args;
-        }
-
-        let is_cargo_subcommand = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().contains("cargo-cgx")))
-            .unwrap_or(false);
-
-        if is_cargo_subcommand && args.len() > 1 && args[1] == "cgx" {
-            let mut filtered = vec![args[0].clone()];
-            filtered.extend_from_slice(&args[2..]);
-            filtered
-        } else {
-            args
-        }
     }
 
     /// Extract `+toolchain` syntax from the first positional argument.
@@ -167,30 +142,25 @@ impl Cli {
     ///
     /// # Returns
     ///
-    /// A tuple of `(Option<String>, Vec<String>)` where:
+    /// A tuple of ([`Option<String>`], [`Vec<OsString>`]) where:
     /// - The first element is `Some(toolchain)` if `+toolchain` was found, `None` otherwise
     /// - The second element is the filtered argument list with `+toolchain` removed
-    fn extract_toolchain<I, T>(args: I) -> (Option<String>, Vec<String>)
+    fn extract_toolchain<I, T>(args: I) -> (Option<String>, Vec<OsString>)
     where
         I: IntoIterator<Item = T>,
-        T: Into<String>,
+        T: Into<OsString>,
     {
-        let args = args.into_iter().map(|s| s.into()).collect::<Vec<String>>();
-        if args.len() > 1 && args[1].starts_with('+') && args[1].len() > 1 {
-            #[expect(
-                clippy::string_slice,
-                reason = "guarded by starts_with('+') && len() > 1, so byte 1 is a valid char boundary in \
-                          range"
-            )]
-            let toolchain = args[1][1..].to_string();
-
-            let mut filtered = vec![args[0].clone()];
-            filtered.extend_from_slice(&args[2..]);
-
-            (Some(toolchain), filtered)
-        } else {
-            (None, args)
+        let mut args = args.into_iter().map(Into::into).collect::<Vec<OsString>>();
+        let toolchain = args
+            .get(1)
+            .and_then(|arg| arg.to_str())
+            .and_then(|arg| arg.strip_prefix('+'))
+            .filter(|toolchain| !toolchain.is_empty())
+            .map(str::to_owned);
+        if toolchain.is_some() {
+            args.remove(1);
         }
+        (toolchain, args)
     }
 
     /// Parse an arbitrary argument iterator for tests, panicking on parse or validation errors.
@@ -213,8 +183,7 @@ impl Cli {
     {
         // Prepend the executable name, as clap expects, so callers don't have to.
         let args = std::iter::once(OsString::from("cgx")).chain(args.into_iter().map(|s| s.into()));
-        let args: Vec<String> = args.map(|s| s.to_string_lossy().to_string()).collect();
-        Self::parse_from_arg_strings(args, None)
+        Self::parse_from_args(args.collect(), None)
     }
 
     /// Borrow the [`CrateArgs`] of a crate-level command, panicking on commands that don't
@@ -238,6 +207,92 @@ impl Cli {
             Cli::Run { tool_args, .. } => tool_args,
             _ => &[],
         }
+    }
+}
+
+/// Executable mode selects how `cgx` is being invoked, which in turn determines its behavior
+enum ExecutableMode {
+    /// `cgx` is being run as a program called `cgx`, meaning the normal `cgx` CLI should be used,
+    /// where the crate name is passed as an argument along with other optional args
+    Normal,
+
+    /// `cargo-cgx` is being invoked as a cargo subcommand `cargo cgx $SOMETHING`, where the user
+    /// invokes `cargo` and `cargo` in turn runs `cargo-cgx`.
+    ///
+    /// When cgx is invoked as a cargo subcommand (via the `cargo-cgx` binary),
+    /// cargo invokes it with argv like: `["cargo-cgx", "cgx", ...user_args]`.
+    /// The parser detects that pattern and removes the redundant "cgx" argument.
+    ///
+    /// This pre-processing happens before all other argument parsing to ensure
+    /// that subsequent parsing logic sees the same argument structure regardless
+    /// of whether the user invoked `cgx` or `cargo cgx`.
+    ///
+    /// The parser checks if the binary name (`argv[0]`'s basename) is `cargo-cgx`,
+    /// optionally followed by a nonempty `@VERSION` suffix. On Windows, the `.exe` suffix
+    /// and differences in case are ignored. If so, and if `argv[1]` equals "cgx",
+    /// then `argv[1]` is removed.
+    ///
+    /// # Examples
+    ///
+    /// ```text
+    /// Input:  ["cargo-cgx", "cgx", "ripgrep", "--help"]
+    /// Output: ["cargo-cgx", "ripgrep", "--help"]
+    ///
+    /// Input:  ["cgx", "ripgrep", "--help"]
+    /// Output: ["cgx", "ripgrep", "--help"]
+    ///
+    /// Input:  ["/usr/bin/cargo-cgx", "cgx", "+nightly", "just"]
+    /// Output: ["/usr/bin/cargo-cgx", "+nightly", "just"]
+    /// ```
+    CargoWrapper,
+
+    /// `cgx` is being invoked via a symlink pointing to `symlink` named after the crate to run.
+    ///
+    /// In this case, none of the `cgx` or `cargo-cgx` CLI syntax is used, `cgx` must work as a
+    /// drop-in passthrough to the specified crate (assuming it exists).  This is equivalent to
+    /// running `cgx $CRATE $CRATE_ARGS`.
+    Tool(String),
+}
+
+impl ExecutableMode {
+    /// Determine which executable mode to use, based on the `argv[0]` value.
+    fn classify(argv0: Option<&OsStr>) -> Result<Self, clap::Error> {
+        let Some(argv0) = argv0.filter(|name| !name.is_empty()) else {
+            // It's not expected that there is *literally* no argv at all, but in that case just
+            // fall back to normal `cgx` CLI mode.  Since there are nor args, this will print usage
+            // and exit.
+            return Ok(Self::Normal);
+        };
+        let name = Path::new(argv0).file_name().unwrap_or(argv0);
+        let name = name.to_str().ok_or_else(|| {
+            clap::Error::raw(
+                ErrorKind::InvalidUtf8,
+                "executable crate name must be valid Unicode\n",
+            )
+        })?;
+        #[cfg(windows)]
+        let name = name
+            .rsplit_once('.')
+            .filter(|(_, extension)| extension.eq_ignore_ascii_case(std::env::consts::EXE_EXTENSION))
+            .map_or(name, |(stem, _)| stem);
+        let base = name
+            .split_once('@')
+            .filter(|(_, suffix)| !suffix.is_empty())
+            .map_or(name, |(base, _)| base);
+        let canonical_name = |expected: &str| {
+            if cfg!(windows) {
+                base.eq_ignore_ascii_case(expected)
+            } else {
+                base == expected
+            }
+        };
+        Ok(if canonical_name("cgx") {
+            Self::Normal
+        } else if canonical_name("cargo-cgx") {
+            Self::CargoWrapper
+        } else {
+            Self::Tool(name.to_owned())
+        })
     }
 }
 
@@ -778,7 +833,8 @@ struct RawCli {
     #[command(flatten)]
     reporting: ReportingArgs,
 
-    /// The crate to run plus any trailing tool arguments, captured raw via an external subcommand.
+    /// The crate to run plus any trailing tool arguments, captured raw via an external subcommand
+    /// or supplied by executable-name classification.
     ///
     /// This is the trick we use to be able to capture anything other than a recognized argument as
     /// the name of a crate followed by args to that crate.
@@ -793,6 +849,24 @@ struct RawCli {
 }
 
 impl RawCli {
+    /// Special-case in which there are no command line args for us to parse because the crate name
+    /// is specified by the name of the symlink that was used to invoke our binary.
+    ///
+    /// There's little for clap to do here because all of the command line args must be passed
+    /// verbatim to the tool being invoked.  The only thing clap does is provide defaults or args
+    /// set via env var.  No attempt is made to parse the CLI args at all.
+    fn from_argv0(argv0: String, tool_args: Vec<OsString>) -> Result<Self, clap::Error> {
+        // Parse only defaults, including clap's environment-backed settings. The original
+        // tail belongs entirely to the tool, not even its separators are cgx syntax.
+        Ok(Self {
+            invocation: Some(Invocation::ExecutableName {
+                crate_spec: argv0,
+                tool_args,
+            }),
+            ..Self::try_parse_from(std::iter::empty::<OsString>())?
+        })
+    }
+
     /// Validate the raw parse and render it into a typed [`Cli`] command.
     ///
     /// This is the single location where advanced CLI validation (which `clap` is not expressive
@@ -827,7 +901,10 @@ impl RawCli {
             crate_spec,
             mut tool_args,
             cargo_subcommand,
-        } = invocation.map(Invocation::normalize).unwrap_or_default();
+        } = invocation
+            .map(Invocation::normalize)
+            .transpose()?
+            .unwrap_or_default();
 
         if prefetch_all {
             let mode = "--prefetch-all";
@@ -1021,8 +1098,20 @@ impl RawCli {
 // command's `--help` text.
 #[derive(Clone, Debug, Subcommand)]
 enum Invocation {
+    // The crate name is supplied as an argument to `cgx`, followed by tool arguments. Clap
+    // captures both as an external subcommand; normalization applies `cgx`'s separator and
+    // Cargo plugin syntax.
     #[command(external_subcommand)]
-    Crate(Vec<OsString>),
+    CrateArgument(Vec<OsString>),
+
+    // The executable basename supplies the crate name, and its argument tail belongs to the tool.
+    // This variant is constructed after classification, not parsed by clap. `skip` keeps it out
+    // of clap's grammar so it cannot reserve a crate name; normalization preserves the tail.
+    #[command(skip)]
+    ExecutableName {
+        crate_spec: String,
+        tool_args: Vec<OsString>,
+    },
 }
 
 /// The crate specification and arguments obtained by normalizing an [`Invocation`].
@@ -1045,14 +1134,26 @@ struct NormalizedInvocation {
 
 impl Invocation {
     /// Normalize the invocation into a crate spec and trailing tool arguments.
-    fn normalize(self) -> NormalizedInvocation {
-        let Self::Crate(mut parts) = self;
+    fn normalize(self) -> Result<NormalizedInvocation, clap::Error> {
+        let mut parts = match self {
+            Self::CrateArgument(parts) => parts,
+            Self::ExecutableName {
+                crate_spec,
+                tool_args,
+            } => {
+                return Ok(NormalizedInvocation {
+                    crate_spec: Some(crate_spec),
+                    tool_args,
+                    cargo_subcommand: None,
+                });
+            }
+        };
         if parts.is_empty() {
-            return NormalizedInvocation::default();
+            return Ok(NormalizedInvocation::default());
         }
 
         let mut cargo_subcommand = None;
-        let crate_spec = parts.remove(0).to_string_lossy().into_owned();
+        let crate_spec = Self::crate_identity(parts.remove(0))?;
 
         // Does this look like the user is using cgx to invoke a cargo subcommand, ala `cgx cargo
         // deny`? If so remove `cargo` and extract the subcommand name to properly form the
@@ -1068,9 +1169,9 @@ impl Invocation {
             // [`CrateArgs::crate_request`] rejects as unrunnable.
             if parts
                 .first()
-                .is_some_and(|arg| !arg.to_string_lossy().starts_with('-'))
+                .is_some_and(|arg| !arg.as_encoded_bytes().starts_with(b"-"))
             {
-                let subcommand = parts.remove(0).to_string_lossy().into_owned();
+                let subcommand = Self::crate_identity(parts.remove(0))?;
                 let name = subcommand
                     .split_once('@')
                     .map_or(subcommand.as_str(), |(name, _)| name);
@@ -1092,11 +1193,16 @@ impl Invocation {
             tool_args.remove(0);
         }
 
-        NormalizedInvocation {
+        Ok(NormalizedInvocation {
             crate_spec: Some(crate_spec),
             tool_args,
             cargo_subcommand,
-        }
+        })
+    }
+
+    fn crate_identity(name: OsString) -> Result<String, clap::Error> {
+        name.into_string()
+            .map_err(|_name| clap::Error::raw(ErrorKind::InvalidUtf8, "crate name must be valid Unicode\n"))
     }
 }
 
@@ -1241,6 +1347,212 @@ mod tests {
         for (args, expected) in cases {
             let verbosity = Cli::parse_from_test_args(args).verbosity();
             assert_eq!(verbosity, expected);
+        }
+    }
+
+    mod executable_names {
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStringExt;
+        #[cfg(windows)]
+        use std::os::windows::ffi::OsStringExt;
+
+        use super::*;
+
+        fn parse(args: &[&str]) -> Cli {
+            Cli::parse_from_args(args.iter().map(OsString::from).collect(), Some("1.2.3".into())).unwrap()
+        }
+
+        #[test]
+        fn canonical_names_keep_cgx_grammar() {
+            for name in [
+                "cgx",
+                "cgx@1",
+                "cgx@=0.1.2",
+                "cargo-cgx",
+                "cargo-cgx@1",
+                "cargo-cgx@=0.1.2",
+            ] {
+                let cli = parse(&[name, "+nightly", "--offline", "cargo", "deny@1", "--", "--help"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo-deny@1"));
+                assert_eq!(cli.crate_args().toolchain.as_deref(), Some("nightly"));
+                assert!(cli.crate_args().cargo.offline);
+                assert_eq!(cli.tool_args(), ["deny", "--help"]);
+                assert_matches!(parse(&[name, "--list-tools"]), Cli::ListTools(_));
+                assert_matches!(parse(&[name, "--prefetch", "ripgrep"]), Cli::Prefetch(_));
+                let cli = parse(&[name, "--path", "."]);
+                assert_eq!(cli.crate_args().crate_spec, None);
+                assert_matches!(cli.crate_args().source, Source::Path { .. });
+                for (flag, kind) in [
+                    ("--help", ErrorKind::DisplayHelp),
+                    ("--version", ErrorKind::DisplayVersion),
+                ] {
+                    let err = Cli::parse_from_args(vec![name.into(), flag.into()], Some("1.2.3".into()))
+                        .unwrap_err();
+                    assert_eq!(err.kind(), kind, "{name} {flag}");
+                }
+            }
+        }
+
+        #[test]
+        fn only_cargo_wrapper_strips_initial_cgx() {
+            for name in ["cargo-cgx", "cargo-cgx@1", "cargo-cgx@=0.1.2"] {
+                let cli = parse(&[name, "cgx", "+nightly", "ripgrep", "--help"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("ripgrep"));
+                assert_eq!(cli.crate_args().toolchain.as_deref(), Some("nightly"));
+                assert_eq!(cli.tool_args(), ["--help"]);
+            }
+            for name in ["cgx", "cgx@1", "cgx@=0.1.2"] {
+                let cli = parse(&[name, "cgx", "--help"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cgx"));
+                assert_eq!(cli.tool_args(), ["--help"]);
+            }
+            let cli = parse(&["rg", "cgx", "--help"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("rg"));
+            assert_eq!(cli.tool_args(), ["cgx", "--help"]);
+        }
+
+        #[test]
+        fn tool_name_owns_the_entire_tail() {
+            let tails: &[&[&str]] = &[
+                &[],
+                &["pattern", "file"],
+                &["--help"],
+                &["--version"],
+                &[
+                    "--offline",
+                    "--git",
+                    "url",
+                    "--path",
+                    ".",
+                    "--prefetch",
+                    "--list-tools",
+                ],
+                &["+nightly", "pattern"],
+                &["--", "--", "--help", ""],
+                &["--config-file", "cgx.toml", "--", "cgx"],
+            ];
+            for tail in tails {
+                let args: Vec<_> = std::iter::once("rg").chain(tail.iter().copied()).collect();
+                let cli = parse(&args);
+                assert_matches!(cli, Cli::Run { .. });
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("rg"));
+                assert_eq!(cli.tool_args(), *tail);
+                assert_eq!(cli.crate_args().toolchain, None);
+                assert!(!cli.crate_args().cargo.offline);
+                assert_matches!(cli.crate_args().source, Source::Default);
+            }
+            let cli = parse(&["cargo-deny", "--", "check"]);
+            assert_eq!(cli.tool_args(), ["--", "check"]);
+            let cli = parse(&["cargo", "deny", "--"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("cargo"));
+            assert_eq!(cli.tool_args(), ["deny", "--"]);
+        }
+
+        #[test]
+        fn basename_is_exact_and_preserves_tool_versions() {
+            for (path, expected) in [
+                ("/bin/rg", "rg"),
+                ("/bin/rg@=14.0.0", "rg@=14.0.0"),
+                ("/cargo-cgx/rg", "rg"),
+                ("my-cargo-cgx", "my-cargo-cgx"),
+                ("cgx-helper", "cgx-helper"),
+                ("cgx@", "cgx@"),
+                ("cargo-cgx@", "cargo-cgx@"),
+                ("rg.debug", "rg.debug"),
+            ] {
+                let cli = parse(&[path, "cgx"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(expected));
+                assert_eq!(cli.tool_args(), ["cgx"]);
+            }
+            assert_matches!(parse(&["/bin/cgx@1", "--list-tools"]), Cli::ListTools(_));
+            assert_matches!(
+                parse(&["/bin/cargo-cgx@1", "cgx", "--list-tools"]),
+                Cli::ListTools(_)
+            );
+        }
+
+        #[test]
+        fn tool_specs_use_existing_alias_and_pin_resolution() {
+            let mut config = Config::default();
+            config.aliases.insert("rg".into(), "ripgrep".into());
+            config.aliases.insert("ripgrep".into(), "ripgrep".into());
+            config
+                .tools
+                .insert("ripgrep".into(), ToolConfig::Version("=14.0.0".into()));
+            for (name, version) in [
+                ("rg", "=14.0.0"),
+                ("ripgrep", "=14.0.0"),
+                ("rg@15", "15"),
+                ("ripgrep@15", "15"),
+            ] {
+                let cli = parse(&[name]);
+                let request = cli.crate_args().crate_request().unwrap();
+                let spec = CrateSpec::load(&config, &request).unwrap();
+                assert_matches!(spec, CrateSpec::CratesIo { name, version: Some(actual) }
+                    if name == "ripgrep" && actual == semver::VersionReq::parse(version).unwrap());
+            }
+        }
+
+        #[test]
+        fn absent_or_empty_argv0_uses_normal_grammar() {
+            for args in [vec![], vec![OsString::new()]] {
+                let err = Cli::parse_from_args(args, None).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+            }
+            let cli = parse(&["", "ripgrep", "--help"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("ripgrep"));
+            assert_eq!(cli.tool_args(), ["--help"]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unix_names_are_literal() {
+            for name in ["CGX", "cgx.exe", "cargo-cgx.exe", "cgx.debug"] {
+                let cli = parse(&[name, "--help"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(name));
+                assert_eq!(cli.tool_args(), ["--help"]);
+            }
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn windows_names_ignore_case_and_exe_extension() {
+            for name in [r"C:\bin\CGX.EXE", "cgx@1.ExE", "CGX@=0.1.2.exe"] {
+                assert_matches!(parse(&[name, "--list-tools"]), Cli::ListTools(_));
+            }
+            for name in ["CARGO-CGX.EXE", "cargo-cgx@1.ExE", "CARGO-CGX@=0.1.2.exe"] {
+                assert_matches!(parse(&[name, "cgx", "--list-tools"]), Cli::ListTools(_));
+            }
+            let cli = parse(&[r"C:\bin\rg@14.EXE", "--help"]);
+            assert_eq!(cli.crate_args().crate_spec.as_deref(), Some("rg@14"));
+            assert_eq!(cli.tool_args(), ["--help"]);
+        }
+
+        #[cfg(any(unix, windows))]
+        #[test]
+        fn non_unicode_arguments_are_preserved_but_identities_are_rejected() {
+            #[cfg(unix)]
+            let non_unicode = OsString::from_vec(vec![0xff]);
+            #[cfg(windows)]
+            let non_unicode = OsString::from_wide(&[0xd800]);
+            for prefix in [
+                vec!["rg"],
+                vec!["cgx", "ripgrep"],
+                vec!["cargo-cgx", "cgx", "ripgrep"],
+            ] {
+                let mut args: Vec<_> = prefix.into_iter().map(OsString::from).collect();
+                args.push(non_unicode.clone());
+                let cli = Cli::parse_from_args(args, None).unwrap();
+                assert_eq!(cli.tool_args(), [non_unicode.clone()]);
+            }
+            for args in [
+                vec![non_unicode.clone()],
+                vec!["cgx".into(), non_unicode.clone()],
+                vec!["cgx".into(), "cargo".into(), non_unicode],
+            ] {
+                let err = Cli::parse_from_args(args, None).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::InvalidUtf8);
+            }
         }
     }
 
@@ -2614,6 +2926,15 @@ mod tests {
         }
 
         #[test]
+        fn invocation_variants_do_not_reserve_crate_names() {
+            for crate_spec in ["crate-argument", "executable-name"] {
+                let cli = run(&[crate_spec, "--", "--help"]);
+                assert_eq!(cli.crate_args().crate_spec.as_deref(), Some(crate_spec));
+                assert_eq!(tool_args(&cli), ["--help"]);
+            }
+        }
+
+        #[test]
         fn cgx_flags_before_crate_are_not_tool_args() {
             let cli = run(&["--features", "foo", "ripgrep", "--color=always", "-i"]);
             let invocation = cli.crate_args();
@@ -2867,38 +3188,6 @@ mod tests {
             assert_eq!(cli.crate_args().http.http_timeout, None);
             let tool_args: Vec<&str> = cli.tool_args().iter().map(|arg| arg.to_str().unwrap()).collect();
             assert_eq!(tool_args, ["--http-timeout", "5s"]);
-        }
-    }
-
-    mod strip_cargo_subcommand_arg {
-        use super::*;
-
-        #[test]
-        fn test_leaves_normal_invocation_unchanged() {
-            let args = vec!["cgx", "ripgrep", "--help"];
-            let result = Cli::strip_cargo_subcommand_arg(args.clone());
-            assert_eq!(result, args);
-        }
-
-        #[test]
-        fn test_leaves_cargo_without_cgx_unchanged() {
-            let args = vec!["cargo-cgx", "ripgrep", "--help"];
-            let result = Cli::strip_cargo_subcommand_arg(args.clone());
-            assert_eq!(result, args);
-        }
-
-        #[test]
-        fn test_empty_args() {
-            let args: Vec<String> = vec![];
-            let result = Cli::strip_cargo_subcommand_arg(args.clone());
-            assert_eq!(result, args);
-        }
-
-        #[test]
-        fn test_single_arg() {
-            let args = vec!["cargo-cgx"];
-            let result = Cli::strip_cargo_subcommand_arg(args.clone());
-            assert_eq!(result, args);
         }
     }
 }
