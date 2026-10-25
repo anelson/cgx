@@ -692,7 +692,14 @@ impl RealCrateBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{
+        fs,
+        io::ErrorKind,
+        path::Path,
+        process::{Command, Stdio},
+        thread,
+        time::Duration,
+    };
 
     use assert_matches::assert_matches;
     use semver::Version;
@@ -851,9 +858,35 @@ mod tests {
 
     /// Run the timestamp binary and parse its output.
     fn run_timestamp_binary(path: &Path) -> TimestampOutput {
-        let output = std::process::Command::new(path)
-            .output()
-            .unwrap_or_else(|e| panic!("Failed to execute timestamp binary at {}: {}", path.display(), e));
+        let mut command = Command::new(path);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Other tests' child processes can briefly retain a writable descriptor to the cached binary.
+        // https://github.com/rust-lang/rust/issues/114554
+        let mut retries = 0;
+        let child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.kind() == ErrorKind::ExecutableFileBusy && retries < 10 => {
+                    thread::sleep(Duration::from_millis((1_u64 << retries).min(128)));
+                    retries += 1;
+                }
+                Err(error) => panic!(
+                    "Failed to execute timestamp binary at {} on attempt {}: {error}",
+                    path.display(),
+                    retries + 1
+                ),
+            }
+        };
+        let output = child.wait_with_output().unwrap_or_else(|error| {
+            panic!(
+                "Failed to collect timestamp binary output at {}: {error}",
+                path.display()
+            )
+        });
 
         assert!(
             output.status.success(),
@@ -1191,7 +1224,7 @@ mod tests {
             assert_eq!(binary1_name, expected_bin_name("timestamp"));
             let output1 = run_timestamp_binary(&binary1);
 
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100));
 
             let krate2 = fake_downloaded_crate(
                 &tc,
