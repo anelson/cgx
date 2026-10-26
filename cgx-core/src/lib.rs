@@ -12,6 +12,12 @@ pub mod git;
 pub(crate) mod helpers;
 pub(crate) mod http;
 pub(crate) mod logging;
+/// **INTERNAL - DO NOT USE IN PRODUCTION CODE**
+///
+/// Internal messaging types exposed solely for integration testing. This is NOT a stable interface
+/// and WILL break without warning, outside of semver guarantees. If you need a stable messages
+/// interface, please open an issue with your use case for discussion.
+#[doc(hidden)]
 pub mod messages;
 pub(crate) mod registry;
 pub mod runner;
