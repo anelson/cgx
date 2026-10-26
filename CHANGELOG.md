@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.2.0] - 2026-10-26
+
+### 🚀 Features
+
+- Allow the tool name to be specified by argv[0] when invoked via a symlink ([#293](https://github.com/anelson/cgx/pull/293))
+
+### 🐛 Bug Fixes
+
+- Fix flaky Linux tests
+- Restrict prebuilt binaries to compatible crate sources ([#288](https://github.com/anelson/cgx/pull/288))
+- Set the `CARGO` env var when invoking a Cargo subcommand ([#294](https://github.com/anelson/cgx/pull/294))
+
+### 📚 Documentation
+
+- Correct and clarify versioning of Github Action ([#289](https://github.com/anelson/cgx/pull/289))
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.lock dependencies
+- Re-apply fmt with the latest nightly
 ## [0.1.2] - 2026-10-17
 
 ### 🐛 Bug Fixes
