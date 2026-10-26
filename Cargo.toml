@@ -64,7 +64,7 @@ vergen-gix         = { version = "1.0.9", default-features = false }
 which              = "8.0.2"
 xz2                = "0.1.7"
 zip                = "7.2.0"
-zstd               = "0.14.0"
+zstd               = "0.14.3"
 
 # The profile that 'dist' will build with
 [profile.dist]

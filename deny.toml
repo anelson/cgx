@@ -37,6 +37,14 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # zip 7.2.0 requires zstd 0.13 / zstd-safe 7; upgrading zip requires Rust 1.88.
+  # The direct zstd dependency requires 0.14.3, which includes the patched zstd-safe 8.2.0.
+  # zip creates a fresh read decoder for each entry and never reuses contexts via `with_context`.
+  "RUSTSEC-2026-0391",
+  # The affected seekable API is feature-gated and not enabled in zip's zstd-safe dependency.
+  "RUSTSEC-2026-0398",
+  # zip uses stream::read::Decoder, which is unaffected; the leak requires stream::write::Decoder.
+  "RUSTSEC-2026-0403",
 ]
 version = 2
 yanked = "warn"
@@ -92,6 +100,10 @@ skip = [
   # reqwest 0.13.5 uses base64 0.23, while gix-transport, headers and test-only
   # httpmock still use base64 0.22 in their latest releases.
   { name = "base64", version = "0.22" },
+  # zip 7.2.0 requires zstd 0.13 / zstd-safe 7, while cgx-core uses patched zstd 0.14 / zstd-safe 8.
+  # Updating zip requires Rust 1.88 (we're on 1.85.1).
+  { name = "zstd", version = "0.13" },
+  { name = "zstd-safe", version = "7" },
 ]
 skip-tree = [
   # vergen-gix (build dep) uses older gix 0.71
