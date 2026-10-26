@@ -267,7 +267,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cgx
-        uses: anelson/cgx@v0.1.1
+        uses: anelson/cgx@master
 
       - name: Run release-plz
         id: release-plz

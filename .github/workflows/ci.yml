@@ -193,7 +193,7 @@ jobs:
           tool: just
 
       - name: Install cgx
-        uses: anelson/cgx@v0.1.1
+        uses: anelson/cgx@master
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -233,7 +233,7 @@ jobs:
           tool: just
 
       - name: Install cgx
-        uses: anelson/cgx@v0.1.1
+        uses: anelson/cgx@master
 
       - name: Install taplo
         uses: taiki-e/install-action@v2.87.28
