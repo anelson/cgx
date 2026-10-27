@@ -271,7 +271,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@v0.5.141
+        uses: release-plz/action@v0.5.143
         with:
           command: release-pr
         env:

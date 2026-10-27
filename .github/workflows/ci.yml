@@ -85,17 +85,17 @@ jobs:
           toolchain: 1.85.1
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: just
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-deny@0.19.0
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-machete@0.8.0
 
@@ -188,7 +188,7 @@ jobs:
       - *install-rust
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: just
 
@@ -228,7 +228,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install just
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: just
 
@@ -236,17 +236,17 @@ jobs:
         uses: anelson/cgx@master
 
       - name: Install taplo
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: taplo
 
       - name: Install ast-grep
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: ast-grep
 
       - name: Install typos
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: typos@1.44.0
 
@@ -270,12 +270,12 @@ jobs:
         run: taplo fmt --check
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-deny@0.19.0
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-machete@0.8.0
 
