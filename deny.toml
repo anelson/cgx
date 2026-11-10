@@ -31,12 +31,16 @@ ignore = [
   # RFC 2822 date strings, so this vulnerability is not exploitable in practice.
   "RUSTSEC-2026-0009",
   # zip < 9.0.0 `ZipArchive::extract` keeps SUID/SGID bits, creates symlinks to targets outside the destination
-  # directory, and applies permissions through symlinks. Fix requires Rust 1.88 (we're on 1.85.1).
+  # directory, and applies permissions through symlinks. Fix requires Rust 1.88 (which exceeds our MSRV).
   # cgx extracts only archives of prebuilt binaries that it downloads in order to run them, so whoever controls an
   # archive's contents can already run arbitrary code as the user.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # zip < 9.0.0 `ZipArchive::extract` can abort on a symlink's declared size.
+  # Fix requires Rust 1.88 (which exceeds our MSRV). cgx only extracts prebuilt binaries it then executes, so archive
+  # publishers are already trusted to run arbitrary code as the user.
+  "RUSTSEC-2026-0429",
   # zip 7.2.0 requires zstd 0.13 / zstd-safe 7; upgrading zip requires Rust 1.88.
   # The direct zstd dependency requires 0.14.3, which includes the patched zstd-safe 8.2.0.
   # zip creates a fresh read decoder for each entry and never reuses contexts via `with_context`.
